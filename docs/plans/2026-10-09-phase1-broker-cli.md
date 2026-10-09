@@ -26,6 +26,7 @@ Each was checked against the frp v0.71.0 and Pocket ID v2.18.0 source or by a sp
 8. **The e2e test builds frps from the pinned module** (`go build -tags noweb`, via a `tool` directive that keeps its dependencies in `go.sum`), not from the container. Same source as the image; no Docker needed.
 9. **Phase 1 `/authz` uses only `X-Tunnels-Sub` and `X-Tunnels-User`.** The groups header returns with sharing (plan 3).
 10. **Dockerfiles are named per component** (`Dockerfile.broker`, `Dockerfile.frps`): the repo holds several deliverables, so a bare `Dockerfile` should not mean "the broker".
+11. **The identity provider client is named for what it is (`internal/idp`), not for one provider**, and the userinfo claim names for the username and the groups are options (`USERNAME_CLAIM`, `GROUPS_CLAIM`), because `groups` is a convention, not a standard.
 
 ## Global Constraints
 
@@ -37,7 +38,7 @@ Every task's requirements include this section.
 - Pocket ID: issuer `https://idp.layertwo.dev` (no trailing slash); API resource `https://tunnels.layertwo.dev`; groups `tunnels-creators` (may connect) and `tunnels-viewers`; the `groups` claim carries group *Names*; CLI client `tunnels-cli` (public, device flow), scopes `openid profile groups offline_access`, `resource` = the API.
 - Names: handle = the lowercased username, only if the **original** matches `^[A-Za-z0-9]{2,20}$` (ASCII check before lowercasing, so U+212A never becomes `k`); reserved `admin`, `root`, `support`, `security`. Tunnel name `^[a-z0-9]([a-z0-9-]{0,40}[a-z0-9])?$`, `default` reserved. Label = `<handle>` or `<handle>-<name>` (at most 63 characters; owner = text before the first dash). Proxy name `<handle>.<name>`, default tunnel `<handle>.default`. Host matching is case-insensitive; a port, a trailing dot, an extra label or a comma is malformed.
 - Plugin protocol: frps sends `POST <addr>/plugin/<secret>?version=0.1.0&op=<Op>` with `{"version","op","content"}`. Every decision is HTTP 200 with `{"reject","reject_reason","unchange","content"}`; any other status reaches the client as an opaque "send Login request to plugin error". A hook that changes content returns the **whole** content with `unchange:false`. The hook never changes `privilege_key`. Fail closed: a dependency error rejects.
-- Broker env (name = default): `SERVICE_HOST`, `SITES_DOMAIN`, `ISSUER`, `API_RESOURCE`, `CREATORS_GROUP`, `CLI_CLIENT_ID`, `MIN_CLI_VERSION` = `0.0.0`, `DATABASE_URL`, `FRPS_DASHBOARD_URL`, `FRPS_DASHBOARD_USER`, `FRPS_DASHBOARD_PASSWORD`, `PLUGIN_SECRET`, `MAX_TUNNELS_PER_USER` = `5`, `DEFAULT_BANDWIDTH_LIMIT` = `10MB` (mode `server`), `RESERVED_HANDLES` = `admin,root,support,security`, `LISTEN_ADDR` = `:8080`, `LOG_LEVEL` = `info`. Everything without a default is required.
+- Broker env (name = default): `SERVICE_HOST`, `SITES_DOMAIN`, `ISSUER`, `API_RESOURCE`, `CREATORS_GROUP`, `USERNAME_CLAIM` = `preferred_username`, `GROUPS_CLAIM` = `groups`, `CLI_CLIENT_ID`, `MIN_CLI_VERSION` = `0.0.0`, `DATABASE_URL`, `FRPS_DASHBOARD_URL`, `FRPS_DASHBOARD_USER`, `FRPS_DASHBOARD_PASSWORD`, `PLUGIN_SECRET`, `MAX_TUNNELS_PER_USER` = `5`, `DEFAULT_BANDWIDTH_LIMIT` = `10MB` (mode `server`), `RESERVED_HANDLES` = `admin,root,support,security`, `LISTEN_ADDR` = `:8080`, `LOG_LEVEL` = `info`. Everything without a default is required.
 - `/authz` reads `X-Forwarded-Host`, `X-Tunnels-Sub`, `X-Tunnels-User`; allow = 200 plus `X-Tunnel-User: <username>`; every other outcome is the same empty 403 (503 on an infrastructure error).
 - Client config: `transport.protocol = wss` to `tunnels.layertwo.dev:443`, `user = <handle>`, `auth.method = oidc`, `auth.additionalScopes = ["HeartBeats"]`, `auth.oidc.tokenSource` type `file`, `transport.heartbeatInterval = 30`, `transport.tls.trustedCaFile` always set for `wss`, the only production protocol (frp skips certificate verification otherwise), proxy `requestHeaders.set.x-forwarded-proto = "https"` (frps rewrites it to `http`).
 - Files: user-private files 0600; token files are written atomically (temp file in the same directory, then rename). Logs: `log/slog` JSON, never a token, the plugin secret or `privilege_key`. Every outbound request has a 10 s deadline and `User-Agent: tunnels/<version>`.
@@ -62,7 +63,7 @@ Every task's requirements include this section.
 | `internal/store` | pgx pool, embedded migrations, `users` |
 | `internal/httpx` | HTTP client with deadline and `User-Agent` |
 | `internal/mockidp` | Pocket ID test double mirroring v2.18.0 behaviour (tests only) |
-| `internal/pocketid` | discovery, userinfo, access-token verification |
+| `internal/idp` | the OIDC identity provider: discovery, userinfo, access-token verification (any provider; claim names are options) |
 | `internal/frpsapi` | frps dashboard v2 client |
 | `internal/broker` | `account.go` (resolver), `hooks.go`, `authz.go`, `config.go`, `server.go` (routes, `/api/me`, well-known, healthz) |
 | `internal/auth` | CLI: bootstrap, device login, token files, refresh |
@@ -185,10 +186,10 @@ Settles design Verification 6 and 7 against the real service before code depends
 - [ ] **Step 5: CI.** In the `test` job add `services.postgres` (`image: public.ecr.aws/docker/library/postgres:17`, `POSTGRES_PASSWORD: postgres`, port 5432, a `pg_isready` health check) and `TEST_DATABASE_URL` as above. No plain Postgres image exists on ghcr; this is the ECR Public mirror of the official image.
 - [ ] **Step 6: Commit.** `feat(store): add users table with idempotent creation`.
 
-### Task 3: `httpx`, `mockidp` and `pocketid`
+### Task 3: `httpx`, `mockidp` and `idp`
 
 **Files:**
-- Create: `internal/httpx/httpx.go`, `internal/mockidp/mockidp.go`, `internal/pocketid/pocketid.go`, `internal/pocketid/pocketid_test.go`
+- Create: `internal/httpx/httpx.go`, `internal/mockidp/mockidp.go`, `internal/idp/idp.go`, `internal/idp/idp_test.go`
 
 **Interfaces:**
 - Produces:
@@ -197,10 +198,13 @@ Settles design Verification 6 and 7 against the real service before code depends
   // package httpx
   func Client(userAgent string, timeout time.Duration) *http.Client   // sets User-Agent on every request
 
-  // package pocketid
-  type Identity struct { Sub, Username string; Groups []string }
+  // package idp
+  type Identity struct { Sub, Username string; Groups []string }   // Username and Groups come from userinfo claims
   var ErrInvalidToken error                             // the IdP answered 401 or 403 for the token
-  func New(ctx context.Context, issuer, apiResource, userAgent string) (*Client, error)   // OIDC discovery
+  type Option func(*Client)
+  func WithUsernameClaim(name string) Option               // default preferred_username; empty keeps it
+  func WithGroupsClaim(name string) Option                 // default groups, a list of strings; empty keeps it
+  func New(ctx context.Context, issuer, apiResource, userAgent string, opts ...Option) (*Client, error)   // OIDC discovery
   func (c *Client) UserInfo(ctx context.Context, accessToken string) (Identity, error)    // other failures are plain errors
   func (c *Client) VerifyAccessToken(ctx context.Context, raw string) (sub string, err error) // signature, issuer, exp, aud contains apiResource
 
@@ -218,11 +222,11 @@ Settles design Verification 6 and 7 against the real service before code depends
 
   `mockidp` serves `/.well-known/openid-configuration` (issuer, token, userinfo, jwks and device endpoints, RS256), `/jwks`, `/userinfo`, `/device/authorize`, `/token`. It must reproduce the rules that matter: userinfo answers 403 unless the token's `aud` contains the issuer **and** `scope` contains `openid`, and 401 for expired or badly signed tokens; the device authorize call takes `client_id`, `scope`, `resource` (public client, no secret) and stamps `aud = [resource, client_id, issuer]`; the token endpoint supports the device-code grant (`authorization_pending` until `Approve`) and the refresh grant (keeps `aud` and `scope`, rotates the refresh token, the old one stays valid for 60 s, `invalid_grant` after `RevokeUser`). It records the `User-Agent` of every request in `s.UserAgents []string`.
 
-- [ ] **Step 1: Write the failing tests** in `pocketid_test.go` against `mockidp`: `TestUserInfo` (username and groups returned); `TestUserInfoRejectsTokenWithoutIssuerAudience` and `...WithoutOpenidScope` (`errors.Is(err, ErrInvalidToken)`); `TestUserInfoRejectsExpiredAndGarbage` (same); `TestUserInfoServerErrorIsNotInvalidToken` (a 500 is a plain error, so callers can tell "your token is bad" from "the IdP is down"); `TestVerifyAccessToken` (ok returns the `sub`); `TestVerifyAccessTokenRefuses` (table: audience lacks the API resource, wrong issuer, expired, signed by another key); `TestSendsUserAgent` (every request the client made carries `tunnels-test/1`).
-- [ ] **Step 2: Run to verify they fail.** `go test ./internal/pocketid/ -v`. Expected: build failure, `undefined: mockidp.New`.
-- [ ] **Step 3: Implement** `httpx.Client` (a `RoundTripper` that sets the header), then `mockidp` (JWTs with `github.com/go-jose/go-jose/v4/jwt`, already in the module graph through go-oidc), then `pocketid.Client`: `oidc.NewProvider` for discovery (pass the `httpx` client with `oidc.ClientContext`); `UserInfo` is a plain `GET` of `provider.UserInfoEndpoint()` with the bearer token through the `httpx` client (go-oidc's own `UserInfo` hides the status code), 401 and 403 -> `ErrInvalidToken`; `VerifyAccessToken` uses `provider.Verifier(&oidc.Config{ClientID: apiResource})` (go-oidc checks that `aud` contains it).
+- [ ] **Step 1: Write the failing tests** in `idp_test.go` against `mockidp`: `TestUserInfo` (username and groups returned); `TestUserInfoClaimNames` (custom claim names, empty option keeps the default, absent claims stay empty, a claim of the wrong type is an error); `TestUserInfoRejectsTokenWithoutIssuerAudience` and `...WithoutOpenidScope` (`errors.Is(err, ErrInvalidToken)`); `TestUserInfoRejectsExpiredAndGarbage` (same); `TestUserInfoServerErrorIsNotInvalidToken` (a 500 is a plain error, so callers can tell "your token is bad" from "the IdP is down"); `TestVerifyAccessToken` (ok returns the `sub`); `TestVerifyAccessTokenRefuses` (table: audience lacks the API resource, wrong issuer, expired, signed by another key); `TestSendsUserAgent` (every request the client made carries `tunnels-test/1`).
+- [ ] **Step 2: Run to verify they fail.** `go test ./internal/idp/ -v`. Expected: build failure, `undefined: mockidp.New`.
+- [ ] **Step 3: Implement** `httpx.Client` (a `RoundTripper` that sets the header), then `mockidp` (JWTs with `github.com/go-jose/go-jose/v4/jwt`, already in the module graph through go-oidc), then `idp.Client`: `oidc.NewProvider` for discovery (pass the `httpx` client with `oidc.ClientContext`); `UserInfo` is a plain `GET` of `provider.UserInfoEndpoint()` with the bearer token through the `httpx` client (go-oidc's own `UserInfo` hides the status code), 401 and 403 -> `ErrInvalidToken`; `VerifyAccessToken` uses `provider.Verifier(&oidc.Config{ClientID: apiResource})` (go-oidc checks that `aud` contains it).
 - [ ] **Step 4: Run to verify they pass.** `go test -race ./internal/... -v`. Expected: PASS.
-- [ ] **Step 5: Commit.** `feat(pocketid): add userinfo and access token verification`.
+- [ ] **Step 5: Commit.** `feat(idp): check access tokens and look up identities at any OIDC provider`.
 
 ### Task 4: frps dashboard client
 
@@ -252,26 +256,26 @@ Settles design Verification 6 and 7 against the real service before code depends
 - Create: `internal/broker/account.go`, `internal/broker/account_test.go`
 
 **Interfaces:**
-- Consumes: `names.HandleFromUsername`, `store.User`, `store.ErrNotFound`, `store.ErrHandleTaken`, `pocketid.Identity`.
+- Consumes: `names.HandleFromUsername`, `store.User`, `store.ErrNotFound`, `store.ErrHandleTaken`, `idp.Identity`.
 - Produces (`package broker`):
 
   ```go
-  type IdP interface { UserInfo(ctx context.Context, accessToken string) (pocketid.Identity, error) }
+  type IdP interface { UserInfo(ctx context.Context, accessToken string) (idp.Identity, error) }
   type Users interface {
       UserBySub(ctx context.Context, sub string) (store.User, error)
       UserByHandle(ctx context.Context, handle string) (store.User, error)
       CreateUser(ctx context.Context, sub, handle string) (store.User, error)
   }
   type Account struct { Sub, Username, Handle string }
-  var ErrNotCreator, ErrDisabled, ErrBadHandle error   // a bad or expired token surfaces as pocketid.ErrInvalidToken
+  var ErrNotCreator, ErrDisabled, ErrBadHandle error   // a bad or expired token surfaces as idp.ErrInvalidToken
   type Resolver struct { IdP IdP; Users Users; CreatorsGroup string; Reserved []string }
   func (r Resolver) Resolve(ctx context.Context, accessToken string) (Account, error)
   func Reason(err error) string   // user-facing text for a refusal; "login unavailable, try again" for anything else
   ```
 
-  `Resolve`: userinfo; the identity must include `CreatorsGroup` (else `ErrNotCreator`); look the user up by `sub`; if unknown, derive the handle with `names.HandleFromUsername` (failure wraps `ErrBadHandle`) and `CreateUser`; a stored user keeps their stored handle even if the username changed or is no longer a valid handle; `Disabled` gives `ErrDisabled`. `Reason` maps `pocketid.ErrInvalidToken` to "your session is not valid; run: tunnel login".
+  `Resolve`: userinfo; the identity must include `CreatorsGroup` (else `ErrNotCreator`); look the user up by `sub`; if unknown, derive the handle with `names.HandleFromUsername` (failure wraps `ErrBadHandle`) and `CreateUser`; a stored user keeps their stored handle even if the username changed or is no longer a valid handle; `Disabled` gives `ErrDisabled`. `Reason` maps `idp.ErrInvalidToken` to "your session is not valid; run: tunnel login".
 
-- [ ] **Step 1: Write the failing tests** with fakes: `TestResolveNewUser` (row created with the lowercased handle); `TestResolveExistingUserKeepsHandle` (username changed to `Bob_Smith`, stored handle `bob` still resolves); `TestResolveRefusals` (table: no creators group -> `ErrNotCreator`; disabled -> `ErrDisabled`; username `alice_b`, `a`, `Admin` and `\u212Aevin` -> `ErrBadHandle` and `CreateUser` never called; handle owned by another sub -> `store.ErrHandleTaken`); `TestResolveFailsClosed` (IdP error and store error each return an error that `Reason` maps to "login unavailable, try again"; `pocketid.ErrInvalidToken` maps to the "run: tunnel login" text); `TestReasonMessages` (each refusal's text names what the person can do, e.g. "ask an admin to add you to tunnels-creators").
+- [ ] **Step 1: Write the failing tests** with fakes: `TestResolveNewUser` (row created with the lowercased handle); `TestResolveExistingUserKeepsHandle` (username changed to `Bob_Smith`, stored handle `bob` still resolves); `TestResolveRefusals` (table: no creators group -> `ErrNotCreator`; disabled -> `ErrDisabled`; username `alice_b`, `a`, `Admin` and `\u212Aevin` -> `ErrBadHandle` and `CreateUser` never called; handle owned by another sub -> `store.ErrHandleTaken`); `TestResolveFailsClosed` (IdP error and store error each return an error that `Reason` maps to "login unavailable, try again"; `idp.ErrInvalidToken` maps to the "run: tunnel login" text); `TestReasonMessages` (each refusal's text names what the person can do, e.g. "ask an admin to add you to tunnels-creators").
 - [ ] **Step 2: Run to verify they fail.** `go test ./internal/broker/ -run 'Resolve|Reason' -v`. Expected: `undefined: Resolver`.
 - [ ] **Step 3: Implement** `Resolver.Resolve` and `Reason` (`errors.Is` on the sentinel errors).
 - [ ] **Step 4: Run to verify they pass.** `go test -race ./internal/broker/ -v`. Expected: PASS.
@@ -344,7 +348,7 @@ Pinned by Review Focus 1 and 4.
 - Create: `internal/broker/config.go`, `internal/broker/server.go`, `internal/broker/server_test.go`, `internal/broker/config_test.go`, `cmd/broker/main.go`
 
 **Interfaces:**
-- Consumes: everything above, `pocketid.Client`, `store.Store`, `frpsapi.Client`.
+- Consumes: everything above, `idp.Client` (built with `idp.WithUsernameClaim(cfg.UsernameClaim)` and `idp.WithGroupsClaim(cfg.GroupsClaim)`), `store.Store`, `frpsapi.Client`.
 - Produces:
 
   ```go
@@ -474,9 +478,9 @@ Pinned by Review Focus 3. Design Verification 10.
 - Modify: `go.mod` (`go get -tool github.com/fatedier/frp/cmd/frps@v0.71.0`), `.github/workflows/ci.yml` (job `e2e`: Postgres service, `go test -tags e2e ./e2e/ -timeout 10m -v`)
 
 **Interfaces:**
-- Consumes: `broker.NewHandler`, `store`, `pocketid`, `frpsapi`, `mockidp`, `tunnel.Run`, `auth.KeepFresh`.
+- Consumes: `broker.NewHandler`, `store`, `idp`, `frpsapi`, `mockidp`, `tunnel.Run`, `auth.KeepFresh`.
 
-  `TestMain` skips unless `TEST_DATABASE_URL` is set, then builds frps once: `go build -tags noweb -o <tmp>/frps github.com/fatedier/frp/cmd/frps`. `newStack(t)` starts: `mockidp` with users `alice` and `bob` (both in `tunnels-creators`) and `carol` (no group); the store on a fresh schema; the broker handler on `httptest` with its real `pocketid`, `store` and `frpsapi`; frps on free ports with `auth.method="oidc"`, `auth.oidc.issuer=<mock URL>`, `auth.oidc.audience="https://tunnels.layertwo.dev"`, `auth.additionalScopes=["HeartBeats"]`, `transport.heartbeatTimeout=90`, `subDomainHost="w.test"`, the dashboard on a free port with a user and password, and `[[httpPlugins]]` pointing at the broker's `/plugin/<secret>` for Login, NewProxy and CloseProxy; and a backend `httptest` server that answers `hello`. A helper starts `tunnel.Run` with `Protocol:"tcp"`, `HeartbeatInterval:1` and a token file, returns a channel of `Status`, and stops it at cleanup.
+  `TestMain` skips unless `TEST_DATABASE_URL` is set, then builds frps once: `go build -tags noweb -o <tmp>/frps github.com/fatedier/frp/cmd/frps`. `newStack(t)` starts: `mockidp` with users `alice` and `bob` (both in `tunnels-creators`) and `carol` (no group); the store on a fresh schema; the broker handler on `httptest` with its real `idp`, `store` and `frpsapi`; frps on free ports with `auth.method="oidc"`, `auth.oidc.issuer=<mock URL>`, `auth.oidc.audience="https://tunnels.layertwo.dev"`, `auth.additionalScopes=["HeartBeats"]`, `transport.heartbeatTimeout=90`, `subDomainHost="w.test"`, the dashboard on a free port with a user and password, and `[[httpPlugins]]` pointing at the broker's `/plugin/<secret>` for Login, NewProxy and CloseProxy; and a backend `httptest` server that answers `hello`. A helper starts `tunnel.Run` with `Protocol:"tcp"`, `HeartbeatInterval:1` and a token file, returns a channel of `Status`, and stops it at cleanup.
 
 - [ ] **Step 1: Write the failing tests:**
   - `TestOwnerTunnelServesTraffic`: alice's token, status `running`; `GET http://127.0.0.1:<vhost>/` with `Host: alice.w.test` returns `hello`; `Host: bob.w.test` returns 404.

@@ -75,8 +75,8 @@ github.com/layertwo/tunnels (new repo)
 ├── cmd/tunnel/                             # CLI
 ├── internal/names/                         # handle, name and label rules, shared by both
 ├── internal/...                            # hooks, authz, store (pgx + embedded migrations),
-│                                           # pocketid client, frp config builder, token store
-├── Dockerfile                              # broker image: distroless static, non-root
+│                                           # identity-provider client (internal/idp), frp config builder, token store
+├── Dockerfile.broker                       # broker image: distroless static, non-root
 ├── Dockerfile.frps                         # pinned official frps binary on distroless (phase 1 on)
 └── .github/workflows/{ci,image,release}.yml
 ```
