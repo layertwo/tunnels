@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -155,15 +156,30 @@ func TestVerifyAccessTokenRefuses(t *testing.T) {
 	mock := newMock(t)
 	other := mockidp.New(t) // another issuer, with another key
 	c := newClient(t, mock.URL)
+	// An issuer of its own that takes its keys from mock: mock's tokens verify against these keys
+	// but name the wrong issuer, so only the issuer check can refuse them.
+	elsewhere := newClient(t, fakeIdP(t, mock, func(http.ResponseWriter, *http.Request) {}).URL)
 
-	for name, token := range map[string]string{
-		"audience lacks the API resource":   mock.Issue("u-alice", mockidp.IssueOpts{Audience: []string{mockidp.ClientID, mock.URL}}),
-		"wrong issuer, signed by other key": other.Issue("u-alice", mockidp.IssueOpts{}),
-		"expired":                           mock.Issue("u-alice", mockidp.IssueOpts{TTL: -time.Minute}),
-		"garbage":                           "not-a-jwt",
-	} {
-		t.Run(name, func(t *testing.T) {
-			_, err := c.VerifyAccessToken(t.Context(), token)
+	// mock's header and claims under another key's signature: only the signature check can refuse it.
+	good := strings.Split(mock.Issue("u-alice", mockidp.IssueOpts{}), ".")
+	foreign := strings.Split(other.Issue("u-alice", mockidp.IssueOpts{}), ".")
+	forged := good[0] + "." + good[1] + "." + foreign[2]
+
+	tests := []struct {
+		name   string
+		client *Client
+		token  string
+	}{
+		{"audience lacks the API resource", c, mock.Issue("u-alice", mockidp.IssueOpts{Audience: []string{mockidp.ClientID, mock.URL}})},
+		{"wrong issuer only", elsewhere, strings.Join(good, ".")},
+		{"bad signature only", c, forged},
+		{"wrong issuer and other key", c, other.Issue("u-alice", mockidp.IssueOpts{})},
+		{"expired", c, mock.Issue("u-alice", mockidp.IssueOpts{TTL: -time.Minute})},
+		{"garbage", c, "not-a-jwt"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := tt.client.VerifyAccessToken(t.Context(), tt.token)
 			wantInvalidToken(t, err)
 		})
 	}
