@@ -40,11 +40,16 @@ type Hooks struct {
 
 const maxBody = 1 << 20
 
-// timeout stays under the 10 s a frp client waits for its Login answer before failing with a bare
-// i/o timeout, so a slow dependency still gets a reason.
-func (h *Hooks) timeout() time.Duration { return cmp.Or(h.Timeout, 8*time.Second) }
+// defaultDecisionTimeout stays under the 10 s a frp client waits for its Login answer before failing
+// with a bare i/o timeout, so a slow dependency still gets a reason. /api/me uses it too.
+const defaultDecisionTimeout = 8 * time.Second
 
-func (h *Hooks) logger() *slog.Logger { return cmp.Or(h.Log, slog.Default()) }
+func (h *Hooks) timeout() time.Duration { return cmp.Or(h.Timeout, defaultDecisionTimeout) }
+
+func (h *Hooks) logger() *slog.Logger { return cmpLogger(h.Log) }
+
+// cmpLogger is l, or the default logger when l is nil.
+func cmpLogger(l *slog.Logger) *slog.Logger { return cmp.Or(l, slog.Default()) }
 
 func (h *Hooks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	secret, ok := strings.CutPrefix(r.URL.Path, "/plugin/")

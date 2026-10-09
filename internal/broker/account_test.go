@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/layertwo/tunnels/internal/idp"
 	"github.com/layertwo/tunnels/internal/store"
@@ -32,7 +33,9 @@ type fakeUsers struct {
 	users                            map[string]store.User // by sub
 	bySubErr, byHandleErr, createErr error
 	calls                            []string
-	block                            bool // UserByHandle waits for its context to end
+	block                            bool // UserBySub and UserByHandle wait for their context to end
+	deadline                         time.Time
+	hasDeadline                      bool // whether the context UserBySub got last had a deadline
 }
 
 func newUsers(existing ...store.User) *fakeUsers {
@@ -43,8 +46,13 @@ func newUsers(existing ...store.User) *fakeUsers {
 	return f
 }
 
-func (f *fakeUsers) UserBySub(_ context.Context, sub string) (store.User, error) {
+func (f *fakeUsers) UserBySub(ctx context.Context, sub string) (store.User, error) {
 	f.calls = append(f.calls, "UserBySub "+sub)
+	f.deadline, f.hasDeadline = ctx.Deadline()
+	if f.block {
+		<-ctx.Done()
+		return store.User{}, ctx.Err()
+	}
 	if f.bySubErr != nil {
 		return store.User{}, f.bySubErr
 	}

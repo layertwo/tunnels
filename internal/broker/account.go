@@ -28,7 +28,11 @@ type Users interface {
 
 // Account is a person who may publish tunnels. Handle is the stored one and never changes;
 // Username is whatever the identity provider says today.
-type Account struct{ Sub, Username, Handle string }
+type Account struct {
+	Sub      string `json:"sub"`
+	Username string `json:"username"`
+	Handle   string `json:"handle"`
+}
 
 // What Resolve refuses with. A token the identity provider rejects surfaces as idp.ErrInvalidToken
 // and a handle that another account owns as store.ErrHandleTaken.
