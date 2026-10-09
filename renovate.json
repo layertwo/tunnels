@@ -1,0 +1,8 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["github>layertwo/renovate-config", "helpers:pinGitHubActionDigests"],
+  "packageRules": [
+    {"description": "frp library and frps image move together", "matchPackageNames": ["github.com/fatedier/frp", "ghcr.io/fatedier/frps"], "groupName": "frp"},
+    {"description": "CA roots, monthly", "matchPackageNames": ["golang.org/x/crypto/x509roots/fallback"], "schedule": ["before 6am on the first day of the month"]}
+  ]
+}
