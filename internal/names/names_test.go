@@ -142,3 +142,33 @@ func TestSiteLabel(t *testing.T) {
 		}
 	}
 }
+
+// ValidHandle is what a stored handle must satisfy before a label is built from it: Label(handle, x)
+// has to parse back to this owner, so no dash, no capitals and nothing HandleFromUsername refuses.
+func TestValidHandle(t *testing.T) {
+	tests := []struct {
+		handle string
+		want   bool
+	}{
+		{"alice", true},
+		{"al", true},
+		{"a1", true},
+		{strings.Repeat("a", 20), true},
+		{"", false},
+		{"a", false},
+		{strings.Repeat("a", 21), false},
+		{"Alice", false},
+		{"alice-b", false}, // Label("alice-b", "c") would parse back as owner "alice"
+		{"alice_b", false},
+		{"alice.b", false},
+		{"alice b", false},
+		{"alice\n", false},
+		{"\u212Aevin", false},
+		{"ünal", false},
+	}
+	for _, tt := range tests {
+		if got := ValidHandle(tt.handle); got != tt.want {
+			t.Errorf("ValidHandle(%q) = %v, want %v", tt.handle, got, tt.want)
+		}
+	}
+}
