@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -26,11 +27,11 @@ func newMock(t *testing.T) *mockidp.Server {
 
 // newClient returns a client for the identity provider at issuer. The context it hands to New ends
 // when this helper returns: the client must keep working without it.
-func newClient(t *testing.T, issuer string) *Client {
+func newClient(t *testing.T, issuer string, opts ...Option) *Client {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	c, err := New(ctx, issuer, mockidp.APIResource, userAgent)
+	c, err := New(ctx, issuer, mockidp.APIResource, userAgent, opts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -255,5 +256,52 @@ func TestCallerDeadlineIsHonoured(t *testing.T) {
 	wantOtherError(t, err)
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Errorf("UserInfo took %v with a 100ms deadline, want it to give up right after", elapsed)
+	}
+}
+
+// userinfoJSON answers every userinfo request with body.
+func userinfoJSON(body string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, body)
+	}
+}
+
+// Providers differ in what they call the username and the groups: the claim names are options.
+func TestUserInfoClaimNames(t *testing.T) {
+	mock := newMock(t)
+	alice := Identity{Sub: "u1", Username: "alice", Groups: []string{"tunnels-creators"}}
+	tests := []struct {
+		name string
+		body string
+		opts []Option
+		want Identity // compared unless the call must fail
+		fail bool     // an error that is not ErrInvalidToken
+	}{
+		{"defaults", `{"sub":"u1","preferred_username":"alice","groups":["tunnels-creators"]}`, nil, alice, false},
+		{"custom names", `{"sub":"u1","nickname":"alice","roles":["tunnels-creators"],"preferred_username":"x","groups":["x"]}`,
+			[]Option{WithUsernameClaim("nickname"), WithGroupsClaim("roles")}, alice, false},
+		{"empty names keep the defaults", `{"sub":"u1","preferred_username":"alice","groups":["tunnels-creators"]}`,
+			[]Option{WithUsernameClaim(""), WithGroupsClaim("")}, alice, false},
+		{"claims absent", `{"sub":"u1"}`, nil, Identity{Sub: "u1"}, false},
+		{"groups null", `{"sub":"u1","preferred_username":"alice","groups":null}`, nil, Identity{Sub: "u1", Username: "alice"}, false},
+		{"groups is a string", `{"sub":"u1","preferred_username":"alice","groups":"tunnels-creators"}`, nil, Identity{}, true},
+		{"groups hold numbers", `{"sub":"u1","preferred_username":"alice","groups":[1,2]}`, nil, Identity{}, true},
+		{"username is a number", `{"sub":"u1","preferred_username":7}`, nil, Identity{}, true},
+		{"sub is a number", `{"sub":7}`, nil, Identity{}, true},
+		{"custom group claim is the wrong type", `{"sub":"u1","roles":"x"}`, []Option{WithGroupsClaim("roles")}, Identity{}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newClient(t, fakeIdP(t, mock, userinfoJSON(tt.body)).URL, tt.opts...)
+			got, err := c.UserInfo(t.Context(), "token")
+			if tt.fail {
+				wantOtherError(t, err)
+				return
+			}
+			if err != nil || !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("UserInfo = %+v, %v, want %+v", got, err, tt.want)
+			}
+		})
 	}
 }

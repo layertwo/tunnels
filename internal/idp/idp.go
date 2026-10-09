@@ -17,7 +17,9 @@ import (
 	"github.com/layertwo/tunnels/internal/httpx"
 )
 
-// Identity is the account behind an access token.
+// Identity is the account behind an access token. Username and Groups come from userinfo claims
+// whose names are options (preferred_username and groups unless told otherwise); a claim the
+// provider leaves out stays empty.
 type Identity struct {
 	Sub, Username string
 	Groups        []string
@@ -32,11 +34,36 @@ type Client struct {
 	hc       *http.Client
 	provider *oidc.Provider
 	verifier *oidc.IDTokenVerifier
+
+	usernameClaim, groupsClaim string
+}
+
+// Option changes how a Client reads the userinfo claims.
+type Option func(*Client)
+
+// WithUsernameClaim reads the username from the userinfo claim name instead of preferred_username.
+// An empty name keeps the default.
+func WithUsernameClaim(name string) Option {
+	return func(c *Client) {
+		if name != "" {
+			c.usernameClaim = name
+		}
+	}
+}
+
+// WithGroupsClaim reads the group names, a list of strings, from the userinfo claim name instead
+// of groups. An empty name keeps the default.
+func WithGroupsClaim(name string) Option {
+	return func(c *Client) {
+		if name != "" {
+			c.groupsClaim = name
+		}
+	}
 }
 
 // New discovers the identity provider at issuer. Access tokens must be addressed to apiResource.
 // All requests carry userAgent and give up after 10 seconds.
-func New(ctx context.Context, issuer, apiResource, userAgent string) (*Client, error) {
+func New(ctx context.Context, issuer, apiResource, userAgent string, opts ...Option) (*Client, error) {
 	hc := httpx.Client(userAgent, 10*time.Second)
 	// ctx bounds the discovery only. go-oidc keeps just hc from it (it fetches the key set later
 	// on a context of its own), so ctx may end once New returns; the tests check both.
@@ -44,11 +71,17 @@ func New(ctx context.Context, issuer, apiResource, userAgent string) (*Client, e
 	if err != nil {
 		return nil, fmt.Errorf("idp: discover %s: %w", issuer, err)
 	}
-	return &Client{
-		hc:       hc,
-		provider: provider,
-		verifier: provider.Verifier(&oidc.Config{ClientID: apiResource}),
-	}, nil
+	c := &Client{
+		hc:            hc,
+		provider:      provider,
+		verifier:      provider.Verifier(&oidc.Config{ClientID: apiResource}),
+		usernameClaim: "preferred_username",
+		groupsClaim:   "groups",
+	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c, nil
 }
 
 // UserInfo asks the userinfo endpoint who accessToken belongs to. The identity provider decides
@@ -77,18 +110,27 @@ func (c *Client) UserInfo(ctx context.Context, accessToken string) (Identity, er
 		return Identity{}, fmt.Errorf("idp: userinfo answered %d", resp.StatusCode)
 	}
 
-	var claims struct {
-		Sub               string   `json:"sub"`
-		PreferredUsername string   `json:"preferred_username"`
-		Groups            []string `json:"groups"`
-	}
+	var claims map[string]json.RawMessage
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&claims); err != nil {
 		return Identity{}, fmt.Errorf("idp: decode userinfo: %w", err)
 	}
-	if claims.Sub == "" {
+	var id Identity
+	for _, f := range []struct {
+		name string
+		dst  any
+	}{{"sub", &id.Sub}, {c.usernameClaim, &id.Username}, {c.groupsClaim, &id.Groups}} {
+		raw, ok := claims[f.name]
+		if !ok {
+			continue
+		}
+		if err := json.Unmarshal(raw, f.dst); err != nil {
+			return Identity{}, fmt.Errorf("idp: userinfo claim %q: %w", f.name, err)
+		}
+	}
+	if id.Sub == "" {
 		return Identity{}, errors.New("idp: userinfo has no sub")
 	}
-	return Identity{Sub: claims.Sub, Username: claims.PreferredUsername, Groups: claims.Groups}, nil
+	return id, nil
 }
 
 // VerifyAccessToken checks the signature, issuer, audience and expiry of the JWT raw, without
