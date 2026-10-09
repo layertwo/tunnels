@@ -145,6 +145,27 @@ func TestIssueOptions(t *testing.T) {
 	checkExpiry(t, verify(t, s, raw).Expiry, 2*time.Minute, before, after)
 }
 
+// Pocket ID reads the token with fosite.AccessTokenFromRequest: without the Bearer scheme there is
+// no token, so the answer is 401 even when the rest of the header is a good access token.
+func TestUserInfoRequiresBearerScheme(t *testing.T) {
+	s := New(t)
+	s.AddUser(User{Sub: "alice-sub", Username: "alice"})
+	token := s.Issue("alice-sub", IssueOpts{})
+
+	for name, header := range map[string]string{
+		"bare token":   token,
+		"basic scheme": "Basic " + token,
+		"empty scheme": " " + token,
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, body := get(t, s.URL+"/userinfo", http.Header{"Authorization": {header}})
+			if status != 401 || body != `{"error":"invalid_token"}` {
+				t.Errorf("status = %d, body = %s, want 401 invalid_token", status, body)
+			}
+		})
+	}
+}
+
 func TestUserInfo(t *testing.T) {
 	s := New(t)
 	s.AddUser(User{Sub: "alice-sub", Username: "alice", Groups: []string{"admins", "dev"}})

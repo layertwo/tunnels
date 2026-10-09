@@ -260,7 +260,11 @@ func (s *Server) jwks(w http.ResponseWriter, _ *http.Request) {
 // userinfo answers like Pocket ID: the claims follow the scopes of the access token, which must
 // carry openid and name this issuer in its audience.
 func (s *Server) userinfo(w http.ResponseWriter, r *http.Request) {
-	raw, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	raw, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok { // no scheme, no token, as with fosite.AccessTokenFromRequest
+		writeError(w, http.StatusUnauthorized, "invalid_token")
+		return
+	}
 	var c struct {
 		jwt.Claims
 		Scope string `json:"scope"`
