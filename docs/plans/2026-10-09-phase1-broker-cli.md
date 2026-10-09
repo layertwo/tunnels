@@ -25,6 +25,7 @@ Each was checked against the frp v0.71.0 and Pocket ID v2.18.0 source or by a sp
 7. **The CA bundle comes from `x509roots/fallback`** (Go team, Mozilla roots, 120 certificates) instead of a committed PEM, and Renovate bumps it monthly.
 8. **The e2e test builds frps from the pinned module** (`go build -tags noweb`, via a `tool` directive that keeps its dependencies in `go.sum`), not from the container. Same source as the image; no Docker needed.
 9. **Phase 1 `/authz` uses only `X-Tunnels-Sub` and `X-Tunnels-User`.** The groups header returns with sharing (plan 3).
+10. **Dockerfiles are named per component** (`Dockerfile.broker`, `Dockerfile.frps`): the repo holds several deliverables, so a bare `Dockerfile` should not mean "the broker".
 
 ## Global Constraints
 
@@ -69,7 +70,7 @@ Every task's requirements include this section.
 | `internal/cli` | CLI: commands |
 | `cmd/broker`, `cmd/tunnel` | `main` packages, a few lines each |
 | `e2e/` | end-to-end test (`e2e` tag) |
-| `Dockerfile`, `Dockerfile.frps`, `.dockerignore`, `.goreleaser.yaml`, `.github/workflows/{ci,image,release}.yml`, `renovate.json`, `README.md` | packaging and CI |
+| `Dockerfile.broker`, `Dockerfile.frps`, `.dockerignore`, `.goreleaser.yaml`, `.github/workflows/{ci,image,release}.yml`, `renovate.json`, `README.md` | packaging and CI |
 
 ---
 
@@ -494,10 +495,10 @@ Pinned by Review Focus 3. Design Verification 10.
 Design Verification 9 (every release target) and the supply-chain controls.
 
 **Files:**
-- Create: `Dockerfile`, `Dockerfile.frps`, `.dockerignore`, `.goreleaser.yaml`, `.github/workflows/image.yml`, `.github/workflows/release.yml`
+- Create: `Dockerfile.broker`, `Dockerfile.frps`, `.dockerignore`, `.goreleaser.yaml`, `.github/workflows/image.yml`, `.github/workflows/release.yml`
 - Modify: `.github/workflows/ci.yml` (job `release-check`)
 
-- [ ] **Step 1: `Dockerfile`** (broker; the binary is built in the workflow, so no Go image is needed):
+- [ ] **Step 1: `Dockerfile.broker`** (the broker; the binary is built in the workflow, so no Go image is needed):
 
   ```dockerfile
   FROM gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3
@@ -547,8 +548,8 @@ Design Verification 9 (every release target) and the supply-chain controls.
     use: github
   ```
 
-- [ ] **Step 3: Workflows.** `ci.yml` job `release-check`: `goreleaser/goreleaser-action` with `args: check` then `args: release --snapshot --clean --skip=publish`, and assert `ls dist/*.tar.gz dist/*.zip | wc -l` is 7. `release.yml`: on tags `v*`, `permissions: contents: write`, `fetch-depth: 0`, `goreleaser release --clean`. `image.yml`: start from `layertwo/homelab` `.github/workflows/oidc-saml-bridge-docker-image.yml` (pinned action digests, buildx, GHCR login, cosign) with these changes: a matrix over `{broker, frps}`; for `broker`, a step before the build runs `CGO_ENABLED=0 GOOS=linux GOARCH=$a go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_SHA::7}" -o dist/broker-linux-$a ./cmd/broker` for `a` in `amd64 arm64`; `file: Dockerfile` or `Dockerfile.frps`; `platforms: linux/amd64,linux/arm64`; tags `latest`, `sha-<short>` and `v*` tags on release; push and sign by digest only outside pull requests; a smoke step on pull requests (single platform, `load: true`) runs the image with `--version` (broker prints its version, frps prints `0.71.0`).
-- [ ] **Step 4: Verify locally what can be.** `docker build` or `podman build -f Dockerfile.frps .` then `run --rm <image> --version` prints `0.71.0`; build the broker binary for linux/arm64 into `dist/` and `podman build .` (add `--build-arg TARGETARCH=arm64` if the builder leaves it empty) then `run --rm <image> --version` prints a version. Expected: both succeed.
+- [ ] **Step 3: Workflows.** `ci.yml` job `release-check`: `goreleaser/goreleaser-action` with `args: check` then `args: release --snapshot --clean --skip=publish`, and assert `ls dist/*.tar.gz dist/*.zip | wc -l` is 7. `release.yml`: on tags `v*`, `permissions: contents: write`, `fetch-depth: 0`, `goreleaser release --clean`. `image.yml`: start from `layertwo/homelab` `.github/workflows/oidc-saml-bridge-docker-image.yml` (pinned action digests, buildx, GHCR login, cosign) with these changes: a matrix over `{broker, frps}`; for `broker`, a step before the build runs `CGO_ENABLED=0 GOOS=linux GOARCH=$a go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_SHA::7}" -o dist/broker-linux-$a ./cmd/broker` for `a` in `amd64 arm64`; `file: Dockerfile.broker` or `Dockerfile.frps`; `platforms: linux/amd64,linux/arm64`; tags `latest`, `sha-<short>` and `v*` tags on release; push and sign by digest only outside pull requests; a smoke step on pull requests (single platform, `load: true`) runs the image with `--version` (broker prints its version, frps prints `0.71.0`).
+- [ ] **Step 4: Verify locally what can be.** `docker build` or `podman build -f Dockerfile.frps .` then `run --rm <image> --version` prints `0.71.0`; build the broker binary for linux/arm64 into `dist/` and `podman build -f Dockerfile.broker .` (add `--build-arg TARGETARCH=arm64` if the builder leaves it empty) then `run --rm <image> --version` prints a version. Expected: both succeed.
 - [ ] **Step 5: Commit and open PR 3** (Tasks 12-13) `build: add images, release and e2e`. After the human partner merges and `image` has run on `mainline`: make both GHCR packages public (package settings, so the cluster can pull without credentials) and check `curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $(curl -s 'https://ghcr.io/token?service=ghcr.io&scope=repository:layertwo/tunnels-broker:pull' | jq -r .token)" https://ghcr.io/v2/layertwo/tunnels-broker/manifests/latest` returns 200.
 - [ ] **Step 6: First release.** Tag `v0.1.0` (human partner), wait for `release`; `gh release view v0.1.0 --json assets -q '.assets[].name'` lists seven archives and `checksums.txt`; download the darwin/arm64 archive, check its hash against `checksums.txt`, and `./tunnel version` prints `tunnel 0.1.0 (server tunnels.layertwo.dev)`. Hand the two image digests (`gh api /users/layertwo/packages/container/tunnels-broker/versions` or the `image` run summary) to plan 2b.
 
