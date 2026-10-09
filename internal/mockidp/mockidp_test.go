@@ -1,10 +1,14 @@
 package mockidp
 
 import (
+	"cmp"
 	"encoding/json"
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
+	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -13,6 +17,9 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 )
+
+// urnDeviceCode is the grant_type of a device code exchange; spelled out here to check the mock's constant.
+const urnDeviceCode = "urn:ietf:params:oauth:grant-type:device_code"
 
 // claims are the claims of an access token that the tests look at.
 type claims struct {
@@ -193,5 +200,278 @@ func TestRecordsUserAgents(t *testing.T) {
 	got[0] = "changed"
 	if again := s.UserAgents(); !slices.Equal(again, want) {
 		t.Errorf("UserAgents() = %v after the caller changed its result, want %v", again, want)
+	}
+}
+
+// reply is a decoded JSON answer of the mock.
+type reply map[string]any
+
+// str returns the string value of key, or "" when it is absent or not a string.
+func (r reply) str(key string) string {
+	s, _ := r[key].(string)
+	return s
+}
+
+// post sends form to endpoint and returns the status and the JSON object of the answer.
+func post(t *testing.T, endpoint string, form url.Values) (int, reply) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body reply
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("POST %s = %d: the answer is not a JSON object: %v", endpoint, resp.StatusCode, err)
+	}
+	return resp.StatusCode, body
+}
+
+// startLogin sends a device authorization request and returns the answer.
+func startLogin(t *testing.T, s *Server, form url.Values) reply {
+	t.Helper()
+	status, auth := post(t, s.URL+"/device/authorize", form)
+	if status != http.StatusOK {
+		t.Fatalf("POST /device/authorize = %d: %v", status, auth)
+	}
+	return auth
+}
+
+// poll exchanges a device code at the token endpoint.
+func poll(t *testing.T, s *Server, deviceCode string) (int, reply) {
+	t.Helper()
+	return post(t, s.URL+"/token", url.Values{"grant_type": {urnDeviceCode}, "device_code": {deviceCode}, "client_id": {ClientID}})
+}
+
+// refresh exchanges a refresh token at the token endpoint.
+func refresh(t *testing.T, s *Server, refreshToken string) (int, reply) {
+	t.Helper()
+	return post(t, s.URL+"/token", url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refreshToken}, "client_id": {ClientID}})
+}
+
+// login runs the device flow for sub, asking for the API resource and scope, and returns the token response.
+func login(t *testing.T, s *Server, sub, scope string) reply {
+	t.Helper()
+	auth := startLogin(t, s, url.Values{"client_id": {ClientID}, "scope": {scope}, "resource": {APIResource}})
+	s.Approve(auth.str("user_code"), sub)
+	status, tok := poll(t, s, auth.str("device_code"))
+	if status != http.StatusOK {
+		t.Fatalf("POST /token = %d: %v", status, tok)
+	}
+	return tok
+}
+
+// wantError fails unless the answer is exactly {"error": code} with status 400.
+func wantError(t *testing.T, status int, r reply, code string) {
+	t.Helper()
+	if status != http.StatusBadRequest || len(r) != 1 || r.str("error") != code {
+		t.Errorf("got %d %v, want 400 {error: %q}", status, r, code)
+	}
+}
+
+func TestDeviceFlow(t *testing.T) {
+	s := New(t)
+	const scope = "openid profile groups offline_access"
+
+	auth := startLogin(t, s, url.Values{"client_id": {ClientID}, "scope": {scope}, "resource": {APIResource}})
+	deviceCode, userCode := auth.str("device_code"), auth.str("user_code")
+	if deviceCode == "" {
+		t.Error("device_code is empty")
+	}
+	if !regexp.MustCompile(`^[A-Z]{4}-[A-Z]{4}$`).MatchString(userCode) {
+		t.Errorf("user_code = %q, want a code like ABCD-EFGH", userCode)
+	}
+	if got, want := auth.str("verification_uri"), s.URL+"/device"; got != want {
+		t.Errorf("verification_uri = %q, want %q", got, want)
+	}
+	if got, want := auth.str("verification_uri_complete"), s.URL+"/device?user_code="+userCode; got != want {
+		t.Errorf("verification_uri_complete = %q, want %q", got, want)
+	}
+	if auth["expires_in"] != float64(600) || auth["interval"] != float64(1) {
+		t.Errorf("expires_in = %v, interval = %v, want 600 and 1", auth["expires_in"], auth["interval"])
+	}
+
+	// the request as the mock recorded it
+	reqs := s.DeviceRequests()
+	if len(reqs) != 1 {
+		t.Fatalf("DeviceRequests() has %d entries, want 1", len(reqs))
+	}
+	for key, want := range map[string]string{"client_id": ClientID, "scope": scope, "resource": APIResource} {
+		if got := reqs[0].Get(key); got != want {
+			t.Errorf("recorded %s = %q, want %q", key, got, want)
+		}
+	}
+	if reqs[0].Has("client_secret") {
+		t.Error("the device request carries a client_secret")
+	}
+
+	status, body := poll(t, s, deviceCode)
+	wantError(t, status, body, "authorization_pending")
+
+	s.Approve(userCode, "alice-sub")
+	status, tok := poll(t, s, deviceCode)
+	if status != http.StatusOK {
+		t.Fatalf("POST /token after Approve = %d: %v", status, tok)
+	}
+	if tok.str("token_type") != "Bearer" || tok["expires_in"] != float64(3600) || tok.str("scope") != scope {
+		t.Errorf("token_type = %v, expires_in = %v, scope = %v, want Bearer, 3600, %q",
+			tok["token_type"], tok["expires_in"], tok["scope"], scope)
+	}
+	if tok.str("refresh_token") == "" {
+		t.Error("refresh_token is empty although the scope has offline_access")
+	}
+	c := verify(t, s, tok.str("access_token"))
+	if want := []string{APIResource, ClientID, s.URL}; !slices.Equal(c.Audience, want) {
+		t.Errorf("aud = %v, want %v", c.Audience, want)
+	}
+	if c.Scope != scope || c.Subject != "alice-sub" {
+		t.Errorf("scope = %q, sub = %q, want %q and alice-sub", c.Scope, c.Subject, scope)
+	}
+
+	// an approved device code is used up, and a code that never existed is no better
+	status, body = poll(t, s, deviceCode)
+	wantError(t, status, body, "invalid_grant")
+	status, body = poll(t, s, "no-such-code")
+	wantError(t, status, body, "invalid_grant")
+
+	// without a resource indicator the audience names the client and the issuer only
+	auth = startLogin(t, s, url.Values{"client_id": {ClientID}, "scope": {"openid"}})
+	s.Approve(auth.str("user_code"), "bob-sub")
+	status, tok = poll(t, s, auth.str("device_code"))
+	if status != http.StatusOK {
+		t.Fatalf("POST /token without a resource = %d: %v", status, tok)
+	}
+	if want, got := []string{ClientID, s.URL}, verify(t, s, tok.str("access_token")).Audience; !slices.Equal(got, want) {
+		t.Errorf("aud = %v, want %v", got, want)
+	}
+}
+
+func TestDeviceDeniedAndExpired(t *testing.T) {
+	s := New(t)
+	form := url.Values{"client_id": {ClientID}, "scope": {"openid"}}
+
+	auth := startLogin(t, s, form)
+	s.Deny(auth.str("user_code"))
+	status, body := poll(t, s, auth.str("device_code"))
+	wantError(t, status, body, "access_denied")
+
+	s.SetDeviceTTL(20 * time.Millisecond)
+	auth = startLogin(t, s, form)
+	s.Approve(auth.str("user_code"), "alice-sub") // too late all the same
+	time.Sleep(50 * time.Millisecond)
+	status, body = poll(t, s, auth.str("device_code"))
+	wantError(t, status, body, "expired_token")
+}
+
+func TestRefreshRotation(t *testing.T) {
+	s := New(t)
+	first := login(t, s, "alice-sub", "openid profile groups offline_access")
+	old := first.str("refresh_token")
+
+	s.SetTTL(5 * time.Minute) // a refreshed access token takes the TTL of the server
+	before := time.Now()
+	status, second := refresh(t, s, old)
+	after := time.Now()
+	if status != http.StatusOK {
+		t.Fatalf("refresh = %d: %v", status, second)
+	}
+	current := second.str("refresh_token")
+	if current == "" || current == old {
+		t.Errorf("refresh_token = %q after rotating %q, want a new one", current, old)
+	}
+	if second.str("token_type") != "Bearer" || second["expires_in"] != float64(300) ||
+		second.str("scope") != "openid profile groups offline_access" {
+		t.Errorf("token_type = %v, expires_in = %v, scope = %v, want Bearer, 300 and the original scope",
+			second["token_type"], second["expires_in"], second["scope"])
+	}
+	c := verify(t, s, second.str("access_token"))
+	if want := []string{APIResource, ClientID, s.URL}; !slices.Equal(c.Audience, want) {
+		t.Errorf("aud = %v, want %v", c.Audience, want)
+	}
+	if c.Scope != "openid profile groups offline_access" || c.Subject != "alice-sub" {
+		t.Errorf("scope = %q, sub = %q, want the original scope and alice-sub", c.Scope, c.Subject)
+	}
+	checkExpiry(t, c.Expiry, 5*time.Minute, before, after)
+	if second.str("access_token") == first.str("access_token") {
+		t.Error("the refreshed access token equals the first one")
+	}
+
+	// the rotated token still works within the grace period, and rotates again
+	status, third := refresh(t, s, old)
+	if status != http.StatusOK {
+		t.Fatalf("refresh with the rotated token within the grace period = %d: %v", status, third)
+	}
+	if rt := third.str("refresh_token"); rt == "" || rt == old || rt == current {
+		t.Errorf("refresh_token = %q, want one that differs from %q and %q", rt, old, current)
+	}
+
+	// without grace it does not; the token that was never rotated is not affected
+	s.SetRefreshGrace(0)
+	status, body := refresh(t, s, old)
+	wantError(t, status, body, "invalid_grant")
+	if status, body := refresh(t, s, current); status != http.StatusOK {
+		t.Errorf("refresh with the current token = %d: %v", status, body)
+	}
+
+	status, body = refresh(t, s, "no-such-token")
+	wantError(t, status, body, "invalid_grant")
+}
+
+func TestRefreshAfterRevoke(t *testing.T) {
+	s := New(t)
+	alice := login(t, s, "alice-sub", "openid offline_access")
+	bob := login(t, s, "bob-sub", "openid offline_access")
+
+	s.RevokeUser("alice-sub")
+	status, body := refresh(t, s, alice.str("refresh_token"))
+	wantError(t, status, body, "invalid_grant")
+	if status, body := refresh(t, s, bob.str("refresh_token")); status != http.StatusOK {
+		t.Errorf("refresh for a user that was not revoked = %d: %v", status, body)
+	}
+}
+
+func TestNoRefreshTokenWithoutOfflineAccess(t *testing.T) {
+	s := New(t)
+	tok := login(t, s, "alice-sub", "openid profile groups")
+	if _, ok := tok["refresh_token"]; ok {
+		t.Errorf("the token response has a refresh_token without offline_access: %v", tok)
+	}
+	if tok.str("access_token") == "" {
+		t.Errorf("the token response has no access_token: %v", tok)
+	}
+}
+
+func TestUnsupportedGrant(t *testing.T) {
+	s := New(t)
+	for _, grant := range []string{"authorization_code", "client_credentials", "password", ""} {
+		t.Run(cmp.Or(grant, "none"), func(t *testing.T) {
+			status, body := post(t, s.URL+"/token", url.Values{"grant_type": {grant}, "client_id": {ClientID}})
+			wantError(t, status, body, "unsupported_grant_type")
+		})
+	}
+}
+
+// errorRecorder collects the Errorf calls instead of failing the test.
+type errorRecorder struct {
+	testing.TB
+	errs []string
+}
+
+func (r *errorRecorder) Errorf(format string, args ...any) {
+	r.errs = append(r.errs, fmt.Sprintf(format, args...))
+}
+
+func TestDecisionOnUnknownUserCodeFailsTheTest(t *testing.T) {
+	rec := &errorRecorder{TB: t}
+	s := New(rec)
+	s.Approve("ABCD-EFGH", "alice-sub")
+	s.Deny("ABCD-EFGH")
+	if len(rec.errs) != 2 {
+		t.Errorf("Approve and Deny of an unknown user code reported %d errors, want 2: %q", len(rec.errs), rec.errs)
 	}
 }

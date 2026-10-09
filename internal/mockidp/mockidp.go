@@ -1,5 +1,6 @@
 // Package mockidp is an in-process stand-in for Pocket ID v2.18.0, for tests. It serves the OIDC
-// discovery document, the JWKS and the userinfo endpoint, and signs the access tokens it issues
+// discovery document, the JWKS, the userinfo endpoint, the device authorization endpoint and a
+// token endpoint (device_code and refresh_token grants), and signs the access tokens it issues
 // with an RSA key it generates itself.
 package mockidp
 
@@ -27,7 +28,8 @@ const (
 	// ClientID is the OIDC client the CLI logs in with.
 	ClientID = "tunnels-cli-test"
 
-	kid = "k1" // id of the one signing key
+	kid             = "k1" // id of the one signing key
+	deviceCodeGrant = "urn:ietf:params:oauth:grant-type:device_code"
 )
 
 // User is an account of the mock; Sub identifies it.
@@ -48,6 +50,7 @@ type Server struct {
 	URL string
 
 	key *rsa.PrivateKey // immutable
+	t   testing.TB      // immutable; Approve and Deny report an unknown user code through it
 
 	mu             sync.Mutex // guards the fields below
 	users          map[string]User
@@ -85,6 +88,7 @@ func New(t testing.TB) *Server {
 	}
 	s := &Server{
 		key:           key,
+		t:             t,
 		users:         map[string]User{},
 		revoked:       map[string]bool{},
 		ttl:           time.Hour,
@@ -98,9 +102,8 @@ func New(t testing.TB) *Server {
 	mux.HandleFunc("GET /.well-known/openid-configuration", s.discovery)
 	mux.HandleFunc("GET /jwks", s.jwks)
 	mux.HandleFunc("GET /userinfo", s.userinfo)
-	// the device flow and the refresh grant are not implemented yet
-	mux.HandleFunc("POST /device/authorize", notImplemented)
-	mux.HandleFunc("POST /token", notImplemented)
+	mux.HandleFunc("POST /device/authorize", s.deviceAuthorize)
+	mux.HandleFunc("POST /token", s.token)
 
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
@@ -147,6 +150,36 @@ func (s *Server) RevokeUser(sub string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.revoked[sub] = true
+}
+
+// Approve completes the device authorization that handed out userCode, as the user sub.
+// A code the mock never handed out (or one already exchanged) fails the test.
+func (s *Server) Approve(userCode, sub string) {
+	s.t.Helper()
+	s.decide(userCode, func(g *deviceGrant) { g.sub = sub })
+}
+
+// Deny rejects the device authorization that handed out userCode; it wins over an Approve.
+func (s *Server) Deny(userCode string) {
+	s.t.Helper()
+	s.decide(userCode, func(g *deviceGrant) { g.denied = true })
+}
+
+// decide applies f to the device grant with the given user code.
+func (s *Server) decide(userCode string, f func(*deviceGrant)) {
+	s.t.Helper()
+	s.mu.Lock()
+	found := false
+	for _, g := range s.deviceCodes {
+		if g.userCode == userCode {
+			f(g)
+			found = true
+		}
+	}
+	s.mu.Unlock()
+	if !found {
+		s.t.Errorf("mockidp: no device authorization with user code %q", userCode)
+	}
 }
 
 // UserAgents returns the User-Agent of every request received so far, in order.
@@ -269,8 +302,119 @@ func (s *Server) userinfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, body)
 }
 
-func notImplemented(w http.ResponseWriter, _ *http.Request) {
-	http.Error(w, "not implemented", http.StatusNotImplemented)
+// deviceAuthorize starts a device authorization for a public client; Approve or Deny settles it.
+func (s *Server) deviceAuthorize(w http.ResponseWriter, r *http.Request) {
+	if r.ParseForm() != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	form := make(url.Values, len(r.Form))
+	for k, v := range r.Form {
+		form[k] = slices.Clone(v)
+	}
+	deviceCode, userCode := randHex(16), randUserCode()
+
+	s.mu.Lock()
+	ttl := s.deviceTTL
+	s.deviceRequests = append(s.deviceRequests, form)
+	s.deviceCodes[deviceCode] = &deviceGrant{
+		userCode: userCode,
+		clientID: form.Get("client_id"),
+		scope:    form.Get("scope"),
+		resource: form.Get("resource"),
+		expires:  time.Now().Add(ttl),
+	}
+	s.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"device_code":               deviceCode,
+		"user_code":                 userCode,
+		"verification_uri":          s.URL + "/device",
+		"verification_uri_complete": s.URL + "/device?user_code=" + userCode,
+		"expires_in":                int(ttl / time.Second),
+		"interval":                  1,
+	})
+}
+
+// token serves the device_code and the refresh_token grants.
+func (s *Server) token(w http.ResponseWriter, r *http.Request) {
+	if r.ParseForm() != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	var resp map[string]any
+	var errCode string // empty on success
+	switch r.Form.Get("grant_type") {
+	case deviceCodeGrant:
+		resp, errCode = s.exchangeDeviceCode(r.Form.Get("device_code"))
+	case "refresh_token":
+		resp, errCode = s.exchangeRefreshToken(r.Form.Get("refresh_token"))
+	default:
+		errCode = "unsupported_grant_type"
+	}
+	if errCode != "" {
+		writeError(w, http.StatusBadRequest, errCode)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// exchangeDeviceCode answers one poll of a device authorization; an approved one is used up by it.
+func (s *Server) exchangeDeviceCode(deviceCode string) (resp map[string]any, errCode string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	g, ok := s.deviceCodes[deviceCode]
+	switch {
+	case !ok:
+		return nil, "invalid_grant"
+	case !time.Now().Before(g.expires):
+		return nil, "expired_token"
+	case g.denied:
+		return nil, "access_denied"
+	case g.sub == "":
+		return nil, "authorization_pending"
+	}
+	delete(s.deviceCodes, deviceCode)
+	aud := []string{g.clientID, s.URL}
+	if g.resource != "" {
+		aud = slices.Insert(aud, 0, g.resource)
+	}
+	return s.tokenResponse(g.sub, aud, g.scope), ""
+}
+
+// exchangeRefreshToken rotates a refresh token. The first use marks it rotated; from then on it is
+// accepted only for the refresh grace period, which covers two clients refreshing at once.
+func (s *Server) exchangeRefreshToken(token string) (resp map[string]any, errCode string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	g, ok := s.refreshTokens[token]
+	if !ok || s.revoked[g.sub] {
+		return nil, "invalid_grant"
+	}
+	now := time.Now()
+	if g.rotatedAt.IsZero() {
+		g.rotatedAt = now
+	} else if !now.Before(g.rotatedAt.Add(s.refreshGrace)) {
+		return nil, "invalid_grant"
+	}
+	return s.tokenResponse(g.sub, g.aud, g.scope), ""
+}
+
+// tokenResponse builds the success answer of the token endpoint: an access token with the server
+// TTL and, when scope has offline_access, a new refresh token. The caller holds s.mu.
+func (s *Server) tokenResponse(sub string, aud []string, scope string) map[string]any {
+	resp := map[string]any{
+		"access_token": s.sign(sub, aud, scope, s.ttl),
+		"token_type":   "Bearer",
+		"expires_in":   int(s.ttl / time.Second),
+		"scope":        scope,
+	}
+	if slices.Contains(strings.Fields(scope), "offline_access") {
+		token := randHex(16)
+		s.refreshTokens[token] = &refreshGrant{sub: sub, scope: scope, aud: aud}
+		resp["refresh_token"] = token
+	}
+	return resp
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -288,4 +432,14 @@ func randHex(n int) string {
 	b := make([]byte, n)
 	rand.Read(b) // never fails
 	return hex.EncodeToString(b)
+}
+
+// randUserCode returns a user code like ABCD-EFGH.
+func randUserCode() string {
+	b := make([]byte, 8)
+	rand.Read(b) // never fails
+	for i := range b {
+		b[i] = 'A' + b[i]%26
+	}
+	return string(b[:4]) + "-" + string(b[4:])
 }
