@@ -118,27 +118,18 @@ func (s *server) sharesGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"shares": shares})
 }
 
-// sharesPut and sharesDelete change the caller's own shares; both are idempotent. The nil check sits
-// here rather than in changeShare because taking the method value off a nil interface panics.
-func (s *server) sharesPut(w http.ResponseWriter, r *http.Request) {
-	if s.d.Shares == nil {
-		writeJSON(w, http.StatusServiceUnavailable, errorBody(noSharesStore))
-		return
-	}
-	s.changeShare(w, r, s.d.Shares.PutShare)
-}
+// sharesPut and sharesDelete change the caller's own shares; both are idempotent.
+func (s *server) sharesPut(w http.ResponseWriter, r *http.Request)    { s.changeShare(w, r, true) }
+func (s *server) sharesDelete(w http.ResponseWriter, r *http.Request) { s.changeShare(w, r, false) }
 
-func (s *server) sharesDelete(w http.ResponseWriter, r *http.Request) {
-	if s.d.Shares == nil {
-		writeJSON(w, http.StatusServiceUnavailable, errorBody(noSharesStore))
-		return
-	}
-	s.changeShare(w, r, s.d.Shares.DeleteShare)
-}
-
-func (s *server) changeShare(w http.ResponseWriter, r *http.Request, apply func(context.Context, string, store.Share) error) {
+func (s *server) changeShare(w http.ResponseWriter, r *http.Request, put bool) {
 	acct, ok := s.account(w, r)
 	if !ok {
+		return
+	}
+	// Checked after the identity, so a caller with no session gets 401, not a 503.
+	if s.d.Shares == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorBody(noSharesStore))
 		return
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody))
@@ -155,6 +146,10 @@ func (s *server) changeShare(w http.ResponseWriter, r *http.Request, apply func(
 	ctx, cancel := context.WithTimeout(r.Context(), defaultDecisionTimeout)
 	defer cancel()
 
+	apply := s.d.Shares.PutShare
+	if !put {
+		apply = s.d.Shares.DeleteShare
+	}
 	if err := apply(ctx, acct.Sub, sh); err != nil {
 		s.d.Log.Warn("api/shares: could not store the share", "err", err)
 		writeJSON(w, http.StatusServiceUnavailable, errorBody("shares unavailable, try again"))

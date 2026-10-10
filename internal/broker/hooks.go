@@ -26,9 +26,10 @@ type Frps interface {
 // Hooks is frps's HTTP plugin for the Login, NewProxy, CloseProxy and Ping ops, mounted at /plugin/<Secret>.
 // It keeps no state and is safe for concurrent use.
 //
-// Every decision, accept or reject, is HTTP 200: frps shows its client any other status as an opaque
-// "send Login request to plugin error". A decision that cannot be made (a dependency is down or
-// slow) is a reject.
+// Every decision, accept or reject, is HTTP 200: frps shows its client any other error status as an
+// opaque "send Login request to plugin error". A decision that cannot be made (a dependency is down
+// or slow) is a reject, except a Ping: a ping the broker cannot verify is allowed, because frps
+// re-verifies the ping's token itself and this hook only adds the account checks frps cannot make.
 type Hooks struct {
 	Resolver          Resolver
 	Frps              Frps
@@ -205,8 +206,7 @@ func (h *Hooks) ping(ctx context.Context, raw json.RawMessage) (plugin.Response,
 	}
 	acct, err := h.Resolver.Resolve(ctx, c.PrivilegeKey)
 	if err != nil {
-		var r *refusal
-		if errors.As(err, &r) {
+		if r, ok := refusalOf(err); ok {
 			return h.reject(ctx, plugin.OpPing, r.text, nil), nil
 		}
 		h.Log.DebugContext(ctx, "ping: could not verify the session, allowed", "err", err)
