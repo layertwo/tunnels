@@ -306,3 +306,16 @@ func TestUserInfoClaimNames(t *testing.T) {
 		})
 	}
 }
+
+// A provider without a userinfo endpoint cannot say who a token belongs to. Refuse it when the
+// broker starts, rather than refusing every login later with "login unavailable".
+func TestNewNeedsAUserinfoEndpoint(t *testing.T) {
+	mock := newMock(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"issuer": "http://" + r.Host, "jwks_uri": mock.URL + "/jwks"})
+	}))
+	t.Cleanup(srv.Close)
+	if _, err := New(t.Context(), srv.URL, mockidp.APIResource, userAgent, "", ""); err == nil || !strings.Contains(err.Error(), "userinfo") {
+		t.Errorf("New = %v, want an error about the missing userinfo endpoint", err)
+	}
+}
