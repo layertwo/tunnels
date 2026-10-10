@@ -26,6 +26,10 @@ tunnel version
 `--group` shares take effect once the site gate forwards the visitor's groups (a deferred change);
 user shares work today.
 
+Removing someone from `tunnels-creators`, or disabling their account in Pocket ID, ends their
+tunnel within one heartbeat once the Ping hook is enabled (a deferred change); until then it ends
+when their token expires, about an hour later.
+
 `tunnel up` runs until you stop it. A name is 1 to 42 lowercase letters, digits and inner dashes,
 and not `default` (that is the tunnel without a name).
 The login is kept in `tunnels/` in your config directory (`~/Library/Application Support` on macOS,

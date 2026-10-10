@@ -490,7 +490,7 @@ func TestMalformedRequests(t *testing.T) {
 		{"json array", http.MethodPost, "[]"},
 		{"truncated", http.MethodPost, valid[:len(valid)-6]},
 		{"no op", http.MethodPost, `{"content":{"privilege_key":"tok"}}`},
-		{"unknown op", http.MethodPost, `{"op":"Ping","content":{}}`},
+		{"unknown op", http.MethodPost, `{"op":"NewWorkConn","content":{}}`},
 		{"op in the wrong case", http.MethodPost, `{"op":"login","content":{"privilege_key":"tok"}}`},
 		{"login without content", http.MethodPost, `{"op":"Login"}`},
 		{"login with a string for content", http.MethodPost, `{"op":"Login","content":"tok"}`},
@@ -703,5 +703,104 @@ func TestLoginLogsTheCLIVersionAsSent(t *testing.T) {
 		if got, present := line["cli_version"]; (tt.want == nil && present) || (tt.want != nil && got != tt.want) {
 			t.Errorf("sent %.10q...: logged cli_version %v (present %v), want %v", tt.sent, got, present, tt.want)
 		}
+	}
+}
+
+// pingContent is one heartbeat: the current token plus the identity frps pinned at login.
+func pingContent(token, handle string) plugin.PingContent {
+	return plugin.PingContent{
+		User: plugin.UserInfo{User: handle, RunID: "run-1"},
+		Ping: msg.Ping{PrivilegeKey: token, Timestamp: 1791565403},
+	}
+}
+
+// pingReply sends one heartbeat after setup and returns what frps would read back.
+func pingReply(t *testing.T, setup func(*rig), token, handle string) reply {
+	t.Helper()
+	r := newRig()
+	if setup != nil {
+		setup(r)
+	}
+	return r.call(t, plugin.OpPing, pingContent(token, handle))
+}
+
+// The owner's own token on a heartbeat is allowed and leaves the ping unchanged; frps does the rest.
+func TestPingAllowsAValidCreator(t *testing.T) {
+	rep := pingReply(t, nil, secretToken, "alice")
+	if rep.Reject || !rep.Unchange {
+		t.Errorf("reply = %+v, want allowed and unchanged", rep)
+	}
+}
+
+// An empty token is nobody's; frps would send the client a pong with the reason and frpc closes.
+func TestPingRejectsAMissingToken(t *testing.T) {
+	rep := pingReply(t, nil, "", "alice")
+	if !rep.Reject || rep.RejectReason != "missing token" {
+		t.Errorf("reply = %+v, want reject with %q", rep, "missing token")
+	}
+}
+
+// Someone removed from the creators group is refused with the same sentence Login shows.
+func TestPingRejectsANonCreator(t *testing.T) {
+	rep := pingReply(t, func(r *rig) { r.idp.id = identity("sub-alice", "Alice", "tunnels-viewers") }, secretToken, "alice")
+	const want = "your account is not allowed to publish tunnels: ask an admin to add you to tunnels-creators"
+	if !rep.Reject || rep.RejectReason != want {
+		t.Errorf("reply = %+v, want reject with %q", rep, want)
+	}
+}
+
+// A disabled account ends its tunnel on the next heartbeat.
+func TestPingRejectsADisabledAccount(t *testing.T) {
+	rep := pingReply(t, func(r *rig) {
+		r.users.users["sub-alice"] = store.User{Sub: "sub-alice", Handle: "alice", Disabled: true}
+	}, secretToken, "alice")
+	const want = "your account is disabled: ask an admin"
+	if !rep.Reject || rep.RejectReason != want {
+		t.Errorf("reply = %+v, want reject with %q", rep, want)
+	}
+}
+
+// A token this broker cannot verify locally (expired, or a signing key it could not fetch while the
+// identity provider was down) is left to frps, which re-verifies the ping itself; the ping is allowed.
+func TestPingAllowsAnInvalidTokenLocally(t *testing.T) {
+	rep := pingReply(t, func(r *rig) { r.idp.err = idp.ErrInvalidToken }, secretToken, "alice")
+	if rep.Reject {
+		t.Errorf("reply = %+v, want allowed: frps re-verifies the token itself", rep)
+	}
+}
+
+// A dependency of ours being down is not the person's doing: the token they hold is still valid, we
+// just cannot check it, so the tunnel lives out that token. It is a debug line, never an operator warn.
+func TestPingAllowsWhenTheIdentityProviderIsDown(t *testing.T) {
+	r := newRig()
+	r.hooks.Log = slog.New(slog.NewJSONHandler(r.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	r.idp.err = errors.New("dial tcp 10.0.0.5:8080: connect: connection refused")
+	rep := r.call(t, plugin.OpPing, pingContent(secretToken, "alice"))
+	if rep.Reject {
+		t.Errorf("reply = %+v, want allowed: the identity provider being down is not the person's doing", rep)
+	}
+	if line := lastLog(t, r.logs); line["level"] != "DEBUG" {
+		t.Errorf("log = %v, want a debug line about the failure", line)
+	}
+}
+
+// A heartbeat that claims another handle is not this client's heartbeat, whatever its token.
+func TestPingRejectsAHandleMismatch(t *testing.T) {
+	rep := pingReply(t, nil, secretToken, "bob")
+	const want = "token does not belong to this session"
+	if !rep.Reject || rep.RejectReason != want {
+		t.Errorf("reply = %+v, want reject with %q", rep, want)
+	}
+}
+
+// A heartbeat every 30 s per client must not fill the log; only refusals are decisions worth a line.
+func TestPingIsNotLoggedWhenAccepted(t *testing.T) {
+	r := newRig()
+	rep := r.call(t, plugin.OpPing, pingContent(secretToken, "alice"))
+	if rep.Reject {
+		t.Fatalf("reply = %+v, want allowed", rep)
+	}
+	if r.logs.Len() != 0 {
+		t.Errorf("an accepted ping was logged:\n%s", r.logs)
 	}
 }

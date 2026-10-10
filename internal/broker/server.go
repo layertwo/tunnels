@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -89,10 +90,17 @@ func (s *server) me(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, acct)
 }
 
+// noSharesStore is what the share endpoints say when the broker has no shares store at all.
+const noSharesStore = "sharing is unavailable, try again"
+
 // sharesGet lists the caller's own shares.
 func (s *server) sharesGet(w http.ResponseWriter, r *http.Request) {
 	acct, ok := s.account(w, r)
 	if !ok {
+		return
+	}
+	if s.d.Shares == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorBody(noSharesStore))
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), defaultDecisionTimeout)
@@ -104,15 +112,27 @@ func (s *server) sharesGet(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, errorBody("shares unavailable, try again"))
 		return
 	}
+	if shares == nil {
+		shares = []store.Share{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"shares": shares})
 }
 
-// sharesPut and sharesDelete change the caller's own shares; both are idempotent.
+// sharesPut and sharesDelete change the caller's own shares; both are idempotent. The nil check sits
+// here rather than in changeShare because taking the method value off a nil interface panics.
 func (s *server) sharesPut(w http.ResponseWriter, r *http.Request) {
+	if s.d.Shares == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorBody(noSharesStore))
+		return
+	}
 	s.changeShare(w, r, s.d.Shares.PutShare)
 }
 
 func (s *server) sharesDelete(w http.ResponseWriter, r *http.Request) {
+	if s.d.Shares == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorBody(noSharesStore))
+		return
+	}
 	s.changeShare(w, r, s.d.Shares.DeleteShare)
 }
 
@@ -121,8 +141,14 @@ func (s *server) changeShare(w http.ResponseWriter, r *http.Request, apply func(
 	if !ok {
 		return
 	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody))
 	var sh store.Share
-	if err := json.NewDecoder(r.Body).Decode(&sh); err != nil || !validShare(sh) {
+	if err := dec.Decode(&sh); err != nil || !validShare(sh) {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid share"))
+		return
+	}
+	// Anything after the first JSON value is not the share the caller asked for.
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		writeJSON(w, http.StatusBadRequest, errorBody("invalid share"))
 		return
 	}
