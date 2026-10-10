@@ -246,6 +246,33 @@ upsert. Migrations are embedded and applied under an advisory lock. v1 runs one 
 it, and CNPG to 2-3 instances, is a manifest change. frps itself cannot be load balanced: a
 tunnel is a live connection held by one process, so its HA is fast restart, not replicas.
 
+### Later: frps HA by client fan-out
+
+A tunnel lives inside one frps process, so an frps restart drops every tunnel and the CLI
+reconnects. To make frps restarts unobservable, fan the **client** out instead of the server:
+
+- The CLI runs one frp client per frps instance, each dialing a **pinned** control endpoint
+  (`frps-N.…`), so every frps holds the route for the tunnel.
+- Traefik keeps the single `*.w.…` route to a Service that spans the frps instances; because
+  every pod knows the host, a request is served whichever ready pod it reaches.
+- A rolling restart then removes one pod's sessions at a time while the others keep serving, and
+  the client reconnects to the restarted pod. Zero downtime, with stock frp throughout.
+
+What it costs, and why it is a later, not a now:
+
+- **Pinned endpoints.** The N sessions must land on N distinct pods, so there is one control
+  hostname (and IngressRoute) per frps; a load-balanced `/~!frp` does not guarantee coverage.
+- **Broker accounting across instances.** `MAX_TUNNELS_PER_USER` and the run-ID ownership check
+  query one frps dashboard; with N instances they are per-instance, so the cap multiplies unless
+  the broker sums across all dashboards.
+- **CLI.** `tunnel.Run` starts N `client.Service`s from an endpoint list in
+  `/.well-known/tunnels.json`, sharing one token file, refresher and CA bundle.
+- **Spike first.** Whether frp's client runs two `Service`s in one process against two different
+  servers without interference is unproven here (the tests run many against one).
+
+It buys nothing for broker restarts (already HA by replicas, see above) and nothing when frps
+rarely changes.
+
 ## Names and Hostnames
 
 | Item | Rule |
@@ -531,7 +558,7 @@ All of them fail closed.
 - **Phase 3:** hardening: heartbeat revocation proven end to end, the Ping-hook kill switch
   (implemented; enabling it is the frps `ops` change), tuned limits, Gatus, docs, machine
   clients.
-- **Later:** SSH, a web UI, share expiry, live tunnel status.
+- **Later:** SSH, a web UI, share expiry, live tunnel status, frps HA by client fan-out.
 
 ## Verification
 
@@ -583,6 +610,7 @@ Each item is a build-time check with a stated fallback.
 | Instant kill switch (Ping hook) | implemented; enable by adding `"Ping"` to the plugin `ops` when the hour-long revocation window bites |
 | Broker replicas above one, CNPG above one | an outage of either matters |
 | Sharding frps | one frps is outgrown |
+| frps HA (zero-downtime restarts) | an frps restart blip matters; see "Later: frps HA by client fan-out" |
 | Admin API or UI | operators outgrow Pocket ID plus SQL |
 | Cross-owner CSRF hardening in `/authz` | creators stop being fully trusted |
 | Separate registrable domain for sites | cookie or CORS exposure to your apps matters |
