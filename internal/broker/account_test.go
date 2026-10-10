@@ -29,9 +29,10 @@ func (f *fakeIdP) UserInfo(_ context.Context, token string) (idp.Identity, error
 
 // fakeUsers is an in-memory Users that behaves like store.Store, and records every call.
 type fakeUsers struct {
-	users               map[string]store.User // by sub
-	bySubErr, createErr error
-	calls               []string
+	users                            map[string]store.User // by sub
+	bySubErr, byHandleErr, createErr error
+	calls                            []string
+	block                            bool // UserByHandle waits for its context to end
 }
 
 func newUsers(existing ...store.User) *fakeUsers {
@@ -53,8 +54,15 @@ func (f *fakeUsers) UserBySub(_ context.Context, sub string) (store.User, error)
 	return store.User{}, store.ErrNotFound
 }
 
-func (f *fakeUsers) UserByHandle(_ context.Context, handle string) (store.User, error) {
+func (f *fakeUsers) UserByHandle(ctx context.Context, handle string) (store.User, error) {
 	f.calls = append(f.calls, "UserByHandle "+handle)
+	if f.block {
+		<-ctx.Done()
+		return store.User{}, ctx.Err()
+	}
+	if f.byHandleErr != nil {
+		return store.User{}, f.byHandleErr
+	}
 	for _, u := range f.users {
 		if u.Handle == handle {
 			return u, nil
