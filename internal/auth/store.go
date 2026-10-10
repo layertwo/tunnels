@@ -58,10 +58,10 @@ func (s Store) Save(t Tokens) error {
 	if err != nil {
 		return fmt.Errorf("auth: %w", err)
 	}
-	if err := writeFileAtomic(s.tokensPath(), raw); err != nil {
+	if err := WriteFileAtomic(s.tokensPath(), raw); err != nil {
 		return fmt.Errorf("auth: save tokens: %w", err)
 	}
-	if err := writeFileAtomic(s.AccessTokenPath(), []byte(t.AccessToken)); err != nil {
+	if err := WriteFileAtomic(s.AccessTokenPath(), []byte(t.AccessToken)); err != nil {
 		return fmt.Errorf("auth: save access token: %w", err)
 	}
 	return nil
@@ -77,9 +77,9 @@ func (s Store) Clear() error {
 	return nil
 }
 
-// writeFileAtomic puts data at path with mode 0600 so that a reader sees the old file or the new one,
+// WriteFileAtomic puts data at path with mode 0600 so that a reader sees the old file or the new one,
 // never part of it: a temporary file in the same directory, flushed, then renamed over the target.
-func writeFileAtomic(path string, data []byte) (err error) {
+func WriteFileAtomic(path string, data []byte) (err error) {
 	f, err := os.CreateTemp(filepath.Dir(path), ".tmp-"+filepath.Base(path)+"-*")
 	if err != nil {
 		return err
