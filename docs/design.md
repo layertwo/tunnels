@@ -71,7 +71,7 @@ clusters/home/apps/network/tunnels/         # homelab repo: manifests only
 
 github.com/layertwo/tunnels (new repo)
 ├── go.mod                                  # github.com/fatedier/frp pinned to the frps image version
-├── cmd/broker/                             # plugin, /authz, /api, /.well-known, /install.sh, /healthz
+├── cmd/broker/                             # plugin, /authz, /api, /.well-known, /healthz
 ├── cmd/tunnel/                             # CLI
 ├── internal/names/                         # handle, name and label rules, shared by both
 ├── internal/...                            # hooks, authz, store (pgx + embedded migrations),
@@ -216,7 +216,8 @@ and cannot see the host.
   `ConfigSourceAggregator` and `UnsafeFeatures` between v0.65 and v0.68), so the module is pinned
   to the frps image version and both are bumped together. Issue #5557 (filed 2026-10-07) reports
   data races in the client, one a possible nil dereference on shutdown or reconnect; stock frpc
-  has the same code, and the CLI wraps the service in a restart loop. The library builds auth
+  has the same code. After the first login the service reconnects by itself, so the CLI has no
+  restart loop of its own. The library builds auth
   from config only, so tokens still reach it through a file.
 - Go 1.25 or newer is required by frp's go.mod. `proxy.golang.org` does not resolve from the
   design machine's network, so local builds there need `GOPROXY=direct`; CI is unaffected.
@@ -226,9 +227,9 @@ and cannot see the host.
 | State | Where it lives |
 |-------|----------------|
 | users, shares | Postgres (`cnpg-tunnels`) |
-| run-ID ownership, per-user tunnel count | frps dashboard API (`/api/clients?runId=`, proxy listings; both carry `user`) |
+| run-ID ownership, per-user tunnel count | frps dashboard API v2 (`/api/v2/clients?runID=`, `/api/v2/proxies?user=`) |
 | visitor sessions | the OIDC plugin's cookies |
-| share and user cache | per-replica memory, ~5 s TTL |
+| share and user cache | none in phase 1: one primary-key lookup per request (a ~5 s per-replica cache if latency asks for it) |
 
 No leader election and no sticky sessions: a ClusterIP Service in front of N replicas serves both
 Traefik and frps. Concurrent first logins are safe through the unique-handle constraint and an
@@ -295,9 +296,9 @@ linux/arm64), signed with cosign.
 |------|--------|---------|
 | `/plugin/<secret>` | frps only | Login, NewProxy, CloseProxy hooks |
 | `/authz` | Traefik `forwardAuth` | allow or deny one visitor request |
-| `/api/me`, `/api/shares` | CLI, bearer token | ensure user, manage shares |
+| `/api/me`; `/api/shares` in phase 2 | CLI, bearer token | ensure user, manage shares |
 | `/.well-known/tunnels.json` | anyone | bootstrap: issuer, CLI client id, API resource, service host, sites domain, minimum CLI version |
-| `/install.sh`, `/healthz` | anyone | installer, probe |
+| `/install.sh` (later), `/healthz` | anyone | installer, probe |
 
 `/plugin` is never routed by Traefik.
 
@@ -373,13 +374,15 @@ tunnel version
   source, `auth.additionalScopes = ["HeartBeats", "NewWorkConns"]`, `transport.heartbeatInterval = 30`,
   `transport.tls.trustedCaFile` (an embedded root bundle written beside the token file), one http
   proxy with `subdomain` and `localIP`/`localPort`. A goroutine refreshes the token every ~30
-  minutes and rewrites the token file atomically (temp file plus rename, mode 0600). If the
-  service returns, the CLI restarts it with backoff (1 s to 30 s) and the latest token.
+  minutes and rewrites the token file atomically (temp file plus rename, mode 0600). After the
+  first login frp reconnects by itself and reads the latest token from the file; a refused first
+  login ends `tunnel up` with the broker's reason.
 - **share, unshare, list:** HTTPS calls to `/api/shares` with the access token.
 - **Distribution:** GitHub Releases for darwin, linux and windows on amd64 and arm64, plus
   linux/arm. `CGO_ENABLED=0 -trimpath -ldflags "-s -w -X main.version=... -X main.defaultServer=..."`.
-  A checksums file ships with each release. `https://tunnels.layertwo.dev/install.sh` (served by
-  the broker) picks the right binary, verifies its SHA-256 and installs it to `~/.local/bin`.
+  A checksums file and a signed build provenance ship with each release. Later,
+  `https://tunnels.layertwo.dev/install.sh` (served by the broker) picks the right binary, verifies
+  its SHA-256 and installs it to `~/.local/bin`.
   Binaries fetched with curl avoid macOS quarantine; one downloaded in a browser will show the
   unsigned-binary warning.
 
@@ -491,7 +494,7 @@ All of them fail closed.
 |------|--------|
 | Broker | New logins and tunnels refused; visitors get a 5xx; running tunnels continue |
 | Pocket ID | New logins fail; tunnels run until their token expires (up to an hour), then drop |
-| Postgres | `/authz` serves its ~5 s cache, then denies; hooks refuse logins |
+| Postgres | `/authz` answers 503 at once (there is no cache); hooks refuse logins |
 | frps restart | all tunnels drop; the CLI reconnects with a fresh token |
 | Name taken, bad handle | the CLI prints the reject reason |
 
