@@ -760,26 +760,36 @@ func TestPingRejectsADisabledAccount(t *testing.T) {
 	}
 }
 
-// A revoked or expired token is refused, so the tunnel does not outlive the session.
-func TestPingRejectsAnInvalidToken(t *testing.T) {
+// A token this broker cannot verify locally (expired, or a signing key it could not fetch while the
+// identity provider was down) is left to frps, which re-verifies the ping itself; the ping is allowed.
+func TestPingAllowsAnInvalidTokenLocally(t *testing.T) {
 	rep := pingReply(t, func(r *rig) { r.idp.err = idp.ErrInvalidToken }, secretToken, "alice")
-	const want = "your session is not valid; run: tunnel login"
-	if !rep.Reject || rep.RejectReason != want {
-		t.Errorf("reply = %+v, want reject with %q", rep, want)
+	if rep.Reject {
+		t.Errorf("reply = %+v, want allowed: frps re-verifies the token itself", rep)
 	}
 }
 
 // A dependency of ours being down is not the person's doing: the token they hold is still valid, we
-// just cannot check it, so the tunnel lives out that token. The operator gets a warn.
+// just cannot check it, so the tunnel lives out that token. It is a debug line, never an operator warn.
 func TestPingAllowsWhenTheIdentityProviderIsDown(t *testing.T) {
 	r := newRig()
+	r.hooks.Log = slog.New(slog.NewJSONHandler(r.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	r.idp.err = errors.New("dial tcp 10.0.0.5:8080: connect: connection refused")
 	rep := r.call(t, plugin.OpPing, pingContent(secretToken, "alice"))
 	if rep.Reject {
 		t.Errorf("reply = %+v, want allowed: the identity provider being down is not the person's doing", rep)
 	}
-	if line := lastLog(t, r.logs); line["level"] != "WARN" {
-		t.Errorf("log = %v, want a warn line about the failure", line)
+	if line := lastLog(t, r.logs); line["level"] != "DEBUG" {
+		t.Errorf("log = %v, want a debug line about the failure", line)
+	}
+}
+
+// A heartbeat that claims another handle is not this client's heartbeat, whatever its token.
+func TestPingRejectsAHandleMismatch(t *testing.T) {
+	rep := pingReply(t, nil, secretToken, "bob")
+	const want = "run id belongs to another session"
+	if !rep.Reject || rep.RejectReason != want {
+		t.Errorf("reply = %+v, want reject with %q", rep, want)
 	}
 }
 
