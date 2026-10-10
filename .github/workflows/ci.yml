@@ -19,10 +19,8 @@ jobs:
         with:
           go-version: '1.27'
       - name: gofmt
-        run: |
-          gofmt -l .
-          test -z "$(gofmt -l .)"
-      - run: go vet ./...
+        run: test -z "$(gofmt -l . | tee /dev/stderr)"
+      - run: go vet -tags e2e ./... # the tag adds the e2e package and changes no other
 
   test:
     runs-on: ubuntu-latest
@@ -73,7 +71,6 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: '1.27'
-      - run: go vet -tags e2e ./e2e/
       # Builds frps from the pinned module, then runs it with the broker and the CLI's frp client.
       # No -race: frp v0.71.0's client reads Service.ctl without its lock in keepControllerWorking
       # (client/service.go:278) while stop() writes it (:438), and the race detector reports that
