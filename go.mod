@@ -7,6 +7,7 @@ require (
 	github.com/fatedier/frp v0.71.0
 	github.com/go-jose/go-jose/v4 v4.1.5
 	github.com/jackc/pgx/v5 v5.11.0
+	github.com/spf13/pflag v1.0.5
 	golang.org/x/crypto/x509roots/fallback v0.0.0-20261009200856-99e4382b128e
 	golang.org/x/oauth2 v0.36.0
 )
@@ -32,7 +33,6 @@ require (
 	github.com/samber/lo v1.47.0 // indirect
 	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8 // indirect
 	github.com/spf13/cobra v1.8.0 // indirect
-	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/templexxx/cpu v0.1.1 // indirect
 	github.com/templexxx/xorsimd v0.4.3 // indirect
 	github.com/tjfoc/gmsm v1.4.1 // indirect
