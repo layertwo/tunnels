@@ -218,3 +218,68 @@ func TestLoadDamagedFile(t *testing.T) {
 		})
 	}
 }
+
+// A tokens.json that is there but cannot be read is not "not logged in": the person must be told to
+// look at the file, not to log in again.
+func TestLoadReadError(t *testing.T) {
+	s := Store{Dir: t.TempDir()}
+	if err := os.Mkdir(s.tokensPath(), 0o700); err != nil { // a directory where the file should be
+		t.Fatal(err)
+	}
+	_, err := s.Load()
+	if err == nil || errors.Is(err, ErrNotLoggedIn) || !strings.Contains(err.Error(), "read") {
+		t.Errorf("Load over a directory = %v, want a read error that is not ErrNotLoggedIn", err)
+	}
+}
+
+// The directory cannot be made when a regular file is in the way.
+func TestSaveMkdirError(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := Store{Dir: filepath.Join(file, "tunnels")} // a path through a regular file
+	if err := s.Save(Tokens{AccessToken: "a", RefreshToken: "r"}); err == nil || !strings.Contains(err.Error(), "auth:") {
+		t.Errorf("Save under a file = %v, want an auth error", err)
+	}
+}
+
+// If tokens.json cannot be replaced, nothing is written: the refresh token is the file that matters.
+func TestSaveTokensWriteError(t *testing.T) {
+	s := Store{Dir: t.TempDir()}
+	if err := os.Mkdir(s.tokensPath(), 0o700); err != nil { // the refresh token cannot be written
+		t.Fatal(err)
+	}
+	if err := s.Save(Tokens{AccessToken: "a", RefreshToken: "r"}); err == nil || !strings.Contains(err.Error(), "save tokens") {
+		t.Errorf("Save over a directory at tokens.json = %v, want a save-tokens error", err)
+	}
+	if _, err := os.Stat(s.AccessTokenPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Error("the access token was written although tokens.json could not be replaced")
+	}
+}
+
+// A file that is there but will not go away is an error, not a silent success.
+func TestClearError(t *testing.T) {
+	s := Store{Dir: t.TempDir()}
+	if err := os.Mkdir(s.tokensPath(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.tokensPath(), "x"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Clear(); err == nil || !strings.Contains(err.Error(), "auth:") {
+		t.Errorf("Clear with a non-empty directory at tokens.json = %v, want an auth error", err)
+	}
+}
+
+// The temporary file is created in the target's directory; a directory that is not there cannot
+// hold it, and no target file is left behind.
+func TestWriteFileAtomicMissingDir(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing", "tokens.json")
+	if err := WriteFileAtomic(path, []byte("x")); err == nil {
+		t.Fatal("WriteFileAtomic into a missing directory succeeded")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Error("the target file exists after a failed atomic write")
+	}
+}
