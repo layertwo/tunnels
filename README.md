@@ -23,6 +23,9 @@ tunnel logout                   # forgets the login on this computer
 tunnel version
 ```
 
+`--group` shares take effect once the site gate forwards the visitor's groups (a deferred change);
+user shares work today.
+
 `tunnel up` runs until you stop it. A name is 1 to 42 lowercase letters, digits and inner dashes,
 and not `default` (that is the tunnel without a name).
 The login is kept in `tunnels/` in your config directory (`~/Library/Application Support` on macOS,

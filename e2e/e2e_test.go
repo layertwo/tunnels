@@ -610,7 +610,7 @@ func TestSharing(t *testing.T) {
 	if code := s.authz(t, host, "sub-carol", "Carol"); code != 200 {
 		t.Errorf("carol after the user share = %d, want 200", code)
 	}
-	// The grant is Carol's alone: a name that only shares her prefix is still refused.
+	// The grant is Carol's alone: an unrelated user who was not granted it is still refused.
 	if code := s.authz(t, host, "sub-bob", "Bobby"); code != 403 {
 		t.Errorf("bobby with carol's share = %d, want 403", code)
 	}
