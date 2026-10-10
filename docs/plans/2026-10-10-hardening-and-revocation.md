@@ -97,6 +97,6 @@ Out of this repo: the manifests live in `layertwo/homelab`.
 ## Self-Review
 
 - **Spec coverage:** the review's minors — nil→null (Task 1), nil-`Shares` 503 (Task 1), body cap + trailing JSON (Task 1), usage caveat (Task 1), `ListShares` test omitted deliberately (low value; can ride with Task 1 if the implementer adds it); the Ping kill switch (Task 2); the frps `ops` enablement (Task 3).
-- **Type consistency:** `ping(ctx, raw) (plugin.Response, error)` mirrors `login`/`newProxy`/`closeProxy`; `plugin.PingContent` and `reasonOf` are used as defined.
+- **Type consistency:** `ping(ctx, raw) (plugin.Response, error)` mirrors `login`/`newProxy`/`closeProxy`; `plugin.PingContent` is used as defined, and a ping's failure is classified with `refusalOf` (a refusal rejects; anything else is allowed, since frps re-verifies the token).
 - **Review Focus:** each line names its owning test — fail-open on outage (Task 2 `TestPingAllowsWhenTheIdentityProviderIsDown`), `[]` not `null` (Task 1), body cap/trailing (Task 1), nil 503 (Task 1), usage caveat (Task 1).
 - **Proportion:** two broker tasks and one docs/manifest task for a small hardening pass and one hook; no task transcribes a body its signature and tests already determine.

@@ -13,12 +13,16 @@ import (
 	"github.com/layertwo/tunnels/internal/store"
 )
 
-// Shares manages an owner's tunnel shares and answers whether one covers a visitor; store.Store
-// implements it.
+// Shares manages an owner's tunnel shares; store.Store implements it.
 type Shares interface {
 	PutShare(ctx context.Context, ownerSub string, sh store.Share) error
 	DeleteShare(ctx context.Context, ownerSub string, sh store.Share) error
 	SharesByOwner(ctx context.Context, ownerSub string) ([]store.Share, error)
+	ShareMatches(ctx context.Context, ownerSub, tunnel, username string, groups []string) (bool, error)
+}
+
+// ShareMatcher is the part of Shares the authz decision needs: whether a share covers a visitor.
+type ShareMatcher interface {
 	ShareMatches(ctx context.Context, ownerSub, tunnel, username string, groups []string) (bool, error)
 }
 
@@ -33,7 +37,7 @@ type Shares interface {
 // for concurrent use.
 type Authz struct {
 	Users       Users
-	Shares      Shares
+	Shares      ShareMatcher
 	SitesDomain string        // the domain sites live under, without a port or a trailing dot
 	Timeout     time.Duration // for the store lookup; zero means 5 s
 	Log         *slog.Logger
