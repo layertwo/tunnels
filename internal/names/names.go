@@ -29,7 +29,7 @@ var (
 func HandleFromUsername(username string, reserved []string) (string, error) {
 	// Check the original: strings.ToLower maps U+212A (Kelvin sign) to "k".
 	if !usernameRE.MatchString(username) {
-		return "", fmt.Errorf("username %q cannot be a tunnel handle: use 2 to 20 letters and digits", username)
+		return "", fmt.Errorf("username %q cannot be a tunnel handle: use 2 to 20 letters and digits (A-Z, a-z, 0-9)", username)
 	}
 	handle := strings.ToLower(username)
 	if slices.ContainsFunc(reserved, func(r string) bool { return strings.EqualFold(r, handle) }) {
