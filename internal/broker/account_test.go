@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/layertwo/tunnels/internal/idp"
 	"github.com/layertwo/tunnels/internal/store"
@@ -27,12 +28,36 @@ func (f *fakeIdP) UserInfo(_ context.Context, token string) (idp.Identity, error
 	return f.id, f.err
 }
 
+// fakeVerifier stands for the local check of an access token (signature, audience, expiry). A good
+// token is for the sub the identity provider reports, unless sub says otherwise.
+type fakeVerifier struct {
+	idp   *fakeIdP
+	sub   string
+	err   error
+	token string
+	calls int
+}
+
+func (f *fakeVerifier) VerifyAccessToken(_ context.Context, token string) (string, error) {
+	f.calls++
+	f.token = token
+	if f.err != nil {
+		return "", f.err
+	}
+	if f.sub != "" {
+		return f.sub, nil
+	}
+	return f.idp.id.Sub, nil
+}
+
 // fakeUsers is an in-memory Users that behaves like store.Store, and records every call.
 type fakeUsers struct {
 	users                            map[string]store.User // by sub
 	bySubErr, byHandleErr, createErr error
 	calls                            []string
-	block                            bool // UserByHandle waits for its context to end
+	block                            bool // UserBySub and UserByHandle wait for their context to end
+	deadline                         time.Time
+	hasDeadline                      bool // whether the context UserBySub got last had a deadline
 }
 
 func newUsers(existing ...store.User) *fakeUsers {
@@ -43,8 +68,13 @@ func newUsers(existing ...store.User) *fakeUsers {
 	return f
 }
 
-func (f *fakeUsers) UserBySub(_ context.Context, sub string) (store.User, error) {
+func (f *fakeUsers) UserBySub(ctx context.Context, sub string) (store.User, error) {
 	f.calls = append(f.calls, "UserBySub "+sub)
+	f.deadline, f.hasDeadline = ctx.Deadline()
+	if f.block {
+		<-ctx.Done()
+		return store.User{}, ctx.Err()
+	}
 	if f.bySubErr != nil {
 		return store.User{}, f.bySubErr
 	}
@@ -105,8 +135,10 @@ func identity(sub, username string, groups ...string) idp.Identity {
 
 func resolver(id idp.Identity, users *fakeUsers) (Resolver, *fakeIdP) {
 	i := &fakeIdP{id: id}
-	return Resolver{IdP: i, Users: users, CreatorsGroup: creators, Reserved: []string{"admin", "root"}}, i
+	return Resolver{IdP: i, Verifier: &fakeVerifier{idp: i}, Users: users, CreatorsGroup: creators, Reserved: []string{"admin", "root"}}, i
 }
+
+func verifierOf(r Resolver) *fakeVerifier { return r.Verifier.(*fakeVerifier) }
 
 func TestResolveNewUser(t *testing.T) {
 	users := newUsers()
@@ -334,5 +366,55 @@ func TestReasonSurvivesWrapping(t *testing.T) {
 	wrapped := fmt.Errorf("login: %w", err)
 	if !errors.Is(wrapped, ErrNotCreator) || Reason(wrapped) != Reason(err) {
 		t.Errorf("wrapped refusal lost: Is = %v, Reason = %q", errors.Is(wrapped, ErrNotCreator), Reason(wrapped))
+	}
+}
+
+// The token is checked locally before anybody is asked about it: one meant for another application
+// never reaches the identity provider and never creates a row, and a junk token costs no request.
+func TestResolveVerifiesTheTokenFirst(t *testing.T) {
+	const notValid = "your session is not valid; run: tunnel login"
+	tests := []struct {
+		name   string
+		err    error
+		reason string
+	}{
+		{"not valid", idp.ErrInvalidToken, notValid},
+		{"not valid, wrapped", fmt.Errorf("idp: token audience: %w", idp.ErrInvalidToken), notValid},
+		{"the check itself failed", errors.New("keys unavailable"), "login unavailable, try again"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			users := newUsers()
+			r, i := resolver(identity("s", "alice", creators), users)
+			verifierOf(r).err = tt.err
+
+			got, err := r.Resolve(t.Context(), "tok-x")
+			if err == nil || got != (Account{}) {
+				t.Fatalf("Resolve = %+v, %v, want the zero value and an error", got, err)
+			}
+			if reason := Reason(err); reason != tt.reason {
+				t.Errorf("Reason = %q, want %q", reason, tt.reason)
+			}
+			if verifierOf(r).token != "tok-x" {
+				t.Errorf("the verifier was given %q, want the token", verifierOf(r).token)
+			}
+			if i.calls != 0 || len(users.calls) != 0 {
+				t.Errorf("identity provider calls %d, store calls %q after a token that did not verify", i.calls, users.calls)
+			}
+		})
+	}
+}
+
+// Two answers about one token that name different people are not something to guess about.
+func TestResolveRefusesAVerifierAndAProviderThatDisagree(t *testing.T) {
+	users := newUsers()
+	r, _ := resolver(identity("sub-a", "alice", creators), users)
+	verifierOf(r).sub = "sub-b"
+	got, err := r.Resolve(t.Context(), "tok")
+	if err == nil || got != (Account{}) || Reason(err) != "login unavailable, try again" {
+		t.Errorf("Resolve = %+v, %v (%q), want the zero value and the fixed sentence", got, err, Reason(err))
+	}
+	if len(users.calls) != 0 {
+		t.Errorf("store calls %q", users.calls)
 	}
 }

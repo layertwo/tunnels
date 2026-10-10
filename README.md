@@ -4,8 +4,7 @@ A multi-user tunnel service, in the spirit of ngrok, built on [frp](https://gith
 People publish an HTTP service from their own machine at `https://<handle>[-<name>].w.tunnels.layertwo.dev`,
 visitors sign in with Pocket ID, and owners share a tunnel with other users or groups.
 
-Work in progress: [the Phase 1 plan](docs/plans/2026-10-09-phase1-broker-cli.md) is being implemented, and
-`cmd/` appears with the first binary.
+Work in progress: [the Phase 1 plan](docs/plans/2026-10-09-phase1-broker-cli.md) is being implemented.
 
 ## Layout
 
@@ -21,6 +20,12 @@ One Go module and one repository for everything this project ships:
 - Releases: one `vX.Y.Z` tag releases the CLI archives and tags the images together. Component-prefixed
   tags wait until a component needs its own cadence.
 - Cluster manifests live in [`layertwo/homelab`](https://github.com/layertwo/homelab), not here.
+
+## Build
+
+```sh
+go build -o broker ./cmd/broker   # settings are environment variables, see internal/broker/config.go
+```
 
 ## Test
 
