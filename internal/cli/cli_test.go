@@ -252,7 +252,7 @@ func TestUp(t *testing.T) {
 	}
 	o := w.runs[0]
 	want := tunnel.Options{ServerHost: "tunnels.test", ServerPort: 443, Protocol: "wss", Handle: "alice", Name: "blog",
-		LocalPort: 3000, TokenFile: filepath.Join(w.dir, "access-token"), CAFile: filepath.Join(w.dir, "cacert.pem")}
+		LocalPort: 3000, TokenFile: filepath.Join(w.dir, "access-token"), CAFile: filepath.Join(w.dir, "cacert.pem"), Version: "1.2.3"}
 	if o != want {
 		t.Errorf("options =\n%+v\nwant\n%+v", o, want)
 	}

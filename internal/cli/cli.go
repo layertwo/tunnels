@@ -225,7 +225,7 @@ func up(ctx context.Context, env Env, args []string) int {
 	err = env.Run(ctx, tunnel.Options{
 		ServerHost: b.ServiceHost, ServerPort: 443, Protocol: "wss",
 		Handle: tok.Handle, Name: *name, LocalPort: port,
-		TokenFile: s.AccessTokenPath(), CAFile: caFile,
+		TokenFile: s.AccessTokenPath(), CAFile: caFile, Version: env.Version,
 	}, onStatus)
 	if err != nil { // a refused first login: "login to the server failed: <the broker's reason>"
 		fmt.Fprintln(env.Stderr, err)

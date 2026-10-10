@@ -97,8 +97,13 @@ func (h *Hooks) login(ctx context.Context, raw json.RawMessage) (plugin.Response
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return plugin.Response{}, err
 	}
+	// Which CLI the person runs, as it says; a long value is cut, an old CLI sends none.
+	var who []slog.Attr
+	if v := c.Metas["tunnel_version"]; v != "" {
+		who = append(who, slog.String("cli_version", v[:min(len(v), 64)]))
+	}
 	if c.PrivilegeKey == "" {
-		return h.reject(ctx, plugin.OpLogin, "missing token", nil), nil
+		return h.reject(ctx, plugin.OpLogin, "missing token", nil, who...), nil
 	}
 	acct, err := h.Resolver.Resolve(ctx, c.PrivilegeKey)
 	if err != nil {
@@ -106,9 +111,9 @@ func (h *Hooks) login(ctx context.Context, raw json.RawMessage) (plugin.Response
 		if theirs {
 			err = nil // the person's own doing is not a failure of ours
 		}
-		return h.reject(ctx, plugin.OpLogin, text, err), nil
+		return h.reject(ctx, plugin.OpLogin, text, err, who...), nil
 	}
-	who := []slog.Attr{slog.String("handle", acct.Handle), slog.String("sub", acct.Sub)}
+	who = append(who, slog.String("handle", acct.Handle), slog.String("sub", acct.Sub))
 
 	// A run ID that is online under somebody else would let this login push that client off.
 	if c.RunID != "" {

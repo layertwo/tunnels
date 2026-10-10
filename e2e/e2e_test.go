@@ -148,8 +148,9 @@ type stack struct {
 	backend int    // the local port the tunnels publish
 	frps    *frpsapi.Client
 
-	mu    sync.Mutex
-	proto string // X-Forwarded-Proto of the last request the backend got
+	mu        sync.Mutex
+	proto     string // X-Forwarded-Proto of the last request the backend got
+	brokerLog *lockedBuffer
 }
 
 func newStack(t *testing.T, maxTunnels int) *stack {
@@ -173,6 +174,7 @@ func newStack(t *testing.T, maxTunnels int) *stack {
 	s.frps = frpsapi.New(s.dash, dashUser, dashPassword, ua)
 
 	brokerLog := &lockedBuffer{}
+	s.brokerLog = brokerLog
 	b := httptest.NewServer(broker.NewHandler(broker.Config{
 		ServiceHost: "tunnels.test", SitesDomain: sites, Issuer: s.mock.URL, APIResource: mockidp.APIResource,
 		CreatorsGroup: "tunnels-creators", CLIClientID: mockidp.ClientID, MinCLIVersion: "0.0.0",
@@ -261,7 +263,7 @@ func (s *stack) upWithFile(t *testing.T, tokenFile, handle, name string) *run {
 	go func() {
 		r.err = tunnel.Run(ctx, tunnel.Options{
 			ServerHost: "127.0.0.1", ServerPort: s.bind, Protocol: "tcp",
-			Handle: handle, Name: name, LocalPort: s.backend, TokenFile: tokenFile, HeartbeatInterval: 1,
+			Handle: handle, Name: name, LocalPort: s.backend, TokenFile: tokenFile, HeartbeatInterval: 1, Version: "0.0.0-e2e",
 		}, func(st tunnel.Status) {
 			select {
 			case r.status <- st:
@@ -360,6 +362,10 @@ func TestOwnerTunnelServesTraffic(t *testing.T) {
 	s.mu.Unlock()
 	if proto != "https" {
 		t.Errorf("the app saw X-Forwarded-Proto %q, want https (frps rewrites it to http otherwise)", proto)
+	}
+	// The CLI's version travels through frps in the login and lands in the broker's log.
+	if !strings.Contains(s.brokerLog.String(), `"cli_version":"0.0.0-e2e"`) {
+		t.Errorf("the broker did not log the CLI's version:\n%s", s.brokerLog)
 	}
 	if code, _ := s.get(t, "bob."+sites); code != 404 {
 		t.Errorf("a site nobody publishes = %d, want 404", code)

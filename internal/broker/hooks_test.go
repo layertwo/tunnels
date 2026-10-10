@@ -132,7 +132,7 @@ func loginContent(token string) plugin.LoginContent {
 		Login: msg.Login{
 			Version: "0.71.0", Hostname: "laptop", Os: "darwin", Arch: "arm64", User: "alice",
 			PrivilegeKey: token, Timestamp: 1791565403, ClientID: "laptop-1",
-			Metas: map[string]string{"k": "v"}, PoolCount: 1,
+			Metas: map[string]string{"k": "v", "tunnel_version": "1.2.3"}, PoolCount: 1,
 		},
 		ClientAddress: "203.0.113.7:51234",
 	}
@@ -534,10 +534,10 @@ func TestLogsRecordTheDecisionAndNeverTheToken(t *testing.T) {
 	}{
 		{"login accepted", nil,
 			func(t *testing.T, r *rig) { r.call(t, plugin.OpLogin, loginContent(secretToken)) },
-			map[string]any{"op": "Login", "handle": "alice", "sub": "sub-alice", "result": "accepted"}},
+			map[string]any{"op": "Login", "handle": "alice", "sub": "sub-alice", "result": "accepted", "cli_version": "1.2.3"}},
 		{"login rejected as not a creator", func(r *rig) { r.idp.id = identity("sub-alice", "Alice") },
 			func(t *testing.T, r *rig) { r.call(t, plugin.OpLogin, loginContent(secretToken)) },
-			map[string]any{"op": "Login", "result": "rejected", "reason": "your account is not allowed to publish tunnels: ask an admin to add you to tunnels-creators", "err": nil}},
+			map[string]any{"op": "Login", "result": "rejected", "reason": "your account is not allowed to publish tunnels: ask an admin to add you to tunnels-creators", "err": nil, "cli_version": "1.2.3"}},
 		{"login rejected as a foreign run id", func(r *rig) { r.frps.online["run-9"] = "bob" },
 			func(t *testing.T, r *rig) {
 				in := loginContent(secretToken)
@@ -680,5 +680,28 @@ func TestFrpsPluginClientUnderstandsTheAnswers(t *testing.T) {
 	wrong := plugin.NewHTTPPluginOptions(v1.HTTPPluginOptions{Name: "tunnels", Addr: srv.URL, Path: "/plugin/wrong", Ops: []string{plugin.OpLogin}})
 	if _, _, err := wrong.Handle(t.Context(), plugin.OpLogin, in); err == nil {
 		t.Error("Login with the wrong secret: no error")
+	}
+}
+
+// The version is what the client sent: an old CLI sends none, and a long one is cut before it is logged.
+func TestLoginLogsTheCLIVersionAsSent(t *testing.T) {
+	for _, tt := range []struct {
+		sent string
+		want any // nil: not logged
+	}{
+		{"", nil},
+		{"0.1.0", "0.1.0"},
+		{strings.Repeat("9", 100), strings.Repeat("9", 64)},
+	} {
+		r := newRig()
+		in := loginContent(secretToken)
+		in.Metas = map[string]string{"tunnel_version": tt.sent}
+		if rep := r.call(t, plugin.OpLogin, in); rep.Reject {
+			t.Fatalf("Login refused: %+v", rep)
+		}
+		line := lastLog(t, r.logs)
+		if got, present := line["cli_version"]; (tt.want == nil && present) || (tt.want != nil && got != tt.want) {
+			t.Errorf("sent %.10q...: logged cli_version %v (present %v), want %v", tt.sent, got, present, tt.want)
+		}
 	}
 }

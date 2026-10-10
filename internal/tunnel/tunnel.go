@@ -36,6 +36,8 @@ type Options struct {
 	CAFile    string // the roots that verify the server; frp verifies nothing without one
 
 	HeartbeatInterval int // seconds; 0 means 30
+
+	Version string // the CLI's own; the login carries it to the broker, which logs it
 }
 
 // Build turns the options into frp's client configuration, loaded and checked the way frpc loads a
@@ -57,6 +59,7 @@ func Build(o Options) (*v1.ClientCommonConfig, []v1.ProxyConfigurer, error) {
 		"serverAddr": o.ServerHost,
 		"serverPort": o.ServerPort,
 		"user":       o.Handle,
+		"metadatas":  map[string]string{"tunnel_version": o.Version}, // frp's login reports frp's version, not ours
 		"transport": map[string]any{
 			"protocol": o.Protocol,
 			// with tcpMux on, frp sends no heartbeats unless told to, and then never notices a revoked token
