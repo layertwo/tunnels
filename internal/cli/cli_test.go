@@ -583,6 +583,7 @@ func TestShareArgumentErrors(t *testing.T) {
 		{"share", "--name", "default", "bob"},
 		{"share", "--bogus", "bob"},
 		{"unshare"},
+		{"unshare", "--for", "7d", "bob"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			w := newWorld(t)

@@ -423,6 +423,20 @@ func TestSharesDelete(t *testing.T) {
 	}
 }
 
+// A delete always removes the grant, whatever end the body carries, even one already past.
+func TestSharesDeleteIgnoresExpiry(t *testing.T) {
+	r := newServerRig(t)
+	body := `{"tunnel":"blog","kind":"user","grantee":"bob","expires_at":"2020-01-01T00:00:00Z"}`
+	w := r.do("DELETE", "/api/shares", bearer(r.idp.Issue("sub-alice", mockidp.IssueOpts{})), body)
+	if w.Code != 204 {
+		t.Fatalf("= %d %q, want 204 for a delete with a past expires_at", w.Code, w.Body)
+	}
+	want := []shareWrite{{"sub-alice", store.Share{Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)}}}
+	if !reflect.DeepEqual(r.shares.deletes, want) {
+		t.Errorf("recorded %+v, want %+v", r.shares.deletes, want)
+	}
+}
+
 func TestSharesNeedsToken(t *testing.T) {
 	r := newServerRig(t)
 	body := `{"tunnel":"blog","kind":"user","grantee":"bob"}`

@@ -305,6 +305,9 @@ func share(ctx context.Context, env Env, args []string, remove bool) int {
 	if err := fs.Parse(args); err != nil {
 		return bad("%v", err)
 	}
+	if remove && fs.Changed("for") {
+		return bad("--for is only for share, not unshare")
+	}
 	if fs.NArg() != 1 {
 		return bad("give the username or group to share with")
 	}

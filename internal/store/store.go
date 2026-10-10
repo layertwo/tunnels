@@ -218,7 +218,7 @@ func (s *Store) CreateUser(ctx context.Context, sub, handle string) (User, error
 }
 
 const (
-	shareInsert = "insert into shares (owner_sub, tunnel, kind, grantee, expires_at) values ($1, $2, $3, $4, $5) on conflict (owner_sub, tunnel, kind, grantee) do nothing"
+	shareInsert = "insert into shares (owner_sub, tunnel, kind, grantee, expires_at) values ($1, $2, $3, $4, $5) on conflict (owner_sub, tunnel, kind, grantee) do update set expires_at = excluded.expires_at"
 	shareDelete = "delete from shares where owner_sub = $1 and tunnel = $2 and kind = $3 and grantee = $4"
 	shareList   = "select tunnel, kind, grantee, expires_at from shares where owner_sub = $1 order by tunnel, kind, grantee"
 	shareMatch  = `select exists (

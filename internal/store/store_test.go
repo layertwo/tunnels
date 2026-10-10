@@ -411,12 +411,39 @@ func TestPutShareIsIdempotent(t *testing.T) {
 	ctx := testCtx(t)
 	createUser(t, s, ctx, "sub-1", "alice")
 
-	sh := Share{Tunnel: "blog", Kind: "user", Grantee: "Bob"}
+	expires := time.Now().Add(time.Hour).UTC().Truncate(time.Microsecond)
+	sh := Share{Tunnel: "blog", Kind: "user", Grantee: "Bob", ExpiresAt: expires}
 	putShare(t, s, ctx, "sub-1", sh)
 	putShare(t, s, ctx, "sub-1", sh)
 
 	if got := count(t, dbURL, "select count(*) from shares"); got != 1 {
 		t.Errorf("shares has %d rows, want 1", got)
+	}
+	got, err := s.SharesByOwner(ctx, "sub-1")
+	if err != nil || len(got) != 1 || !got[0].ExpiresAt.Equal(expires) {
+		t.Errorf("SharesByOwner = %+v, %v; want one row ending %v", got, err, expires)
+	}
+}
+
+// Re-sharing a permanent grant with an end must replace its end, not keep it forever.
+func TestPutShareUpdatesExpiry(t *testing.T) {
+	dbURL := schemaURL(t)
+	s := openStore(t, dbURL)
+	ctx := testCtx(t)
+	createUser(t, s, ctx, "sub-1", "alice")
+
+	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob"}) // permanent first
+	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: time.Now().Add(-time.Hour)})
+
+	if got := count(t, dbURL, "select count(*) from shares"); got != 1 {
+		t.Errorf("shares has %d rows, want 1", got)
+	}
+	got, err := s.ShareMatches(ctx, "sub-1", "blog", "bob", nil)
+	if err != nil {
+		t.Fatalf("ShareMatches: %v", err)
+	}
+	if got {
+		t.Error("ShareMatches = true after the share was re-granted with a past end, want false")
 	}
 }
 
