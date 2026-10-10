@@ -40,6 +40,10 @@ func Discover(ctx context.Context, hc *http.Client, baseURL string) (Bootstrap, 
 	if err := json.Unmarshal(body, &b); err != nil {
 		return Bootstrap{}, fmt.Errorf("auth: decode tunnels.json: %w", err)
 	}
+	// The device code and the refresh token go to the issuer: not in clear when the service was not.
+	if strings.HasPrefix(baseURL, "https://") && !strings.HasPrefix(b.Issuer, "https://") {
+		return Bootstrap{}, fmt.Errorf("auth: tunnels.json names the identity provider %q, which is not https", b.Issuer)
+	}
 	// MinCLIVersion is advice; the rest is needed to log in and to publish.
 	for _, f := range []struct{ name, value string }{{"issuer", b.Issuer}, {"cli_client_id", b.CLIClientID},
 		{"api_resource", b.APIResource}, {"service_host", b.ServiceHost}, {"sites_domain", b.SitesDomain}} {

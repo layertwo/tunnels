@@ -50,6 +50,9 @@ func New(ctx context.Context, issuer, apiResource, userAgent, usernameClaim, gro
 	if err != nil {
 		return nil, fmt.Errorf("idp: discover %s: %w", issuer, err)
 	}
+	if provider.UserInfoEndpoint() == "" { // the broker could not tell who any token belongs to
+		return nil, fmt.Errorf("idp: %s has no userinfo endpoint", issuer)
+	}
 	c := &Client{
 		hc:            hc,
 		provider:      provider,

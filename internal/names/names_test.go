@@ -5,6 +5,13 @@ import (
 	"testing"
 )
 
+// Somebody whose username is ünal reads "letters" as including ü: the message says which ones.
+func TestHandleFromUsernameNamesTheCharacters(t *testing.T) {
+	if _, err := HandleFromUsername("ünal", nil); err == nil || !strings.Contains(err.Error(), "(A-Z, a-z, 0-9)") {
+		t.Errorf("err = %v, want it to list A-Z, a-z, 0-9", err)
+	}
+}
+
 func TestHandleFromUsername(t *testing.T) {
 	reserved := []string{"admin", "root", "support", "security"}
 	const rule = "use 2 to 20 letters and digits"

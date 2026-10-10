@@ -186,7 +186,7 @@ func TestLoginRefusals(t *testing.T) {
 		},
 			"your account is disabled: ask an admin"},
 		{"bad username", secretToken, func(r *rig) { r.idp.id = identity("sub-new", "alice_b", creators) },
-			`username "alice_b" cannot be a tunnel handle: use 2 to 20 letters and digits; ask an admin to change your username`},
+			`username "alice_b" cannot be a tunnel handle: use 2 to 20 letters and digits (A-Z, a-z, 0-9); ask an admin to change your username`},
 		{"handle taken", secretToken, func(r *rig) { r.idp.id = identity("sub-new", "ALICE", creators) },
 			`the handle "alice" belongs to another account; ask an admin to change your username`},
 		{"token not valid", secretToken, func(r *rig) { r.idp.err = idp.ErrInvalidToken }, "your session is not valid; run: tunnel login"},
