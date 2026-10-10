@@ -31,7 +31,7 @@ Each was checked against the frp v0.71.0 and Pocket ID v2.18.0 source or by a sp
 
 Every task's requirements include this section.
 
-- Module `github.com/layertwo/tunnels`, `go 1.26.0`, default branch `mainline`, commits `feat(scope): ...`, work lands through pull requests the human partner merges. Three PRs: Tasks 1-8 (broker), 9-11 (CLI), 12-13 (e2e, images, releases). Open each as a draft against `mainline`; keep working on the same branch until the previous PR is squash-merged, then `git rebase --onto origin/mainline <old tip>` and retarget, so the diff and CI show only the new work.
+- Module `github.com/layertwo/tunnels`, `go 1.26.0`, default branch `mainline`, commits `feat(scope): ...`, work lands through pull requests the human partner reviews and merges: one pull request per task, opened as a draft against `mainline` after the previous task's PR has merged (squash merges make stacked PRs noisy). Only the human partner closes, merges, retargets or marks a PR ready. Work ahead on a local branch and cut each task's PR from `mainline` by cherry-picking that task's commits.
 - `github.com/fatedier/frp v0.71.0` always equals the frps image `ghcr.io/fatedier/frps:v0.71.0@sha256:cd8b947ba61678b200baa4f71ccc33f3c52e4e2cc0059700ba3b8354e36af7c3`; bump them together.
 - Hosts: service `tunnels.layertwo.dev`; sites `<label>.w.tunnels.layertwo.dev` (`SITES_DOMAIN=w.tunnels.layertwo.dev`).
 - Pocket ID: issuer `https://idp.layertwo.dev` (no trailing slash); API resource `https://tunnels.layertwo.dev`; groups `tunnels-creators` (may connect) and `tunnels-viewers`; the `groups` claim carries group *Names*; CLI client `tunnels-cli` (public, device flow), scopes `openid profile groups offline_access`, `resource` = the API.
