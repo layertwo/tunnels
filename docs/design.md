@@ -515,7 +515,10 @@ All of them fail closed.
   Names are trust-based at this stage.
 - **Phase 1:** the plugin hooks, owner-only `/authz`, `tunnel login` and `tunnel up`, releases.
   Creators cannot touch each other from here on. The repo also publishes `tunnels-frps`.
-- **Phase 2:** sharing: the shares table, `/api/shares`, `share`, `unshare`, `list`.
+- **Phase 2 (implemented):** sharing: the shares table, `/api/shares`, `share`, `unshare`, `list`.
+  A group share works only once the gate forwards the visitor's groups to `/authz` as
+  `X-Tunnels-Groups` (a deferred homelab change); until then the header is stripped and group
+  shares admit no one. User shares work today.
 - **Phase 3:** hardening: heartbeat revocation proven end to end, the Ping-hook kill switch,
   tuned limits, Gatus, docs, machine clients.
 - **Later:** SSH, a web UI, share expiry, live tunnel status.

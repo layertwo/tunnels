@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -636,5 +637,155 @@ func TestDiscoverRefusesAnHTTPIssuerFromAnHTTPSService(t *testing.T) {
 	defer srv.Close()
 	if _, err := Discover(t.Context(), client(), srv.URL); err != nil {
 		t.Errorf("an http issuer from an http service: %v", err)
+	}
+}
+
+// ---- shares
+
+// TestPutShare checks the request one PUT makes and that the service's refusal is what the caller
+// reads, like GetMe.
+func TestPutShare(t *testing.T) {
+	var gotMethod, gotPath, gotAuth, gotCT string
+	var gotBody []byte
+	status, body := http.StatusNoContent, ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotAuth, gotCT = r.Method, r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("Content-Type")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(status)
+		io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	sh := Share{Tunnel: "blog", Kind: "user", Grantee: "bob"}
+	if err := PutShare(t.Context(), client(), srv.URL, "tok-123", sh); err != nil {
+		t.Fatalf("PutShare = %v", err)
+	}
+	if gotMethod != http.MethodPut || gotPath != "/api/shares" || gotAuth != "Bearer tok-123" {
+		t.Errorf("asked %s %s with Authorization %q", gotMethod, gotPath, gotAuth)
+	}
+	if gotCT != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", gotCT)
+	}
+	if got := string(gotBody); got != `{"tunnel":"blog","kind":"user","grantee":"bob"}` {
+		t.Errorf("body = %s", got)
+	}
+
+	for _, tt := range []struct {
+		name   string
+		status int
+		body   string
+		want   string // the exact error text
+	}{
+		{"refusal", 403, `{"error":"your account is not allowed to publish tunnels"}`,
+			"your account is not allowed to publish tunnels"},
+		{"session", 401, `{"error":"your session is not valid; run: tunnel login"}`,
+			"your session is not valid; run: tunnel login"},
+		{"no json", 502, "<html>bad gateway</html>", "the service answered 502"},
+		{"json without a message", 500, `{"error":""}`, "the service answered 500"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			status, body = tt.status, tt.body
+			err := PutShare(t.Context(), client(), srv.URL, "tok-123", sh)
+			if err == nil || err.Error() != tt.want {
+				t.Errorf("err = %v, want %q", err, tt.want)
+			}
+			if err != nil && strings.Contains(err.Error(), "tok-123") {
+				t.Errorf("the error repeats the token: %v", err)
+			}
+		})
+	}
+}
+
+func TestDeleteShare(t *testing.T) {
+	var gotMethod, gotPath, gotAuth, gotCT string
+	var gotBody []byte
+	status, body := http.StatusNoContent, ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotAuth, gotCT = r.Method, r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("Content-Type")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(status)
+		io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	sh := Share{Tunnel: "", Kind: "group", Grantee: "family"}
+	if err := DeleteShare(t.Context(), client(), srv.URL, "tok-123", sh); err != nil {
+		t.Fatalf("DeleteShare = %v", err)
+	}
+	if gotMethod != http.MethodDelete || gotPath != "/api/shares" || gotAuth != "Bearer tok-123" {
+		t.Errorf("asked %s %s with Authorization %q", gotMethod, gotPath, gotAuth)
+	}
+	if gotCT != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", gotCT)
+	}
+	if got := string(gotBody); got != `{"tunnel":"","kind":"group","grantee":"family"}` {
+		t.Errorf("body = %s", got)
+	}
+
+	for _, tt := range []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{"refusal", 403, `{"error":"your account is not allowed to publish tunnels"}`,
+			"your account is not allowed to publish tunnels"},
+		{"session", 401, `{"error":"your session is not valid; run: tunnel login"}`,
+			"your session is not valid; run: tunnel login"},
+		{"no json", 503, "", "the service answered 503"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			status, body = tt.status, tt.body
+			err := DeleteShare(t.Context(), client(), srv.URL, "tok-123", sh)
+			if err == nil || err.Error() != tt.want {
+				t.Errorf("err = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestListShares(t *testing.T) {
+	var gotMethod, gotPath, gotAuth string
+	status, body := http.StatusOK, `{"shares":[{"tunnel":"","kind":"user","grantee":"bob"},{"tunnel":"blog","kind":"group","grantee":"family"}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotAuth = r.Method, r.URL.Path, r.Header.Get("Authorization")
+		w.WriteHeader(status)
+		io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	got, err := ListShares(t.Context(), client(), srv.URL, "tok-123")
+	want := []Share{{Tunnel: "", Kind: "user", Grantee: "bob"}, {Tunnel: "blog", Kind: "group", Grantee: "family"}}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("ListShares = %+v, %v, want %+v", got, err, want)
+	}
+	if gotMethod != http.MethodGet || gotPath != "/api/shares" || gotAuth != "Bearer tok-123" {
+		t.Errorf("asked %s %s with Authorization %q", gotMethod, gotPath, gotAuth)
+	}
+
+	status, body = http.StatusOK, `{"shares":[]}`
+	if got, err := ListShares(t.Context(), client(), srv.URL, "tok-123"); err != nil || len(got) != 0 {
+		t.Errorf("no shares: got %+v, %v, want none", got, err)
+	}
+
+	for _, tt := range []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{"refusal", 403, `{"error":"your account is not allowed to publish tunnels"}`,
+			"your account is not allowed to publish tunnels"},
+		{"session", 401, `{"error":"your session is not valid; run: tunnel login"}`,
+			"your session is not valid; run: tunnel login"},
+		{"no json", 502, "<html>bad gateway</html>", "the service answered 502"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			status, body = tt.status, tt.body
+			got, err := ListShares(t.Context(), client(), srv.URL, "tok-123")
+			if err == nil || got != nil || err.Error() != tt.want {
+				t.Errorf("ListShares = %+v, %v, want nil and %q", got, err, tt.want)
+			}
+		})
 	}
 }

@@ -2,8 +2,8 @@
 
 A multi-user tunnel service, in the spirit of ngrok, built on [frp](https://github.com/fatedier/frp).
 People publish an HTTP service from their own machine at `https://<handle>[-<name>].w.tunnels.layertwo.dev`,
-and visitors sign in with Pocket ID before they reach it. For now a site is open to its owner only;
-sharing it with other users and groups is the next phase (see the [design](docs/design.md)).
+and visitors sign in with Pocket ID before they reach it. An owner shares a site with other users and
+groups (see the [design](docs/design.md)).
 
 ## Use
 
@@ -12,12 +12,19 @@ case, and it has to be 2 to 20 letters and digits. Download the archive for your
 [Releases](https://github.com/layertwo/tunnels/releases), check it (below), and put `tunnel` on your `PATH`.
 
 ```sh
-tunnel login                 # shows a URL and a code to approve in your browser
-tunnel up 3000               # https://<handle>.w.tunnels.layertwo.dev serves http://127.0.0.1:3000
-tunnel up 3000 --name blog   # https://<handle>-blog.w.tunnels.layertwo.dev
-tunnel logout                # forgets the login on this computer
+tunnel login                    # shows a URL and a code to approve in your browser
+tunnel up 3000                  # https://<handle>.w.tunnels.layertwo.dev serves http://127.0.0.1:3000
+tunnel up 3000 --name blog      # https://<handle>-blog.w.tunnels.layertwo.dev
+tunnel share --name blog bob    # lets bob reach the blog tunnel
+tunnel share --group family     # --group shares with a Pocket ID group instead of a username
+tunnel unshare --name blog bob  # stops sharing it
+tunnel list                     # shows the shares you set
+tunnel logout                   # forgets the login on this computer
 tunnel version
 ```
+
+`--group` shares take effect once the site gate forwards the visitor's groups (a deferred change);
+user shares work today.
 
 `tunnel up` runs until you stop it. A name is 1 to 42 lowercase letters, digits and inner dashes,
 and not `default` (that is the tunnel without a name).

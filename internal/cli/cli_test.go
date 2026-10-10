@@ -44,9 +44,18 @@ type world struct {
 	dir      string
 	out, err *syncBuffer
 
-	mu   sync.Mutex
-	runs []tunnel.Options
-	run  func(ctx context.Context, o tunnel.Options, onStatus func(tunnel.Status)) error
+	mu       sync.Mutex
+	runs     []tunnel.Options
+	run      func(ctx context.Context, o tunnel.Options, onStatus func(tunnel.Status)) error
+	shares   []auth.Share    // what GET /api/shares answers
+	shareReq []recordedShare // every PUT or DELETE /api/shares
+}
+
+// recordedShare is one request to change a share.
+type recordedShare struct {
+	method string
+	body   string
+	share  auth.Share
 }
 
 func newWorld(t *testing.T) *world {
@@ -65,6 +74,13 @@ func newWorld(t *testing.T) *world {
 		})
 	})
 	mux.HandleFunc("GET /api/me", func(rw http.ResponseWriter, r *http.Request) { w.me(rw, r) })
+	mux.HandleFunc("GET /api/shares", func(rw http.ResponseWriter, _ *http.Request) {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		json.NewEncoder(rw).Encode(map[string]any{"shares": w.shares})
+	})
+	mux.HandleFunc("PUT /api/shares", w.changeShare)
+	mux.HandleFunc("DELETE /api/shares", w.changeShare)
 	w.svc = httptest.NewServer(mux)
 	t.Cleanup(w.svc.Close)
 	return w
@@ -98,6 +114,17 @@ func (w *world) loggedIn() auth.Tokens {
 		w.t.Fatal(err)
 	}
 	return tok
+}
+
+// changeShare records a PUT or DELETE /api/shares and answers 204 like the broker.
+func (w *world) changeShare(rw http.ResponseWriter, r *http.Request) {
+	raw, _ := io.ReadAll(r.Body)
+	var sh auth.Share
+	json.Unmarshal(raw, &sh)
+	w.mu.Lock()
+	w.shareReq = append(w.shareReq, recordedShare{method: r.Method, body: string(raw), share: sh})
+	w.mu.Unlock()
+	rw.WriteHeader(http.StatusNoContent)
 }
 
 var userCodeRE = regexp.MustCompile(`[A-Z]{4}-[A-Z]{4}`)
@@ -385,5 +412,107 @@ func TestConfigDirFromTheEnvironment(t *testing.T) {
 	}
 	if _, err := (auth.Store{Dir: w.dir}).Load(); !errors.Is(err, auth.ErrNotLoggedIn) {
 		t.Errorf("logout did not use TUNNELS_CONFIG_DIR: %v", err)
+	}
+}
+
+// ---- share, unshare, list
+
+func TestShareCommand(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	if c := w.main("share", "--name", "blog", "bob"); c != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
+	}
+	if len(w.shareReq) != 1 {
+		t.Fatalf("%d share requests, want 1", len(w.shareReq))
+	}
+	got := w.shareReq[0]
+	want := recordedShare{method: http.MethodPut, body: `{"tunnel":"blog","kind":"user","grantee":"bob"}`,
+		share: auth.Share{Tunnel: "blog", Kind: "user", Grantee: "bob"}}
+	if got != want {
+		t.Errorf("request = %+v, want %+v", got, want)
+	}
+}
+
+func TestShareGroup(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	if c := w.main("share", "--name", "blog", "--group", "family"); c != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
+	}
+	if len(w.shareReq) != 1 || w.shareReq[0].share.Kind != "group" {
+		t.Errorf("requests = %+v, want one with kind group", w.shareReq)
+	}
+}
+
+func TestShareDefaultTunnel(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	if c := w.main("share", "bob"); c != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
+	}
+	if len(w.shareReq) != 1 || w.shareReq[0].share.Tunnel != "" {
+		t.Errorf("requests = %+v, want one with an empty tunnel", w.shareReq)
+	}
+}
+
+func TestUnshare(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	if c := w.main("unshare", "--name", "blog", "bob"); c != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
+	}
+	want := recordedShare{method: http.MethodDelete, body: `{"tunnel":"blog","kind":"user","grantee":"bob"}`,
+		share: auth.Share{Tunnel: "blog", Kind: "user", Grantee: "bob"}}
+	if len(w.shareReq) != 1 || w.shareReq[0] != want {
+		t.Errorf("requests = %+v, want %+v", w.shareReq, want)
+	}
+}
+
+func TestListPrints(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	w.shares = []auth.Share{
+		{Tunnel: "", Kind: "user", Grantee: "bob"},
+		{Tunnel: "blog", Kind: "group", Grantee: "family"},
+	}
+	if c := w.main("list"); c != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
+	}
+	out := w.out.String()
+	for _, want := range []string{"(default)", "bob", "blog", "group", "family"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestShareNotLoggedIn(t *testing.T) {
+	w := newWorld(t)
+	if c := w.main("share", "bob"); c != 1 || !strings.Contains(w.err.String(), "run: tunnel login") {
+		t.Errorf("exit %d, stderr:\n%s", c, w.err)
+	}
+}
+
+func TestShareArgumentErrors(t *testing.T) {
+	for _, args := range [][]string{
+		{"share"},
+		{"share", "bob", "extra"},
+		{"share", "--name", "blog"},
+		{"share", "--name", "Blog", "bob"},
+		{"share", "--name", "default", "bob"},
+		{"share", "--bogus", "bob"},
+		{"unshare"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			w := newWorld(t)
+			w.loggedIn()
+			if c := w.main(args...); c != 2 {
+				t.Errorf("exit %d, want 2", c)
+			}
+			if !strings.Contains(w.err.String(), "Usage: tunnel") {
+				t.Errorf("no usage line on stderr:\n%s", w.err)
+			}
+		})
 	}
 }

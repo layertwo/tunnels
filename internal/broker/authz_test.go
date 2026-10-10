@@ -3,6 +3,7 @@ package broker
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,9 +22,10 @@ import (
 const sitesDomain = "w.tunnels.layertwo.dev"
 
 type authzRig struct {
-	authz Authz
-	users *fakeUsers
-	logs  *bytes.Buffer
+	authz  Authz
+	users  *fakeUsers
+	shares *fakeShares
+	logs   *bytes.Buffer
 }
 
 func newAuthzRig() *authzRig {
@@ -32,12 +34,84 @@ func newAuthzRig() *authzRig {
 		store.User{Sub: "sub-bob", Handle: "bob"},
 		store.User{Sub: "sub-dave", Handle: "dave", Disabled: true},
 	)
+	shares := &fakeShares{}
 	logs := &bytes.Buffer{}
 	return &authzRig{
-		authz: Authz{Users: users, SitesDomain: sitesDomain, Log: slog.New(slog.NewJSONHandler(logs, nil))},
-		users: users,
-		logs:  logs,
+		authz:  Authz{Users: users, Shares: shares, SitesDomain: sitesDomain, Log: slog.New(slog.NewJSONHandler(logs, nil))},
+		users:  users,
+		shares: shares,
+		logs:   logs,
 	}
+}
+
+// fakeShares is an in-memory Shares: a user grantee matches case-insensitively, a group grantee exactly,
+// and it records every call.
+type fakeShares struct {
+	users  []string // user grantees
+	groups []string // group grantees
+	err    error
+	calls  []shareCall
+
+	rows     []store.Share // SharesByOwner answer
+	storeErr error         // what the management methods fail with
+	getSubs  []string      // ownerSub of every SharesByOwner call
+	puts     []shareWrite  // every PutShare call
+	deletes  []shareWrite  // every DeleteShare call
+}
+
+type shareCall struct {
+	ownerSub, tunnel, username string
+	groups                     []string
+}
+
+// shareWrite is one PutShare or DeleteShare call.
+type shareWrite struct {
+	ownerSub string
+	share    store.Share
+}
+
+func (f *fakeShares) PutShare(_ context.Context, ownerSub string, sh store.Share) error {
+	if f.storeErr != nil {
+		return f.storeErr
+	}
+	f.puts = append(f.puts, shareWrite{ownerSub, sh})
+	return nil
+}
+
+func (f *fakeShares) DeleteShare(_ context.Context, ownerSub string, sh store.Share) error {
+	if f.storeErr != nil {
+		return f.storeErr
+	}
+	f.deletes = append(f.deletes, shareWrite{ownerSub, sh})
+	return nil
+}
+
+func (f *fakeShares) SharesByOwner(_ context.Context, ownerSub string) ([]store.Share, error) {
+	f.getSubs = append(f.getSubs, ownerSub)
+	if f.storeErr != nil {
+		return nil, f.storeErr
+	}
+	return f.rows, nil
+}
+
+func (f *fakeShares) ShareMatches(_ context.Context, ownerSub, tunnel, username string, groups []string) (bool, error) {
+	f.calls = append(f.calls, shareCall{ownerSub, tunnel, username, groups})
+	if f.err != nil {
+		return false, f.err
+	}
+	for _, grantee := range f.users {
+		if strings.EqualFold(grantee, username) {
+			return true, nil
+		}
+	}
+	for _, grantee := range f.groups {
+		for _, g := range groups {
+			if grantee == g {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 // ownerRequest is what Traefik's forwardAuth sends for alice browsing her own site.
@@ -313,5 +387,122 @@ func TestHeaderNamesInAnyCase(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusOK || resp.Header.Get("X-Tunnel-User") != "alice" {
 		t.Errorf("= %d %v, want 200 for the owner whatever the case of the header names", resp.StatusCode, resp.Header)
+	}
+}
+
+// sharedRequest is a stranger (not the owner) browsing one of alice's sites.
+func sharedRequest(host string) http.Header {
+	h := http.Header{}
+	h.Set("X-Forwarded-Host", host+"."+sitesDomain)
+	h.Set("X-Tunnels-Sub", "sub-stranger")
+	h.Set("X-Tunnels-User", "bob")
+	return h
+}
+
+func TestSharedUserAllowed(t *testing.T) {
+	r := newAuthzRig()
+	r.shares.users = []string{"bob"}
+	w := r.serve(http.MethodGet, sharedRequest("alice-blog"))
+	if w.Code != http.StatusOK || w.Header().Get("X-Tunnel-User") != "bob" || w.Body.Len() != 0 {
+		t.Fatalf("= %d %v %q, want 200 as bob", w.Code, w.Header(), w.Body)
+	}
+	if got := r.shares.calls; len(got) != 1 || got[0].ownerSub != "sub-alice" || got[0].tunnel != "blog" || got[0].username != "bob" {
+		t.Errorf("ShareMatches calls %+v, want sub-alice, tunnel blog, bob", got)
+	}
+}
+
+func TestSharedUserCaseInsensitive(t *testing.T) {
+	r := newAuthzRig()
+	r.shares.users = []string{"bob"}
+	h := sharedRequest("alice-blog")
+	h.Set("X-Tunnels-User", "Bob")
+	if w := r.serve(http.MethodGet, h); w.Code != http.StatusOK {
+		t.Errorf("= %d, want 200 for Bob with a bob share", w.Code)
+	}
+
+	// A share of bob must not admit a name that only shares the prefix.
+	r = newAuthzRig()
+	r.shares.users = []string{"bob"}
+	h = sharedRequest("alice-blog")
+	h.Set("X-Tunnels-User", "bobby")
+	if w := r.serve(http.MethodGet, h); w.Code != http.StatusForbidden {
+		t.Errorf("= %d, want 403 for bobby with a bob share", w.Code)
+	}
+}
+
+func TestSharedGroupAllowed(t *testing.T) {
+	r := newAuthzRig()
+	r.shares.groups = []string{"family"}
+	h := sharedRequest("alice-blog")
+	h.Set("X-Tunnels-Groups", "work,family")
+	if w := r.serve(http.MethodGet, h); w.Code != http.StatusOK {
+		t.Fatalf("= %d, want 200 for a family member", w.Code)
+	}
+	if got := r.shares.calls[0].groups; !reflect.DeepEqual(got, []string{"work", "family"}) {
+		t.Errorf("groups passed = %q, want [work family]", got)
+	}
+}
+
+func TestGroupsAcrossHeaderValues(t *testing.T) {
+	r := newAuthzRig()
+	r.shares.groups = []string{"family"}
+	h := sharedRequest("alice-blog")
+	h["X-Tunnels-Groups"] = []string{"work", "family"}
+	if w := r.serve(http.MethodGet, h); w.Code != http.StatusOK {
+		t.Fatalf("= %d, want 200 for a family member across header values", w.Code)
+	}
+	if got := r.shares.calls[0].groups; !reflect.DeepEqual(got, []string{"work", "family"}) {
+		t.Errorf("groups passed = %q, want [work family]", got)
+	}
+}
+
+func TestNotSharedDenied(t *testing.T) {
+	r := newAuthzRig()
+	w := r.serve(http.MethodGet, sharedRequest("alice-blog"))
+	if w.Code != http.StatusForbidden || w.Body.Len() != 0 {
+		t.Errorf("= %d %q, want an empty 403", w.Code, w.Body)
+	}
+}
+
+func TestShareLookupErrorIs503(t *testing.T) {
+	r := newAuthzRig()
+	r.shares.err = errors.New("dial tcp 10.0.0.5:5432: connect: connection refused")
+	w := r.serve(http.MethodGet, sharedRequest("alice-blog"))
+	if w.Code != http.StatusServiceUnavailable || w.Body.Len() != 0 || len(w.Header()) != 0 {
+		t.Errorf("= %d %v %q, want an empty 503 without headers", w.Code, w.Header(), w.Body)
+	}
+}
+
+func TestOwnerStillAllowed(t *testing.T) {
+	r := newAuthzRig()
+	if w := r.serve(http.MethodGet, ownerRequest()); w.Code != http.StatusOK {
+		t.Fatalf("= %d, want 200", w.Code)
+	}
+	if len(r.shares.calls) != 0 {
+		t.Errorf("ShareMatches calls %+v for the owner, want none", r.shares.calls)
+	}
+}
+
+func TestGroupsOf(t *testing.T) {
+	tests := []struct {
+		name   string
+		values []string
+		want   []string
+	}{
+		{"no header", nil, nil},
+		{"one", []string{"work"}, []string{"work"}},
+		{"comma separated", []string{"work,family"}, []string{"work", "family"}},
+		{"several values", []string{"work", "family"}, []string{"work", "family"}},
+		{"spaces and empties dropped", []string{" work , ,family, "}, []string{"work", "family"}},
+		{"empty", []string{""}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/authz", nil)
+			r.Header["X-Tunnels-Groups"] = tt.values
+			if got := groupsOf(r); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("groupsOf(%q) = %q, want %q", tt.values, got, tt.want)
+			}
+		})
 	}
 }

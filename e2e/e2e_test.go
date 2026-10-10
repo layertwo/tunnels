@@ -144,6 +144,7 @@ type stack struct {
 	bind    int
 	vhost   string // frps's http address
 	dash    string // frps's dashboard
+	url     string // the broker's base URL
 	plugin  string // the broker's plugin URL
 	backend int    // the local port the tunnels publish
 	frps    *frpsapi.Client
@@ -179,8 +180,9 @@ func newStack(t *testing.T, maxTunnels int) *stack {
 		ServiceHost: "tunnels.test", SitesDomain: sites, Issuer: s.mock.URL, APIResource: mockidp.APIResource,
 		CreatorsGroup: "tunnels-creators", CLIClientID: mockidp.ClientID, MinCLIVersion: "0.0.0",
 		PluginSecret: secret, MaxTunnelsPerUser: maxTunnels, BandwidthLimit: "10MB", Reserved: []string{"admin"},
-	}, broker.Deps{IdP: provider, Verifier: provider, Users: users, Frps: s.frps, Log: slog.New(slog.NewJSONHandler(brokerLog, nil))}))
+	}, broker.Deps{IdP: provider, Verifier: provider, Users: users, Shares: users, Frps: s.frps, Log: slog.New(slog.NewJSONHandler(brokerLog, nil))}))
 	t.Cleanup(b.Close)
+	s.url = b.URL
 	s.plugin = b.URL + "/plugin/" + secret
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -550,4 +552,84 @@ func TestTunnelLimit(t *testing.T) {
 	}
 	// bob has a limit of his own
 	s.up(t, s.token("sub-bob"), "bob", "").waitPhase(t, "running")
+}
+
+// authz asks the broker's /authz as the ingress would, with the visitor's forwarded headers, and
+// returns the decision's status code.
+func (s *stack) authz(t *testing.T, host, sub, user string, groups ...string) int {
+	t.Helper()
+	req, _ := http.NewRequest("GET", s.url+"/authz", nil)
+	req.Header.Set("X-Forwarded-Host", host)
+	req.Header.Set("X-Tunnels-Sub", sub)
+	req.Header.Set("X-Tunnels-User", user)
+	for _, g := range groups {
+		req.Header.Add("X-Tunnels-Groups", g)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode
+}
+
+// changeShare sets or removes one of the owner's shares exactly as `tunnel share`/`unshare` do: a
+// bearer token and a {tunnel,kind,grantee} body. It returns the status code.
+func (s *stack) changeShare(t *testing.T, method, token string, sh store.Share) int {
+	t.Helper()
+	body, _ := json.Marshal(sh)
+	req, _ := http.NewRequest(method, s.url+"/api/shares", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode
+}
+
+// TestSharing proves sharing end to end: the owner's API writes a share, /authz admits the granted
+// viewer (by username, then by group) and refuses again once the share is gone.
+func TestSharing(t *testing.T) {
+	s := newStack(t, 5)
+	s.up(t, s.token("sub-alice"), "alice", "").waitPhase(t, "running")
+	host := "alice." + sites
+	owner := s.token("sub-alice")
+
+	// A stranger reaches nothing before the owner shares.
+	if code := s.authz(t, host, "sub-carol", "Carol"); code != 403 {
+		t.Errorf("carol before the share = %d, want 403", code)
+	}
+
+	user := store.Share{Tunnel: "", Kind: "user", Grantee: "Carol"}
+	if code := s.changeShare(t, http.MethodPut, owner, user); code != 204 {
+		t.Fatalf("PUT user share = %d, want 204", code)
+	}
+	if code := s.authz(t, host, "sub-carol", "Carol"); code != 200 {
+		t.Errorf("carol after the user share = %d, want 200", code)
+	}
+	// The grant is Carol's alone: an unrelated user who was not granted it is still refused.
+	if code := s.authz(t, host, "sub-bob", "Bobby"); code != 403 {
+		t.Errorf("bobby with carol's share = %d, want 403", code)
+	}
+	if code := s.changeShare(t, http.MethodDelete, owner, user); code != 204 {
+		t.Fatalf("DELETE user share = %d, want 204", code)
+	}
+	if code := s.authz(t, host, "sub-carol", "Carol"); code != 403 {
+		t.Errorf("carol after the unshare = %d, want 403", code)
+	}
+
+	// A group share admits a member, and only a member.
+	group := store.Share{Tunnel: "", Kind: "group", Grantee: "family"}
+	if code := s.changeShare(t, http.MethodPut, owner, group); code != 204 {
+		t.Fatalf("PUT group share = %d, want 204", code)
+	}
+	if code := s.authz(t, host, "sub-carol", "Carol", "work", "family"); code != 200 {
+		t.Errorf("carol in the shared group = %d, want 200", code)
+	}
+	if code := s.authz(t, host, "sub-carol", "Carol", "work"); code != 403 {
+		t.Errorf("carol in another group = %d, want 403", code)
+	}
 }

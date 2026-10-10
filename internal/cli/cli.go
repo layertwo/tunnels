@@ -34,9 +34,12 @@ type Env struct {
 }
 
 const usage = `Usage:
-  tunnel login [--server HOST]   log in with your browser
-  tunnel up PORT [--name NAME]   publish http://127.0.0.1:PORT until you stop it
-  tunnel logout                  forget the login on this computer
+  tunnel login [--server HOST]                    log in with your browser
+  tunnel up PORT [--name NAME]                    publish http://127.0.0.1:PORT until you stop it
+  tunnel share [--name NAME] [--group] GRANTEE    let someone else reach a tunnel
+  tunnel unshare [--name NAME] [--group] GRANTEE  stop sharing a tunnel
+  tunnel list                                     show what you share
+  tunnel logout                                   forget the login on this computer
   tunnel version
 `
 
@@ -62,6 +65,12 @@ func Main(args []string, env Env) int {
 		return login(ctx, env, rest)
 	case "up":
 		return up(ctx, env, rest)
+	case "share":
+		return share(ctx, env, rest, false)
+	case "unshare":
+		return share(ctx, env, rest, true)
+	case "list":
+		return list(ctx, env, rest)
 	case "logout", "version":
 		if len(rest) > 0 {
 			fmt.Fprint(env.Stderr, usage)
@@ -230,6 +239,112 @@ func up(ctx context.Context, env Env, args []string) int {
 	if err != nil { // a refused first login: "login to the server failed: <the broker's reason>"
 		fmt.Fprintln(env.Stderr, err)
 		return 1
+	}
+	return 0
+}
+
+// session loads the stored login, finds the service and refreshes the token. It prints what up
+// prints when either step fails.
+func session(ctx context.Context, env Env) (auth.Tokens, bool) {
+	s, err := store(env)
+	if err != nil {
+		fmt.Fprintln(env.Stderr, err)
+		return auth.Tokens{}, false
+	}
+	tok, err := s.Load()
+	if err != nil {
+		fmt.Fprintln(env.Stderr, err)
+		return auth.Tokens{}, false
+	}
+	b, err := auth.Discover(ctx, env.HTTP, tok.Server)
+	if err != nil {
+		fmt.Fprintf(env.Stderr, "cannot reach %s: %v\n", tok.Server, err)
+		return auth.Tokens{}, false
+	}
+	tok, err = auth.RefreshStored(ctx, s, oidcFor(b, env.HTTP))
+	if err != nil {
+		fmt.Fprintf(env.Stderr, "could not refresh your session (%s); run: tunnel login\n", strings.TrimSuffix(err.Error(), "; run: tunnel login"))
+		return auth.Tokens{}, false
+	}
+	return tok, true
+}
+
+// tunnelLabel is a share's tunnel as a person reads it: the default tunnel has no name.
+func tunnelLabel(tunnel string) string {
+	if tunnel == "" {
+		return "(default)"
+	}
+	return tunnel
+}
+
+// share grants or, when remove is set, removes access to a tunnel.
+func share(ctx context.Context, env Env, args []string, remove bool) int {
+	verb := "share"
+	if remove {
+		verb = "unshare"
+	}
+	fs := pflag.NewFlagSet(verb, pflag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	name := fs.String("name", "", "the tunnel's name; none means the default tunnel")
+	group := fs.Bool("group", false, "share with a Pocket ID group instead of a username")
+	bad := func(format string, a ...any) int {
+		fmt.Fprintf(env.Stderr, format+"\nUsage: tunnel "+verb+" [--name NAME] [--group] GRANTEE\n", a...)
+		return 2
+	}
+	if err := fs.Parse(args); err != nil {
+		return bad("%v", err)
+	}
+	if fs.NArg() != 1 {
+		return bad("give the username or group to share with")
+	}
+	if *name != "" && !names.ValidTunnelName(*name) {
+		return bad("%q is not a tunnel name: use 1 to 42 lowercase letters, digits and inner dashes, other than %q", *name, names.Default)
+	}
+	kind := "user"
+	if *group {
+		kind = "group"
+	}
+	sh := auth.Share{Tunnel: *name, Kind: kind, Grantee: fs.Arg(0)}
+
+	tok, ok := session(ctx, env)
+	if !ok {
+		return 1
+	}
+	var err error
+	if remove {
+		err = auth.DeleteShare(ctx, env.HTTP, tok.Server, tok.AccessToken, sh)
+	} else {
+		err = auth.PutShare(ctx, env.HTTP, tok.Server, tok.AccessToken, sh)
+	}
+	if err != nil {
+		fmt.Fprintln(env.Stderr, err)
+		return 1
+	}
+	if remove {
+		fmt.Fprintf(env.Stdout, "Stopped sharing %s with %s\n", tunnelLabel(sh.Tunnel), sh.Grantee)
+	} else {
+		fmt.Fprintf(env.Stdout, "Shared %s with %s\n", tunnelLabel(sh.Tunnel), sh.Grantee)
+	}
+	return 0
+}
+
+// list prints the shares the owner set on the service.
+func list(ctx context.Context, env Env, args []string) int {
+	if len(args) > 0 {
+		fmt.Fprint(env.Stderr, usage)
+		return 2
+	}
+	tok, ok := session(ctx, env)
+	if !ok {
+		return 1
+	}
+	shares, err := auth.ListShares(ctx, env.HTTP, tok.Server, tok.AccessToken)
+	if err != nil {
+		fmt.Fprintln(env.Stderr, err)
+		return 1
+	}
+	for _, sh := range shares {
+		fmt.Fprintf(env.Stdout, "%s\t%s\t%s\n", tunnelLabel(sh.Tunnel), sh.Kind, sh.Grantee)
 	}
 	return 0
 }
