@@ -144,7 +144,7 @@ func TestAPIMe(t *testing.T) {
 	vera := r.idp.Issue("sub-vera", mockidp.IssueOpts{})
 	otherAudience := r.idp.Issue("sub-alice", mockidp.IssueOpts{Audience: []string{"https://other.example", mockidp.ClientID, r.idp.URL}})
 	expired := r.idp.Issue("sub-alice", mockidp.IssueOpts{TTL: -time.Minute})
-	invalid := `{"error":"invalid token"}`
+	invalid := `{"error":"your session is not valid; run: tunnel login"}`
 
 	tests := []struct {
 		name string
@@ -312,5 +312,51 @@ func TestAPIMeGivesTheStoreADeadline(t *testing.T) {
 	}
 	if left := time.Until(r.users.deadline); left <= 0 || left > defaultDecisionTimeout {
 		t.Errorf("deadline in %v, want within %v", left, defaultDecisionTimeout)
+	}
+}
+
+func postLogin(t *testing.T, r *serverRig, token string) reply {
+	t.Helper()
+	body, _ := json.Marshal(plugin.Request{Version: plugin.APIVersion, Op: plugin.OpLogin, Content: loginContent(token)})
+	w := r.do("POST", "/plugin/"+pluginSecret, nil, string(body))
+	var rep reply
+	if err := json.Unmarshal(w.Body.Bytes(), &rep); err != nil || w.Code != 200 {
+		t.Fatalf("= %d %q (%v)", w.Code, w.Body, err)
+	}
+	return rep
+}
+
+// frps checks the audience too, but only if it was configured to; the broker is the first layer.
+func TestLoginRefusesATokenIssuedForAnotherAPI(t *testing.T) {
+	r := newServerRig(t)
+	other := r.idp.Issue("sub-alice", mockidp.IssueOpts{Audience: []string{"https://other-app.example", mockidp.ClientID, r.idp.URL}})
+	rep := postLogin(t, r, other)
+	if !rep.Reject || rep.RejectReason != "your session is not valid; run: tunnel login" {
+		t.Errorf("Login with a token issued for another API: %+v", rep)
+	}
+	if len(r.users.users) != 0 {
+		t.Errorf("a row was created for it: %v", r.users.users)
+	}
+}
+
+// frps calls the plugin before it checks anything, so anybody who can open its port can send junk.
+// A token that does not verify locally costs no request to the identity provider. (A token with a
+// key id nobody has seen does: go-oidc looks for new keys. A rate limit in front of the broker is
+// what bounds that.)
+func TestLoginDoesNotAskTheIdPAboutJunk(t *testing.T) {
+	r := newServerRig(t)
+	if rep := postLogin(t, r, r.idp.Issue("sub-alice", mockidp.IssueOpts{})); rep.Reject { // loads the keys
+		t.Fatalf("a good login was refused: %+v", rep)
+	}
+	before := len(r.idp.UserAgents())
+	expired := r.idp.Issue("sub-alice", mockidp.IssueOpts{TTL: -time.Minute})
+	otherAudience := r.idp.Issue("sub-alice", mockidp.IssueOpts{Audience: []string{"https://other-app.example", mockidp.ClientID, r.idp.URL}})
+	for i, token := range []string{"junk-0", "a.b.c", "eyJ.e30.c2ln", expired, otherAudience} {
+		if rep := postLogin(t, r, token); !rep.Reject {
+			t.Errorf("token %d accepted: %+v", i, rep)
+		}
+	}
+	if n := len(r.idp.UserAgents()) - before; n != 0 {
+		t.Errorf("%d requests reached the identity provider for tokens that do not verify, want 0", n)
 	}
 }

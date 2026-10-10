@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -139,14 +140,19 @@ func (h *Hooks) newProxy(ctx context.Context, raw json.RawMessage) (plugin.Respo
 	handle := c.User.User
 	who := []slog.Attr{slog.String("handle", handle), slog.String("proxy", c.ProxyName)}
 
+	if h.BandwidthLimit == "" { // frps reads "" as no limit, so this must not fail open
+		return h.reject(ctx, plugin.OpNewProxy, "cannot verify your tunnels right now, try again", errors.New("hooks: no bandwidth limit configured"), who...), nil
+	}
 	if c.ProxyType != "http" || len(c.CustomDomains) > 0 || len(c.Locations) > 0 {
 		return h.reject(ctx, plugin.OpNewProxy, "only plain http tunnels are allowed", nil, who...), nil
 	}
 	if !ownsProxy(handle, c.ProxyName, c.SubDomain) {
 		return h.reject(ctx, plugin.OpNewProxy, "name "+c.ProxyName+" is not yours", nil, who...), nil
 	}
-	// ponytail: read, then register, so concurrent proxies of one user can overshoot the limit by the
-	// number in flight; a per-user lock if that ever matters.
+	// ponytail: the dashboard only counts a proxy once frps has acted on the answer given here, so a
+	// user who connects many clients at once can overshoot the limit (12 at once against a limit of 3
+	// left 5 online). A lock here would not help; remember the names accepted in the last few seconds
+	// and count them with the dashboard's if that ever matters (one broker replica assumed).
 	online, err := h.Frps.OnlineProxyCount(ctx, handle)
 	if err != nil {
 		return h.reject(ctx, plugin.OpNewProxy, "cannot verify your tunnels right now, try again", err, who...), nil

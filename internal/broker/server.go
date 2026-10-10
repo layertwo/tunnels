@@ -11,11 +11,6 @@ import (
 	"github.com/layertwo/tunnels/internal/idp"
 )
 
-// TokenVerifier checks that an access token was issued for this API and returns its subject.
-type TokenVerifier interface {
-	VerifyAccessToken(ctx context.Context, raw string) (sub string, err error)
-}
-
 // Deps are what the handler talks to.
 type Deps struct {
 	IdP      IdP
@@ -28,7 +23,7 @@ type Deps struct {
 // NewHandler serves everything the broker answers: the frps plugin, /authz for Traefik, the API the
 // CLI uses and the document that tells it where to log in.
 func NewHandler(cfg Config, d Deps) http.Handler {
-	resolver := Resolver{IdP: d.IdP, Users: d.Users, CreatorsGroup: cfg.CreatorsGroup, Reserved: cfg.Reserved}
+	resolver := Resolver{IdP: d.IdP, Verifier: d.Verifier, Users: d.Users, CreatorsGroup: cfg.CreatorsGroup, Reserved: cfg.Reserved}
 	s := &server{cfg: cfg, d: d, resolver: resolver}
 
 	mux := http.NewServeMux()
@@ -50,20 +45,15 @@ type server struct {
 	resolver Resolver
 }
 
-// me tells a logged-in creator their handle. The token must have been issued for this API, which
-// userinfo alone does not show: any application's token for the same person would pass there.
+// me tells a logged-in creator their handle.
 func (s *server) me(w http.ResponseWriter, r *http.Request) {
 	token, ok := bearerToken(r)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, errorBody("invalid token"))
+		writeJSON(w, http.StatusUnauthorized, errorBody(notValid))
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), defaultDecisionTimeout)
 	defer cancel()
-	if _, err := s.d.Verifier.VerifyAccessToken(ctx, token); err != nil {
-		writeJSON(w, http.StatusUnauthorized, errorBody("invalid token"))
-		return
-	}
 
 	acct, err := s.resolver.Resolve(ctx, token)
 	if err == nil {

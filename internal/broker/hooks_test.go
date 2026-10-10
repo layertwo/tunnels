@@ -66,7 +66,7 @@ func newRig() *rig {
 	logs := &bytes.Buffer{}
 	return &rig{
 		hooks: &Hooks{
-			Resolver:          Resolver{IdP: i, Users: users, CreatorsGroup: creators, Reserved: []string{"admin"}},
+			Resolver:          Resolver{IdP: i, Verifier: &fakeVerifier{idp: i}, Users: users, CreatorsGroup: creators, Reserved: []string{"admin"}},
 			Frps:              f,
 			Secret:            pluginSecret,
 			MaxTunnelsPerUser: 5,
@@ -375,6 +375,20 @@ func TestNewProxy(t *testing.T) {
 				t.Errorf("counted tunnels of %q, want %q", r.frps.countAsked[0], tt.handle)
 			}
 		})
+	}
+}
+
+// A hook that was never given a bandwidth limit would pass the client's own on, or none, and frps
+// then limits nothing; like an empty secret or a limit of zero tunnels, it refuses.
+func TestNewProxyWithoutABandwidthLimitIsRefused(t *testing.T) {
+	r := newRig()
+	r.hooks.BandwidthLimit = ""
+	rep := r.call(t, plugin.OpNewProxy, newProxyContent("alice", "alice.default", "alice"))
+	if !rep.Reject {
+		t.Errorf("accepted with no limit configured: %v", asMap(t, rep.Content))
+	}
+	if !strings.Contains(r.logs.String(), "no bandwidth limit") {
+		t.Errorf("the operator is not told why:\n%s", r.logs)
 	}
 }
 

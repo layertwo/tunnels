@@ -19,6 +19,12 @@ type IdP interface {
 	UserInfo(ctx context.Context, accessToken string) (idp.Identity, error)
 }
 
+// TokenVerifier checks an access token locally (signature, issuer, audience, expiry) and returns the
+// sub it was issued for; idp.Client implements it.
+type TokenVerifier interface {
+	VerifyAccessToken(ctx context.Context, raw string) (sub string, err error)
+}
+
 // Users is where accounts are kept; store.Store implements it.
 type Users interface {
 	UserBySub(ctx context.Context, sub string) (store.User, error)
@@ -42,6 +48,9 @@ var (
 	ErrBadHandle  = errors.New("broker: username cannot be a handle")
 )
 
+// notValid is what a person is told when their token is refused.
+const notValid = "your session is not valid; run: tunnel login"
+
 // refusal is one of the errors above together with the sentence the person is shown.
 type refusal struct {
 	kind error
@@ -54,6 +63,7 @@ func (e *refusal) Unwrap() error { return e.kind }
 // Resolver turns an access token into an Account. It keeps no state and is safe for concurrent use.
 type Resolver struct {
 	IdP           IdP
+	Verifier      TokenVerifier
 	Users         Users
 	CreatorsGroup string   // the group whose members may publish
 	Reserved      []string // handles nobody gets
@@ -62,12 +72,19 @@ type Resolver struct {
 // Resolve says who the token belongs to and creates their row on the first login. Every failure is
 // an error: nothing is allowed because a lookup could not be answered.
 func (r Resolver) Resolve(ctx context.Context, accessToken string) (Account, error) {
+	// Before anybody is asked about the token: userinfo accepts any application's token for the same
+	// person, so the audience is checked here, and junk is turned away without a request to the
+	// identity provider (frps calls the plugin before it checks anything, so anybody can send junk).
+	sub, err := r.Verifier.VerifyAccessToken(ctx, accessToken)
+	if err != nil {
+		return Account{}, err
+	}
 	id, err := r.IdP.UserInfo(ctx, accessToken)
 	if err != nil {
 		return Account{}, err
 	}
-	if id.Sub == "" {
-		return Account{}, errors.New("broker: identity has no sub")
+	if id.Sub == "" || id.Sub != sub {
+		return Account{}, errors.New("broker: the token and the identity provider name different subjects")
 	}
 	// Before the store, so that somebody who may not publish never creates or probes a row.
 	if r.CreatorsGroup == "" || !slices.Contains(id.Groups, r.CreatorsGroup) {
@@ -121,7 +138,7 @@ func reasonOf(err error) (text string, theirs bool) {
 	case errors.As(err, &r):
 		return r.text, true
 	case errors.Is(err, idp.ErrInvalidToken):
-		return "your session is not valid; run: tunnel login", true
+		return notValid, true
 	}
 	return "login unavailable, try again", false
 }
