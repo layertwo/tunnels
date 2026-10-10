@@ -158,7 +158,7 @@ func (a Authz) crossOwner(r *http.Request, target string) bool {
 	if err != nil {
 		return false
 	}
-	label, ok := names.SiteLabel(u.Host, a.SitesDomain)
+	label, ok := names.SiteLabel(u.Hostname(), a.SitesDomain)
 	if !ok {
 		return false
 	}

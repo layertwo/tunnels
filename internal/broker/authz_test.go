@@ -519,6 +519,16 @@ func TestCrossOwnerStateChangeRefused(t *testing.T) {
 	}
 }
 
+// A non-default port on the Origin host must not slip the check: the port is not part of the
+// sites host, so the owner is still bob.
+func TestCrossOwnerStateChangeWithPortRefused(t *testing.T) {
+	h := ownerRequest()
+	h.Set("Origin", "https://bob-x."+sitesDomain+":8443")
+	if w := newAuthzRig().serve(http.MethodPost, h); w.Code != http.StatusForbidden {
+		t.Errorf("= %d, want 403", w.Code)
+	}
+}
+
 // Safe methods cannot change anything, so they are never refused for their Origin.
 func TestCrossOwnerSafeMethodAllowed(t *testing.T) {
 	h := ownerRequest()

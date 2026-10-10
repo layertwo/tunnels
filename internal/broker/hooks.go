@@ -23,13 +23,14 @@ type Frps interface {
 	OnlineProxyCount(ctx context.Context, user string) (int, error)
 }
 
-// Hooks is frps's HTTP plugin for the Login, NewProxy, CloseProxy and Ping ops, mounted at /plugin/<Secret>.
-// It keeps no state and is safe for concurrent use.
+// Hooks is frps's HTTP plugin for the Login, NewProxy, CloseProxy, Ping and NewWorkConn ops, mounted
+// at /plugin/<Secret>. It keeps no state and is safe for concurrent use.
 //
 // Every decision, accept or reject, is HTTP 200: frps shows its client any other error status as an
 // opaque "send Login request to plugin error". A decision that cannot be made (a dependency is down
-// or slow) is a reject, except a Ping: a ping the broker cannot verify is allowed, because frps
-// re-verifies the ping's token itself and this hook only adds the account checks frps cannot make.
+// or slow) is a reject, except a Ping and a NewWorkConn: a token the broker cannot verify is allowed,
+// because frps re-verifies it itself and these hooks only add the account checks frps cannot make.
+// NewWorkConn's binding relies on the Login op having set user.user to the verified handle.
 type Hooks struct {
 	Resolver          Resolver
 	Frps              Frps

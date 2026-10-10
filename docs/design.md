@@ -140,8 +140,9 @@ owner's visitors' requests, cookies included (reproduced against a real frps in 
 review). With the scope frps verifies a valid token on every work connection. It does not bind that
 token to this control: frp accepts any token whose subject has logged in since frps started, so a
 creator who learned another creator's run ID could still inject. Run IDs are therefore kept out
-of logs and errors, and a `NewWorkConn` plugin op that checks the token against `user.user` is the
-upgrade if run IDs ever leak (it would put the broker on the data path).
+of logs and errors. The broker's `NewWorkConn` hook (implemented) is what binds a work connection
+to a control user: it checks the connection's token against the `user.user` Login set, and
+enabling it is adding `"NewWorkConn"` to frps's plugin `ops`, exactly as `Ping` is enabled.
 
 Each ping re-reads a file token source, so the CLI keeps the token file fresh. Removing someone
 from `tunnels-creators` or disabling the account stops refresh, and the tunnel ends about an hour
@@ -363,7 +364,8 @@ sees. A group name containing a comma is unsupported (groups travel comma-separa
 **API.** Bearer access token verified locally against Pocket ID's JWKS (issuer, audience,
 expiry). `GET /api/me` repeats the Login hook's userinfo and handle logic, so the CLI learns its
 handle at `tunnel login`. `GET`, `PUT` and `DELETE /api/shares` take `{tunnel, kind, grantee}`;
-PUT and DELETE are idempotent.
+PUT also takes an optional absolute RFC3339 `expires_at`, which must be in the future or the
+request is a 400. PUT and DELETE are idempotent.
 
 **Data model.**
 
@@ -374,6 +376,7 @@ shares (owner_sub text references users(sub) on delete cascade,
         tunnel text not null default '',                       -- '' = default tunnel
         kind text check (kind in ('user','group')), grantee text not null,
         created_at timestamptz not null default now(),
+        expires_at timestamptz,                                -- null = never
         primary key (owner_sub, tunnel, kind, grantee))
 ```
 
@@ -538,7 +541,8 @@ All of them fail closed.
 ## Testing
 
 - **Unit tests** (Go, table-driven) on the code where a bug is a security hole: the names
-  package, the three hooks, the `/authz` matrix (owner, shared user, shared group, case
+  package, the five plugin ops (Login, NewProxy, CloseProxy, Ping, NewWorkConn), the `/authz`
+  matrix (owner, shared user, shared group, case
   folding, default deny), the share API, token refresh.
 - **Integration test**, seeded from the spike: the official frps image, the broker and the CLI
   against a mock OIDC issuer. It asserts a stolen name, a wrong audience, an expired token, run-ID
@@ -549,18 +553,18 @@ All of them fail closed.
 
 - `kubectl -n tunnels get deploy broker` shows `2/2`, and `kubectl -n tunnels get pdb broker`
   shows `MIN AVAILABLE 1`.
-- frps's plugin `ops` lists `"Ping"` and `"NewWorkConn"`.
+- frps's plugin `ops` lists `"Ping"`.
 - A user share: a second account reaches the site, and `tunnel unshare` denies that visitor on
   their next request (the share row is gone and `/authz` has no cache).
 - A revoked creator's tunnel: remove them from `tunnels-creators` (or disable the account) and
-  the tunnel ends within one heartbeat (the Ping hook, backed by the `NewWorkConns` scope).
+  the tunnel ends within one heartbeat (the Ping hook, backed by the `HeartBeats` scope).
 - A group share: a member of the group reaches the site (needs the gate to forward
   `X-Tunnels-Groups`).
 - A cross-owner state-changing request: a `POST` to `alice-blog.w.tunnels.layertwo.dev` with
   `Origin: https://bob-x.w.tunnels.layertwo.dev` is refused, while a `GET` or an `Origin`-less
   request is allowed.
-- The `NewWorkConn` hook is dormant until `"NewWorkConn"` is added to frps's `ops` and a broker
-  image containing it is pinned (it ships in a release), exactly as `Ping` did.
+- The `NewWorkConn` hook is dormant until the homelab `ops` change lands with the next release:
+  `"NewWorkConn"` is added to frps's `ops` alongside `"Ping"`, exactly as `Ping` was.
 
 ## Phasing
 
@@ -605,7 +609,8 @@ Each item is a build-time check with a stated fallback.
 7. A public-client device flow completes without a secret, and refresh keeps the audience and
    rechecks groups.
 8. frps's dashboard API (v0.71.0) answers `/api/clients?runId=` and lists proxies with `user`
-   to the broker. Fallback: keep run-ID and cap state in Postgres and stay at one replica.
+   to the broker. Fallback: keep run-ID and cap state in Postgres and drop to a single broker
+   replica (the deployed default is two).
 9. The embedded client builds with `CGO_ENABLED=0` for every release target and connects to the
    official frps image using a file token source.
 10. Cross-user tests pass: a stolen name and a run-ID takeover are both refused.

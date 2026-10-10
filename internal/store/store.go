@@ -230,7 +230,7 @@ const (
 )`
 )
 
-// PutShare grants the share. Putting a share that is already there does nothing.
+// PutShare grants the share, upserting an existing one: a repeat can set or clear expires_at.
 func (s *Store) PutShare(ctx context.Context, ownerSub string, sh Share) error {
 	var expires *time.Time
 	if !sh.ExpiresAt.IsZero() {
