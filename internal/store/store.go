@@ -9,6 +9,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -61,6 +62,26 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		return nil, err
 	}
 	return &Store{pool: pool}, nil
+}
+
+// OpenRetry opens the store, retrying with a capped backoff until ctx ends or wait elapses. It returns
+// the last error when it gives up. It logs nothing; the caller decides what a failure means.
+func OpenRetry(ctx context.Context, databaseURL string, wait time.Duration) (*Store, error) {
+	deadline := time.Now().Add(wait)
+	for backoff := time.Second; ; backoff = min(backoff*2, 10*time.Second) {
+		s, err := Open(ctx, databaseURL)
+		if err == nil {
+			return s, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(backoff):
+		}
+	}
 }
 
 // Close releases the connections.

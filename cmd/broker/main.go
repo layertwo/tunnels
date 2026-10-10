@@ -47,7 +47,7 @@ func run() error {
 	defer stop()
 
 	userAgent := "tunnels/" + version
-	users, err := store.Open(ctx, cfg.DatabaseURL)
+	users, err := store.OpenRetry(ctx, cfg.DatabaseURL, 2*time.Minute)
 	if err != nil {
 		return err
 	}

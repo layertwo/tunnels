@@ -765,6 +765,45 @@ func TestSharesByOwnerScanFails(t *testing.T) {
 	}
 }
 
+// OpenRetry against a database that is up returns a working store on the first try.
+func TestOpenRetrySucceeds(t *testing.T) {
+	s, err := OpenRetry(testCtx(t), schemaURL(t), time.Minute)
+	if err != nil {
+		t.Fatalf("OpenRetry: %v", err)
+	}
+	t.Cleanup(s.Close)
+}
+
+// A server that never answers fails before the context does, with the last error.
+func TestOpenRetryGivesUp(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	start := time.Now()
+	s, err := OpenRetry(ctx, "postgres://postgres:postgres@127.0.0.1:1/postgres?sslmode=disable&connect_timeout=1", 200*time.Millisecond)
+	if err == nil {
+		s.Close()
+		t.Fatal("OpenRetry against an unreachable server succeeded, want an error")
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("OpenRetry took %v to give up, want well under the 30 s context", elapsed)
+	}
+}
+
+// A cancelled context stops the loop at once, even while the wait has time left.
+func TestOpenRetryStopsOnContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	start := time.Now()
+	s, err := OpenRetry(ctx, "postgres://postgres:postgres@127.0.0.1:1/postgres?sslmode=disable&connect_timeout=1", time.Minute)
+	if err == nil {
+		s.Close()
+		t.Fatal("OpenRetry with a cancelled context succeeded, want an error")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("OpenRetry took %v to stop on a cancelled context, want prompt", elapsed)
+	}
+}
+
 // A row whose expression raises ends the stream with an error instead of a partial list.
 func TestSharesByOwnerRowsError(t *testing.T) {
 	dbURL := schemaURL(t)
