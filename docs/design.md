@@ -153,9 +153,9 @@ every heartbeat; the broker re-resolves the token and rejects the ping when the 
 or no longer in the creators group, and frpc then closes the session. It rejects only an account
 refusal: a token the broker cannot verify (invalid, expired, or Pocket ID unreachable) is allowed
 and left to frps, which re-verifies the ping's token itself, so a key we cannot fetch does not tear
-down a session frps would have accepted. Enabling it is adding `"Ping"` to `[[httpPlugins]].ops` in
-`frps.toml`; `"Ping"` has been in `ops` since v0.2.0 (homelab #2486), and `"NewWorkConn"` is enabled
-by adding it to `ops` with the next release.
+down a session frps would have accepted. `"Ping"` has been in `frps.toml`'s
+`[[httpPlugins]].ops` since v0.2.0 (homelab #2486); `"NewWorkConn"` is enabled by adding it to
+`ops` with the next release.
 
 `tunnel logout` only deletes the token files on that computer. Pocket ID publishes no token
 revocation endpoint (its discovery document lists none), so a copied refresh token stays good
@@ -515,7 +515,7 @@ tunnels.layertwo.dev                      proxied; covered by the existing *.lay
 | Non-http exposure, custom domains | plugin allows only http proxies with no custom domains or locations |
 | Forged or stolen-for-another-audience token | frps verifies signature, issuer, expiry and audience (API resource); userinfo must also succeed |
 | Man-in-the-middle on the control channel captures a token | frp skips certificate verification unless `trustedCaFile` is set; every client config sets it and the CLI embeds a CA bundle |
-| Revoked creator keeps a tunnel | 1 h tokens, refresh stops, heartbeats (30 s / 90 s) end the tunnel; Ping hook (implemented) rejects a disabled or non-creator account on the next heartbeat once `"Ping"` is added to the plugin `ops` |
+| Revoked creator keeps a tunnel | 1 h tokens, refresh stops, heartbeats (30 s / 90 s) end the tunnel; the Ping hook (implemented, `"Ping"` in the plugin `ops` since v0.2.0) closes the window to one heartbeat by rejecting a disabled or non-creator account |
 | Visitor spoofs identity headers | stripped before the plugin; set only by the plugin; internal ones removed before the app |
 | Creator's app steals a visitor session | the plugin's cookie is host-only and not forwarded upstream; the app sees only `X-Tunnel-User` |
 | Access to another user's tunnel | `/authz` denies by default; owner by `sub`; shares by username or group |
@@ -579,7 +579,7 @@ All of them fail closed.
   `X-Tunnels-Groups` (a deferred homelab change); until then the header is stripped and group
   shares admit no one. User shares work today.
 - **Phase 3:** hardening: heartbeat revocation proven end to end, the Ping-hook kill switch
-  (implemented; enabling it is the frps `ops` change), tuned limits, Gatus, docs, machine
+  (implemented and enabled — `"Ping"` in `ops` since v0.2.0), tuned limits, Gatus, docs, machine
   clients.
 - **Later:** SSH, a web UI, live tunnel status, frps HA by client fan-out.
 
@@ -630,7 +630,6 @@ Each item is a build-time check with a stated fallback.
 | Public (login-free) tunnels | webhook receivers are needed |
 | Non-browser access to sites (bearer tokens) | CI or scripts must call a tunnel |
 | Machine clients | headless servers need to publish (phase 3) |
-| Instant kill switch (Ping hook) | implemented; enable by adding `"Ping"` to the plugin `ops` when the hour-long revocation window bites |
 | CNPG above one | a Postgres outage matters |
 | Sharding frps | one frps is outgrown |
 | frps HA (zero-downtime restarts) | an frps restart blip matters; see "Later: frps HA by client fan-out" |
