@@ -8,7 +8,7 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.5
 	github.com/hashicorp/yamux v0.1.1
 	github.com/jackc/pgx/v5 v5.11.0
-	github.com/spf13/pflag v1.0.5
+	github.com/spf13/pflag v1.0.10
 	golang.org/x/crypto/x509roots/fallback v0.0.0-20261009200856-99e4382b128e
 	golang.org/x/oauth2 v0.36.0
 )
