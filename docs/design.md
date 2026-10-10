@@ -29,7 +29,7 @@ Decisions taken during design:
 - **Self-service sharing.** A tunnel is private to its owner by default. The owner shares it with
   Pocket ID usernames or groups through the CLI.
 - **Stateless broker.** Postgres holds users and shares. Run-ID pinning and tunnel caps ask
-  frps's dashboard API. One replica in v1; scaling out is a manifest change.
+  frps's dashboard API. Two replicas behind a PodDisruptionBudget; scaling is a manifest change.
 - **Short tokens plus explicit heartbeat settings for revocation.** frp's defaults do not revoke.
 - **Distroless, non-root, read-only containers.** The broker is a static Go binary on distroless.
   From phase 1, frps is the pinned official binary repackaged onto distroless. See Container
@@ -242,9 +242,10 @@ and cannot see the host.
 
 No leader election and no sticky sessions: a ClusterIP Service in front of N replicas serves both
 Traefik and frps. Concurrent first logins are safe through the unique-handle constraint and an
-upsert. Migrations are embedded and applied under an advisory lock. v1 runs one replica; raising
-it, and CNPG to 2-3 instances, is a manifest change. frps itself cannot be load balanced: a
-tunnel is a live connection held by one process, so its HA is fast restart, not replicas.
+upsert. Migrations are embedded and applied under an advisory lock. The deploy runs two replicas
+behind a PodDisruptionBudget; raising that, and CNPG to 2-3 instances, is a manifest change. frps
+itself cannot be load balanced: a tunnel is a live connection held by one process, so its HA is
+fast restart, not replicas.
 
 ### Later: frps HA by client fan-out
 
@@ -518,7 +519,7 @@ tunnels.layertwo.dev                      proxied; covered by the existing *.lay
 | Plugin endpoint abused | not routed; NetworkPolicy plus a secret path |
 | Broker compromise | no Kubernetes RBAC; a compromise affects tunnels, not other hostnames |
 | Abuse, load | per-host rate and in-flight limits; per-proxy bandwidth limit; per-user cap |
-| Cross-tunnel same-site requests | accepted (trusted creators); `__Secure-` cookies (`__Host-` once the plugin keeps the PKCE verifier out of a cookie); optional later hardening refuses cross-owner state-changing requests using `Origin` and `Sec-Fetch-Site` |
+| Cross-tunnel same-site requests | `__Secure-` cookies (`__Host-` once the plugin keeps the PKCE verifier out of a cookie); `/authz` refuses a state-changing request whose `Origin` is another owner's sites host (a missing or foreign `Origin` is allowed; `Sec-Fetch-Site` is not used) |
 | Supply chain | digest-pinned images, cosign-signed broker and frps images, checksummed CLI releases, frp pinned |
 | Code execution inside a pod | distroless images (no shell), non-root, read-only root filesystem, capabilities dropped, seccomp, user namespace, no service-account token, NetworkPolicy; see Container Hardening |
 
@@ -549,8 +550,10 @@ All of them fail closed.
 - `kubectl -n tunnels get deploy broker` shows `2/2`, and `kubectl -n tunnels get pdb broker`
   shows `MIN AVAILABLE 1`.
 - frps's plugin `ops` lists `"Ping"` and `"NewWorkConn"`.
-- A user share: a second account reaches the site, and `tunnel unshare` denies them within one
-  heartbeat (the Ping hook).
+- A user share: a second account reaches the site, and `tunnel unshare` denies that visitor on
+  their next request (the share row is gone and `/authz` has no cache).
+- A revoked creator's tunnel: remove them from `tunnels-creators` (or disable the account) and
+  the tunnel ends within one heartbeat (the Ping hook, backed by the `NewWorkConns` scope).
 - A group share: a member of the group reaches the site (needs the gate to forward
   `X-Tunnels-Groups`).
 - A cross-owner state-changing request: a `POST` to `alice-blog.w.tunnels.layertwo.dev` with
@@ -573,7 +576,7 @@ All of them fail closed.
 - **Phase 3:** hardening: heartbeat revocation proven end to end, the Ping-hook kill switch
   (implemented; enabling it is the frps `ops` change), tuned limits, Gatus, docs, machine
   clients.
-- **Later:** SSH, a web UI, share expiry, live tunnel status, frps HA by client fan-out.
+- **Later:** SSH, a web UI, live tunnel status, frps HA by client fan-out.
 
 ## Verification
 
@@ -618,16 +621,14 @@ Each item is a build-time check with a stated fallback.
 |---------|----------|
 | Web UI | people ask for one beyond the CLI |
 | Live tunnel status in `tunnel list` | frps dashboard data is worth surfacing |
-| Share expiry | long-lived shares become a problem |
 | Public (login-free) tunnels | webhook receivers are needed |
 | Non-browser access to sites (bearer tokens) | CI or scripts must call a tunnel |
 | Machine clients | headless servers need to publish (phase 3) |
 | Instant kill switch (Ping hook) | implemented; enable by adding `"Ping"` to the plugin `ops` when the hour-long revocation window bites |
-| Broker replicas above one, CNPG above one | an outage of either matters |
+| CNPG above one | a Postgres outage matters |
 | Sharding frps | one frps is outgrown |
 | frps HA (zero-downtime restarts) | an frps restart blip matters; see "Later: frps HA by client fan-out" |
 | Admin API or UI | operators outgrow Pocket ID plus SQL |
-| Cross-owner CSRF hardening in `/authz` | creators stop being fully trusted |
 | Separate registrable domain for sites | cookie or CORS exposure to your apps matters |
 | Public Suffix List entry for the sites domain | a separate domain is not wanted and isolation is |
 
