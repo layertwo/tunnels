@@ -490,12 +490,13 @@ func TestMalformedRequests(t *testing.T) {
 		{"json array", http.MethodPost, "[]"},
 		{"truncated", http.MethodPost, valid[:len(valid)-6]},
 		{"no op", http.MethodPost, `{"content":{"privilege_key":"tok"}}`},
-		{"unknown op", http.MethodPost, `{"op":"NewWorkConn","content":{}}`},
+		{"unknown op", http.MethodPost, `{"op":"NewUserConn","content":{}}`},
 		{"op in the wrong case", http.MethodPost, `{"op":"login","content":{"privilege_key":"tok"}}`},
 		{"login without content", http.MethodPost, `{"op":"Login"}`},
 		{"login with a string for content", http.MethodPost, `{"op":"Login","content":"tok"}`},
 		{"login with an array for content", http.MethodPost, `{"op":"Login","content":[]}`},
 		{"new proxy with a number for content", http.MethodPost, `{"op":"NewProxy","content":1}`},
+		{"new work conn with a number for content", http.MethodPost, `{"op":"NewWorkConn","content":1}`},
 		{"ping with a number for content", http.MethodPost, `{"op":"Ping","content":1}`},
 		{"close proxy without content", http.MethodPost, `{"op":"CloseProxy"}`},
 		{"over a megabyte", http.MethodPost, `{"op":"Login","content":{"privilege_key":"` + strings.Repeat("a", 2<<20) + `"}}`},
@@ -803,5 +804,83 @@ func TestPingIsNotLoggedWhenAccepted(t *testing.T) {
 	}
 	if r.logs.Len() != 0 {
 		t.Errorf("an accepted ping was logged:\n%s", r.logs)
+	}
+}
+
+// workConnContent is one work connection: frps passes the control connection's user plus the token
+// the publisher holds, which the plugin checks belong together.
+func workConnContent(token, handle string) plugin.NewWorkConnContent {
+	return plugin.NewWorkConnContent{
+		User:        plugin.UserInfo{User: handle, RunID: "run-1"},
+		NewWorkConn: msg.NewWorkConn{RunID: "run-1", PrivilegeKey: token, Timestamp: 1791565403},
+	}
+}
+
+// The control connection's own token on a work connection is allowed and leaves it unchanged; frps
+// does the rest.
+func TestNewWorkConnAllowsTheControlUser(t *testing.T) {
+	r := newRig()
+	rep := r.call(t, plugin.OpNewWorkConn, workConnContent(secretToken, "alice"))
+	if rep.Reject || !rep.Unchange {
+		t.Errorf("reply = %+v, want allowed and unchanged", rep)
+	}
+}
+
+// A work connection whose token belongs to another account may not ride this control connection.
+func TestNewWorkConnRejectsAnotherUser(t *testing.T) {
+	r := newRig()
+	r.users.users["sub-bob"] = store.User{Sub: "sub-bob", Handle: "bob"}
+	verifierOf(r.hooks.Resolver).sub = "sub-bob"
+	rep := r.call(t, plugin.OpNewWorkConn, workConnContent(secretToken, "alice"))
+	const want = "token does not belong to this session"
+	if !rep.Reject || rep.RejectReason != want {
+		t.Errorf("reply = %+v, want reject with %q", rep, want)
+	}
+}
+
+// A token this broker cannot verify locally is left to frps, which re-verifies the work connection's
+// token itself; a signing key we could not fetch must not tear down a connection frps would accept.
+func TestNewWorkConnAllowsWhenUnverifiable(t *testing.T) {
+	r := newRig()
+	r.hooks.Log = slog.New(slog.NewJSONHandler(r.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	verifierOf(r.hooks.Resolver).err = errors.New("keys unavailable")
+	rep := r.call(t, plugin.OpNewWorkConn, workConnContent(secretToken, "alice"))
+	if rep.Reject {
+		t.Errorf("reply = %+v, want allowed: frps backstops the token check", rep)
+	}
+	if line := lastLog(t, r.logs); line["level"] != "DEBUG" {
+		t.Errorf("log = %v, want a debug line about the failure", line)
+	}
+}
+
+// An empty token is nobody's; frps would show the client the reason and refuse the work connection.
+func TestNewWorkConnRejectsAMissingToken(t *testing.T) {
+	r := newRig()
+	rep := r.call(t, plugin.OpNewWorkConn, workConnContent("", "alice"))
+	if !rep.Reject || rep.RejectReason != "missing token" {
+		t.Errorf("reply = %+v, want reject with %q", rep, "missing token")
+	}
+}
+
+// The store being down is not the person's doing: the token they hold is still valid, we just cannot
+// look up the handle, so the work connection is left to frps.
+func TestNewWorkConnAllowsWhenTheStoreIsDown(t *testing.T) {
+	r := newRig()
+	r.users.bySubErr = errors.New("dial tcp 10.0.0.5:5432: connect: connection refused")
+	rep := r.call(t, plugin.OpNewWorkConn, workConnContent(secretToken, "alice"))
+	if rep.Reject {
+		t.Errorf("reply = %+v, want allowed: the store being down is not the person's doing", rep)
+	}
+}
+
+// One work connection per visitor page load must not fill the log; only refusals are worth a line.
+func TestNewWorkConnIsNotLoggedWhenAccepted(t *testing.T) {
+	r := newRig()
+	rep := r.call(t, plugin.OpNewWorkConn, workConnContent(secretToken, "alice"))
+	if rep.Reject {
+		t.Fatalf("reply = %+v, want allowed", rep)
+	}
+	if r.logs.Len() != 0 {
+		t.Errorf("an accepted work connection was logged:\n%s", r.logs)
 	}
 }
