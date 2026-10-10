@@ -2,8 +2,14 @@ name: ci
 
 on:
   pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - LICENSE
   push:
     branches: [mainline]
+    paths-ignore:
+      - '**/*.md'
+      - LICENSE
 
 permissions:
   contents: read
