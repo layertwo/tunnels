@@ -477,6 +477,34 @@ func TestUnsupportedGrant(t *testing.T) {
 	}
 }
 
+// A form that ParseForm rejects (here a broken escape in the query) must be refused as a bad request
+// by both endpoints, before any device grant is created.
+func TestBrokenFormIsBadRequest(t *testing.T) {
+	for _, path := range []string{"/device/authorize", "/token"} {
+		t.Run(path, func(t *testing.T) {
+			s := New(t)
+			status, body := post(t, s.URL+path+"?a=%zz", url.Values{"client_id": {ClientID}, "grant_type": {urnDeviceCode}})
+			wantError(t, status, body, "invalid_request")
+			if reqs := s.DeviceRequests(); len(reqs) != 0 {
+				t.Errorf("the bad form was recorded: %v", reqs)
+			}
+		})
+	}
+}
+
+// sign must not hand out an unsigned token when it cannot build the signer; with a real RSA key that
+// cannot happen, so a nil key is the one fault that reaches the panic.
+func TestSignWithoutAKeyPanics(t *testing.T) {
+	s := New(t)
+	s.key = nil
+	defer func() {
+		if recover() == nil {
+			t.Error("sign returned a token with no signing key")
+		}
+	}()
+	_ = s.Issue("alice-sub", IssueOpts{})
+}
+
 // errorRecorder collects the Errorf calls instead of failing the test.
 type errorRecorder struct {
 	testing.TB
