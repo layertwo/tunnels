@@ -153,9 +153,9 @@ every heartbeat; the broker re-resolves the token and rejects the ping when the 
 or no longer in the creators group, and frpc then closes the session. It rejects only an account
 refusal: a token the broker cannot verify (invalid, expired, or Pocket ID unreachable) is allowed
 and left to frps, which re-verifies the ping's token itself, so a key we cannot fetch does not tear
-down a session frps would have accepted. Enabling it is the
-`ops = ["Login", "NewProxy", "CloseProxy", "Ping"]` change to `[[httpPlugins]]` in `frps.toml` (a
-homelab manifest change, deferred).
+down a session frps would have accepted. Enabling it is adding `"Ping"` to `[[httpPlugins]].ops` in
+`frps.toml`; the homelab `ops` change that adds `"Ping"` and `"NewWorkConn"` together is deferred
+until the next release.
 
 `tunnel logout` only deletes the token files on that computer. Pocket ID publishes no token
 revocation endpoint (its discovery document lists none), so a copied refresh token stays good
@@ -319,7 +319,7 @@ enablePrometheus = true
 name = "broker"
 addr = "broker.tunnels.svc:8080"
 path = "/plugin/<secret>"
-ops = ["Login", "NewProxy", "CloseProxy"]
+ops = ["Login", "NewProxy", "CloseProxy", "Ping", "NewWorkConn"]
 ```
 
 Plugin rejections surface in the CLI as the reject reason (`detailedErrorsToClient` stays on).
@@ -332,7 +332,7 @@ linux/arm64), signed with cosign.
 
 | Path | Caller | Purpose |
 |------|--------|---------|
-| `/plugin/<secret>` | frps only | Login, NewProxy, CloseProxy hooks |
+| `/plugin/<secret>` | frps only | Login, NewProxy, CloseProxy, Ping, NewWorkConn hooks |
 | `/authz` | Traefik `forwardAuth` | allow or deny one visitor request |
 | `/api/me`; `/api/shares` in phase 2 | CLI, bearer token | ensure user, manage shares |
 | `/.well-known/tunnels.json` | anyone | bootstrap: issuer, CLI client id, API resource, service host, sites domain, minimum CLI version |
@@ -553,7 +553,8 @@ All of them fail closed.
 
 - `kubectl -n tunnels get deploy broker` shows `2/2`, and `kubectl -n tunnels get pdb broker`
   shows `MIN AVAILABLE 1`.
-- frps's plugin `ops` lists `"Ping"`.
+- frps's plugin `ops` includes `"Ping"` and `"NewWorkConn"` after the homelab `ops` change (deferred
+  until the next release).
 - A user share: a second account reaches the site, and `tunnel unshare` denies that visitor on
   their next request (the share row is gone and `/authz` has no cache).
 - A revoked creator's tunnel: remove them from `tunnels-creators` (or disable the account) and
@@ -563,8 +564,8 @@ All of them fail closed.
 - A cross-owner state-changing request: a `POST` to `alice-blog.w.tunnels.layertwo.dev` with
   `Origin: https://bob-x.w.tunnels.layertwo.dev` is refused, while a `GET` or an `Origin`-less
   request is allowed.
-- The `NewWorkConn` hook is dormant until the homelab `ops` change lands with the next release:
-  `"NewWorkConn"` is added to frps's `ops` alongside `"Ping"`, exactly as `Ping` was.
+- The `NewWorkConn` hook is dormant until the deferred homelab `ops` change lands with the next
+  release, which adds `"NewWorkConn"` alongside `"Ping"`.
 
 ## Phasing
 
