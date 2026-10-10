@@ -145,7 +145,16 @@ upgrade if run IDs ever leak (it would put the broker on the data path).
 
 Each ping re-reads a file token source, so the CLI keeps the token file fresh. Removing someone
 from `tunnels-creators` or disabling the account stops refresh, and the tunnel ends about an hour
-plus 90 seconds later. A Ping-hook kill switch for instant removal is phase 3.
+plus 90 seconds later.
+
+The broker's Ping hook closes that window to one heartbeat. frps calls the plugin's `Ping` op on
+every heartbeat; the broker re-resolves the token and rejects the ping when the account is disabled
+or no longer in the creators group, and frpc then closes the session. It rejects only an account
+refusal: a token the broker cannot verify (invalid, expired, or Pocket ID unreachable) is allowed
+and left to frps, which re-verifies the ping's token itself, so a key we cannot fetch does not tear
+down a session frps would have accepted. Enabling it is the
+`ops = ["Login", "NewProxy", "CloseProxy", "Ping"]` change to `[[httpPlugins]]` in `frps.toml` (a
+homelab manifest change, deferred).
 
 `tunnel logout` only deletes the token files on that computer. Pocket ID publishes no token
 revocation endpoint (its discovery document lists none), so a copied refresh token stays good
@@ -475,7 +484,7 @@ tunnels.layertwo.dev                      proxied; covered by the existing *.lay
 | Non-http exposure, custom domains | plugin allows only http proxies with no custom domains or locations |
 | Forged or stolen-for-another-audience token | frps verifies signature, issuer, expiry and audience (API resource); userinfo must also succeed |
 | Man-in-the-middle on the control channel captures a token | frp skips certificate verification unless `trustedCaFile` is set; every client config sets it and the CLI embeds a CA bundle |
-| Revoked creator keeps a tunnel | 1 h tokens, refresh stops, heartbeats (30 s / 90 s) end the tunnel; Ping-hook kill switch in phase 3 |
+| Revoked creator keeps a tunnel | 1 h tokens, refresh stops, heartbeats (30 s / 90 s) end the tunnel; Ping hook (implemented) rejects a disabled or non-creator account on the next heartbeat once `"Ping"` is added to the plugin `ops` |
 | Visitor spoofs identity headers | stripped before the plugin; set only by the plugin; internal ones removed before the app |
 | Creator's app steals a visitor session | the plugin's cookie is host-only and not forwarded upstream; the app sees only `X-Tunnel-User` |
 | Access to another user's tunnel | `/authz` denies by default; owner by `sub`; shares by username or group |
@@ -570,7 +579,7 @@ Each item is a build-time check with a stated fallback.
 | Public (login-free) tunnels | webhook receivers are needed |
 | Non-browser access to sites (bearer tokens) | CI or scripts must call a tunnel |
 | Machine clients | headless servers need to publish (phase 3) |
-| Instant kill switch (Ping hook) | the hour-long revocation window bites (phase 3) |
+| Instant kill switch (Ping hook) | implemented; enable by adding `"Ping"` to the plugin `ops` when the hour-long revocation window bites |
 | Broker replicas above one, CNPG above one | an outage of either matters |
 | Sharding frps | one frps is outgrown |
 | Admin API or UI | operators outgrow Pocket ID plus SQL |
