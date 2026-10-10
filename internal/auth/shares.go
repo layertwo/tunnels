@@ -6,13 +6,15 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // Share grants one user or group access to one tunnel. The empty Tunnel is the default tunnel.
 type Share struct {
-	Tunnel  string `json:"tunnel"`
-	Kind    string `json:"kind"`
-	Grantee string `json:"grantee"`
+	Tunnel    string    `json:"tunnel"`
+	Kind      string    `json:"kind"`
+	Grantee   string    `json:"grantee"`
+	ExpiresAt time.Time `json:"expires_at,omitzero"` // the zero time means the share never ends
 }
 
 // PutShare grants the share. Putting a share that is already there does nothing.

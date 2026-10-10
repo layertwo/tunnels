@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/layertwo/tunnels/internal/auth"
 	"github.com/layertwo/tunnels/internal/idp"
@@ -159,12 +160,16 @@ func (s *server) changeShare(w http.ResponseWriter, r *http.Request, put bool) {
 }
 
 // validShare reports whether the body describes a share an owner may set. The empty tunnel is the
-// default tunnel; names.ValidTunnelName already rejects "default".
+// default tunnel; names.ValidTunnelName already rejects "default". An end that is set must be in the
+// future: a share that has already expired grants nothing.
 func validShare(sh store.Share) bool {
 	if sh.Tunnel != "" && !names.ValidTunnelName(sh.Tunnel) {
 		return false
 	}
 	if sh.Grantee == "" {
+		return false
+	}
+	if !sh.ExpiresAt.IsZero() && !sh.ExpiresAt.After(time.Now()) {
 		return false
 	}
 	switch sh.Kind {

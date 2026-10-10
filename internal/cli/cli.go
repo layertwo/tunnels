@@ -36,7 +36,7 @@ type Env struct {
 const usage = `Usage:
   tunnel login [--server HOST]                    log in with your browser
   tunnel up PORT [--name NAME]                    publish http://127.0.0.1:PORT until you stop it
-  tunnel share [--name NAME] [--group] GRANTEE    let someone else reach a tunnel (group shares need the gate to forward groups)
+  tunnel share [--name NAME] [--group] [--for DURATION] GRANTEE  let someone else reach a tunnel (group shares need the gate to forward groups)
   tunnel unshare [--name NAME] [--group] GRANTEE  stop sharing a tunnel
   tunnel list                                     show what you share
   tunnel logout                                   forget the login on this computer
@@ -293,8 +293,13 @@ func share(ctx context.Context, env Env, args []string, remove bool) int {
 	fs.SetOutput(io.Discard)
 	name := fs.String("name", "", "the tunnel's name; none means the default tunnel")
 	group := fs.Bool("group", false, "share with a Pocket ID group instead of a username")
+	lifetime := fs.String("for", "", "how long the share lasts, e.g. 24h or 7d")
+	shape := "[--name NAME] [--group] GRANTEE"
+	if !remove {
+		shape = "[--name NAME] [--group] [--for DURATION] GRANTEE"
+	}
 	bad := func(format string, a ...any) int {
-		fmt.Fprintf(env.Stderr, format+"\nUsage: tunnel "+verb+" [--name NAME] [--group] GRANTEE\n", a...)
+		fmt.Fprintf(env.Stderr, format+"\nUsage: tunnel "+verb+" "+shape+"\n", a...)
 		return 2
 	}
 	if err := fs.Parse(args); err != nil {
@@ -306,11 +311,19 @@ func share(ctx context.Context, env Env, args []string, remove bool) int {
 	if *name != "" && !names.ValidTunnelName(*name) {
 		return bad("%q is not a tunnel name: use 1 to 42 lowercase letters, digits and inner dashes, other than %q", *name, names.Default)
 	}
+	var expiresAt time.Time
+	if *lifetime != "" {
+		d, err := parseDuration(*lifetime)
+		if err != nil {
+			return bad("--for %q: %v", *lifetime, err)
+		}
+		expiresAt = time.Now().Add(d)
+	}
 	kind := "user"
 	if *group {
 		kind = "group"
 	}
-	sh := auth.Share{Tunnel: *name, Kind: kind, Grantee: fs.Arg(0)}
+	sh := auth.Share{Tunnel: *name, Kind: kind, Grantee: fs.Arg(0), ExpiresAt: expiresAt}
 
 	tok, ok := session(ctx, env)
 	if !ok {
@@ -350,9 +363,29 @@ func list(ctx context.Context, env Env, args []string) int {
 		return 1
 	}
 	for _, sh := range shares {
-		fmt.Fprintf(env.Stdout, "%s\t%s\t%s\n", tunnelLabel(sh.Tunnel), sh.Kind, sh.Grantee)
+		fmt.Fprintf(env.Stdout, "%s\t%s\t%s\t%s\n", tunnelLabel(sh.Tunnel), sh.Kind, sh.Grantee, expiryLabel(sh.ExpiresAt))
 	}
 	return 0
+}
+
+// parseDuration is time.ParseDuration with "d" meaning 24 hours, so "7d" is a week.
+func parseDuration(s string) (time.Duration, error) {
+	if days, ok := strings.CutSuffix(s, "d"); ok {
+		n, err := strconv.ParseFloat(days, 64)
+		if err != nil {
+			return 0, err
+		}
+		return time.Duration(n * 24 * float64(time.Hour)), nil
+	}
+	return time.ParseDuration(s)
+}
+
+// expiryLabel is a share's end as a person reads it: "never" when it has none.
+func expiryLabel(t time.Time) string {
+	if t.IsZero() {
+		return "never"
+	}
+	return t.Format(time.RFC3339)
 }
 
 func logout(env Env) int {

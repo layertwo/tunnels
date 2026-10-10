@@ -501,6 +501,72 @@ func TestListPrints(t *testing.T) {
 	}
 }
 
+// --for turns into an absolute end a week out, and a Go duration works too.
+func TestShareForADuration(t *testing.T) {
+	for _, tt := range []struct {
+		dur  string
+		want time.Duration
+	}{
+		{"7d", 7 * 24 * time.Hour},
+		{"24h", 24 * time.Hour},
+	} {
+		t.Run(tt.dur, func(t *testing.T) {
+			w := newWorld(t)
+			w.loggedIn()
+			before := time.Now()
+			if c := w.main("share", "--for", tt.dur, "bob"); c != 0 {
+				t.Fatalf("exit %d; stderr:\n%s", c, w.err)
+			}
+			if len(w.shareReq) != 1 {
+				t.Fatalf("%d share requests, want 1", len(w.shareReq))
+			}
+			got, want := w.shareReq[0].share.ExpiresAt, before.Add(tt.want)
+			if d := got.Sub(want); d < -time.Minute || d > time.Minute {
+				t.Errorf("expires_at = %v, want about %v", got, want)
+			}
+		})
+	}
+}
+
+func TestShareForRejectsGarbage(t *testing.T) {
+	for _, dur := range []string{"soon", "7d5", "xd", "d", "5"} {
+		t.Run(dur, func(t *testing.T) {
+			w := newWorld(t)
+			w.loggedIn()
+			if c := w.main("share", "--for", dur, "bob"); c != 2 {
+				t.Errorf("exit %d, want 2", c)
+			}
+			if !strings.Contains(w.err.String(), "Usage: tunnel") {
+				t.Errorf("no usage line on stderr:\n%s", w.err)
+			}
+			if len(w.shareReq) != 0 {
+				t.Errorf("a request was sent for a bad duration: %+v", w.shareReq)
+			}
+		})
+	}
+}
+
+// list prints a share's end, or "never" when it has none.
+func TestListShowsExpiry(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	expires := time.Now().Add(48 * time.Hour).UTC().Truncate(time.Second)
+	w.shares = []auth.Share{
+		{Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: expires},
+		{Tunnel: "", Kind: "user", Grantee: "carol"},
+	}
+	if c := w.main("list"); c != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
+	}
+	out := w.out.String()
+	if !strings.Contains(out, expires.Format(time.RFC3339)) {
+		t.Errorf("stdout lacks the expiry %s:\n%s", expires.Format(time.RFC3339), out)
+	}
+	if !strings.Contains(out, "never") {
+		t.Errorf("stdout lacks \"never\" for a share without an end:\n%s", out)
+	}
+}
+
 func TestShareNotLoggedIn(t *testing.T) {
 	w := newWorld(t)
 	if c := w.main("share", "bob"); c != 1 || !strings.Contains(w.err.String(), "run: tunnel login") {

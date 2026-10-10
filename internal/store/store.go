@@ -25,9 +25,10 @@ type User struct {
 
 // Share grants one user or group access to one tunnel. The empty Tunnel is the default tunnel.
 type Share struct {
-	Tunnel  string `json:"tunnel"` // "" is the default tunnel
-	Kind    string `json:"kind"`   // "user" or "group"
-	Grantee string `json:"grantee"`
+	Tunnel    string    `json:"tunnel"` // "" is the default tunnel
+	Kind      string    `json:"kind"`   // "user" or "group"
+	Grantee   string    `json:"grantee"`
+	ExpiresAt time.Time `json:"expires_at,omitzero"` // the zero time means the share never ends
 }
 
 var (
@@ -217,12 +218,13 @@ func (s *Store) CreateUser(ctx context.Context, sub, handle string) (User, error
 }
 
 const (
-	shareInsert = "insert into shares (owner_sub, tunnel, kind, grantee) values ($1, $2, $3, $4) on conflict (owner_sub, tunnel, kind, grantee) do nothing"
+	shareInsert = "insert into shares (owner_sub, tunnel, kind, grantee, expires_at) values ($1, $2, $3, $4, $5) on conflict (owner_sub, tunnel, kind, grantee) do nothing"
 	shareDelete = "delete from shares where owner_sub = $1 and tunnel = $2 and kind = $3 and grantee = $4"
-	shareList   = "select tunnel, kind, grantee from shares where owner_sub = $1 order by tunnel, kind, grantee"
+	shareList   = "select tunnel, kind, grantee, expires_at from shares where owner_sub = $1 order by tunnel, kind, grantee"
 	shareMatch  = `select exists (
     select 1 from shares
     where owner_sub = $1 and tunnel = $2
+      and (expires_at is null or expires_at > now())
       and ((kind = 'user' and lower(grantee) = lower($3))
         or (kind = 'group' and grantee = any($4)))
 )`
@@ -230,7 +232,11 @@ const (
 
 // PutShare grants the share. Putting a share that is already there does nothing.
 func (s *Store) PutShare(ctx context.Context, ownerSub string, sh Share) error {
-	if _, err := s.pool.Exec(ctx, shareInsert, ownerSub, sh.Tunnel, sh.Kind, sh.Grantee); err != nil {
+	var expires *time.Time
+	if !sh.ExpiresAt.IsZero() {
+		expires = &sh.ExpiresAt
+	}
+	if _, err := s.pool.Exec(ctx, shareInsert, ownerSub, sh.Tunnel, sh.Kind, sh.Grantee, expires); err != nil {
 		return fmt.Errorf("store: put share: %w", err)
 	}
 	return nil
@@ -255,8 +261,12 @@ func (s *Store) SharesByOwner(ctx context.Context, ownerSub string) ([]Share, er
 	shares := []Share{}
 	for rows.Next() {
 		var sh Share
-		if err := rows.Scan(&sh.Tunnel, &sh.Kind, &sh.Grantee); err != nil {
+		var expires *time.Time
+		if err := rows.Scan(&sh.Tunnel, &sh.Kind, &sh.Grantee, &expires); err != nil {
 			return nil, fmt.Errorf("store: list shares: %w", err)
+		}
+		if expires != nil {
+			sh.ExpiresAt = *expires
 		}
 		shares = append(shares, sh)
 	}

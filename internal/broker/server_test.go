@@ -347,6 +347,7 @@ func TestSharesPutValidates(t *testing.T) {
 		{"tunnel default", `{"tunnel":"default","kind":"user","grantee":"bob"}`, 400},
 		{"empty grantee", `{"tunnel":"blog","kind":"user","grantee":""}`, 400},
 		{"group grantee with a comma", `{"tunnel":"blog","kind":"group","grantee":"a,b"}`, 400},
+		{"expires_at not a time", `{"tunnel":"blog","kind":"user","grantee":"bob","expires_at":"soon"}`, 400},
 		{"good", `{"tunnel":"blog","kind":"user","grantee":"bob"}`, 204},
 	}
 	for _, tt := range tests {
@@ -367,6 +368,34 @@ func TestSharesPutValidates(t *testing.T) {
 				t.Errorf("the store was called for bad input: %+v", r.shares.puts)
 			}
 		})
+	}
+}
+
+// The wire takes an absolute RFC3339 end; a time in the past is no share at all.
+func TestSharesPutAcceptsExpiry(t *testing.T) {
+	r := newServerRig(t)
+	expires := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second)
+	body := `{"tunnel":"blog","kind":"user","grantee":"bob","expires_at":"` + expires.Format(time.RFC3339) + `"}`
+	w := r.do("PUT", "/api/shares", bearer(r.idp.Issue("sub-alice", mockidp.IssueOpts{})), body)
+	if w.Code != 204 {
+		t.Fatalf("= %d %q, want 204", w.Code, w.Body)
+	}
+	if len(r.shares.puts) != 1 {
+		t.Fatalf("recorded %+v, want one put", r.shares.puts)
+	}
+	if got := r.shares.puts[0].share; got.Tunnel != "blog" || got.Grantee != "bob" || !got.ExpiresAt.Equal(expires) {
+		t.Errorf("recorded %+v, want the share ending %v", got, expires)
+	}
+
+	// A past end cannot grant anything, so it is refused before the store sees it.
+	r2 := newServerRig(t)
+	past := `{"tunnel":"blog","kind":"user","grantee":"bob","expires_at":"2020-01-01T00:00:00Z"}`
+	w = r2.do("PUT", "/api/shares", bearer(r2.idp.Issue("sub-alice", mockidp.IssueOpts{})), past)
+	if w.Code != 400 {
+		t.Errorf("= %d %q, want 400 for a past expires_at", w.Code, w.Body)
+	}
+	if len(r2.shares.puts) != 0 {
+		t.Errorf("the store was called for a past expires_at: %+v", r2.shares.puts)
 	}
 }
 

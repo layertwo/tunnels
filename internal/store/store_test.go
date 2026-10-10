@@ -464,6 +464,59 @@ func TestSharesByOwnerOrders(t *testing.T) {
 	}
 }
 
+// A share may carry an absolute end; a share without one stays open. The time survives the round trip.
+func TestPutAndListShareWithExpiry(t *testing.T) {
+	s := newStore(t)
+	ctx := testCtx(t)
+	createUser(t, s, ctx, "sub-1", "alice")
+
+	expires := time.Now().Add(7 * 24 * time.Hour).UTC().Truncate(time.Microsecond)
+	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: expires})
+	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "carol"}) // no end, ever
+
+	got, err := s.SharesByOwner(ctx, "sub-1")
+	if err != nil {
+		t.Fatalf("SharesByOwner: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("SharesByOwner = %+v, want two shares", got)
+	}
+	if !got[0].ExpiresAt.Equal(expires) {
+		t.Errorf("expires_at = %v, want %v", got[0].ExpiresAt, expires)
+	}
+	if !got[1].ExpiresAt.IsZero() {
+		t.Errorf("a share without an expiry read back as %v, want the zero time", got[1].ExpiresAt)
+	}
+}
+
+// An expired share no longer admits a visitor; one without an end never expires.
+func TestShareMatchesIgnoresExpired(t *testing.T) {
+	s := newStore(t)
+	ctx := testCtx(t)
+	createUser(t, s, ctx, "sub-1", "alice")
+	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: time.Now().Add(-time.Hour)})
+	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "carol"})
+	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "dave", ExpiresAt: time.Now().Add(time.Hour)})
+
+	tests := []struct {
+		username string
+		want     bool
+	}{
+		{"bob", false},  // expired
+		{"carol", true}, // no end
+		{"dave", true},  // still in the future
+	}
+	for _, tt := range tests {
+		got, err := s.ShareMatches(ctx, "sub-1", "blog", tt.username, nil)
+		if err != nil {
+			t.Fatalf("ShareMatches(%q): %v", tt.username, err)
+		}
+		if got != tt.want {
+			t.Errorf("ShareMatches(%q) = %v, want %v", tt.username, got, tt.want)
+		}
+	}
+}
+
 func TestShareMatchesUserIsCaseInsensitive(t *testing.T) {
 	s := newStore(t)
 	ctx := testCtx(t)
@@ -818,7 +871,7 @@ func TestSharesByOwnerRowsError(t *testing.T) {
 	if err := run(dbURL, `create function boom() returns text language plpgsql volatile as $$ begin raise exception 'boom'; end $$`); err != nil {
 		t.Fatalf("create boom: %v", err)
 	}
-	if err := run(dbURL, `create view shares as select owner_sub, tunnel, case when grantee = 'boom' then boom() else kind end as kind, grantee from shares_base`); err != nil {
+	if err := run(dbURL, `create view shares as select owner_sub, tunnel, case when grantee = 'boom' then boom() else kind end as kind, grantee, expires_at from shares_base`); err != nil {
 		t.Fatalf("create failing view: %v", err)
 	}
 	shares, err := s.SharesByOwner(ctx, "sub-1")

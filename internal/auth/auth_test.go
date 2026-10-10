@@ -799,6 +799,21 @@ func TestListShares(t *testing.T) {
 	}
 }
 
+// A share's expiry rides the wire as an RFC3339 time and survives the read.
+func TestListSharesCarriesExpiry(t *testing.T) {
+	expires := time.Date(2035, 1, 2, 3, 4, 5, 0, time.UTC)
+	body := `{"shares":[{"tunnel":"blog","kind":"user","grantee":"bob","expires_at":"` + expires.Format(time.RFC3339) + `"}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	got, err := ListShares(t.Context(), client(), srv.URL, "tok-123")
+	if err != nil || len(got) != 1 || !got[0].ExpiresAt.Equal(expires) {
+		t.Errorf("ListShares = %+v, %v, want one share ending %v", got, err, expires)
+	}
+}
+
 // ---- fault injection: the transport and the provider endpoints fail
 
 // roundTripFunc lets a test answer a request with a response of its own, so send's body handling

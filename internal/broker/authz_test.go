@@ -47,10 +47,11 @@ func newAuthzRig() *authzRig {
 // fakeShares is an in-memory Shares: a user grantee matches case-insensitively, a group grantee exactly,
 // and it records every call.
 type fakeShares struct {
-	users  []string // user grantees
-	groups []string // group grantees
-	err    error
-	calls  []shareCall
+	users   []string  // user grantees
+	groups  []string  // group grantees
+	expires time.Time // when non-zero and past, every grant has expired
+	err     error
+	calls   []shareCall
 
 	rows     []store.Share // SharesByOwner answer
 	storeErr error         // what the management methods fail with
@@ -98,6 +99,9 @@ func (f *fakeShares) ShareMatches(_ context.Context, ownerSub, tunnel, username 
 	f.calls = append(f.calls, shareCall{ownerSub, tunnel, username, groups})
 	if f.err != nil {
 		return false, f.err
+	}
+	if !f.expires.IsZero() && !f.expires.After(time.Now()) {
+		return false, nil // the store ignores expired rows
 	}
 	for _, grantee := range f.users {
 		if strings.EqualFold(grantee, username) {
@@ -408,6 +412,17 @@ func TestSharedUserAllowed(t *testing.T) {
 	}
 	if got := r.shares.calls; len(got) != 1 || got[0].ownerSub != "sub-alice" || got[0].tunnel != "blog" || got[0].username != "bob" {
 		t.Errorf("ShareMatches calls %+v, want sub-alice, tunnel blog, bob", got)
+	}
+}
+
+// An expired share is invisible to authz, so a visitor it once admitted is refused.
+func TestAuthzIgnoresExpiredShare(t *testing.T) {
+	r := newAuthzRig()
+	r.shares.users = []string{"bob"}
+	r.shares.expires = time.Now().Add(-time.Hour)
+	w := r.serve(http.MethodGet, sharedRequest("alice-blog"))
+	if w.Code != http.StatusForbidden || w.Body.Len() != 0 {
+		t.Errorf("= %d %q, want an empty 403 for an expired share", w.Code, w.Body)
 	}
 }
 
