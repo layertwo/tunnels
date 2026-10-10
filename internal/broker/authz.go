@@ -13,8 +13,12 @@ import (
 	"github.com/layertwo/tunnels/internal/store"
 )
 
-// Shares answers whether an owner shared a tunnel with a visitor; store.Store implements it.
+// Shares manages an owner's tunnel shares and answers whether one covers a visitor; store.Store
+// implements it.
 type Shares interface {
+	PutShare(ctx context.Context, ownerSub string, sh store.Share) error
+	DeleteShare(ctx context.Context, ownerSub string, sh store.Share) error
+	SharesByOwner(ctx context.Context, ownerSub string) ([]store.Share, error)
 	ShareMatches(ctx context.Context, ownerSub, tunnel, username string, groups []string) (bool, error)
 }
 

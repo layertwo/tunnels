@@ -51,11 +51,47 @@ type fakeShares struct {
 	groups []string // group grantees
 	err    error
 	calls  []shareCall
+
+	rows     []store.Share // SharesByOwner answer
+	storeErr error         // what the management methods fail with
+	getSubs  []string      // ownerSub of every SharesByOwner call
+	puts     []shareWrite  // every PutShare call
+	deletes  []shareWrite  // every DeleteShare call
 }
 
 type shareCall struct {
 	ownerSub, tunnel, username string
 	groups                     []string
+}
+
+// shareWrite is one PutShare or DeleteShare call.
+type shareWrite struct {
+	ownerSub string
+	share    store.Share
+}
+
+func (f *fakeShares) PutShare(_ context.Context, ownerSub string, sh store.Share) error {
+	if f.storeErr != nil {
+		return f.storeErr
+	}
+	f.puts = append(f.puts, shareWrite{ownerSub, sh})
+	return nil
+}
+
+func (f *fakeShares) DeleteShare(_ context.Context, ownerSub string, sh store.Share) error {
+	if f.storeErr != nil {
+		return f.storeErr
+	}
+	f.deletes = append(f.deletes, shareWrite{ownerSub, sh})
+	return nil
+}
+
+func (f *fakeShares) SharesByOwner(_ context.Context, ownerSub string) ([]store.Share, error) {
+	f.getSubs = append(f.getSubs, ownerSub)
+	if f.storeErr != nil {
+		return nil, f.storeErr
+	}
+	return f.rows, nil
 }
 
 func (f *fakeShares) ShareMatches(_ context.Context, ownerSub, tunnel, username string, groups []string) (bool, error) {

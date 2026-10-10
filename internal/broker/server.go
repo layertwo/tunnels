@@ -10,6 +10,8 @@ import (
 
 	"github.com/layertwo/tunnels/internal/auth"
 	"github.com/layertwo/tunnels/internal/idp"
+	"github.com/layertwo/tunnels/internal/names"
+	"github.com/layertwo/tunnels/internal/store"
 )
 
 // Deps are what the handler talks to.
@@ -36,6 +38,9 @@ func NewHandler(cfg Config, d Deps) http.Handler {
 	})
 	mux.Handle("/authz", Authz{Users: d.Users, Shares: d.Shares, SitesDomain: cfg.SitesDomain, Log: d.Log})
 	mux.HandleFunc("GET /api/me", s.me)
+	mux.HandleFunc("GET /api/shares", s.sharesGet)
+	mux.HandleFunc("PUT /api/shares", s.sharesPut)
+	mux.HandleFunc("DELETE /api/shares", s.sharesDelete)
 	mux.HandleFunc("GET /.well-known/tunnels.json", s.wellKnown)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
 	return mux
@@ -47,20 +52,20 @@ type server struct {
 	resolver Resolver
 }
 
-// me tells a logged-in creator their handle.
-func (s *server) me(w http.ResponseWriter, r *http.Request) {
+// account resolves the request's bearer token exactly as /api/me has always done. On failure it
+// writes the status and sentence and returns false, so the caller does nothing more.
+func (s *server) account(w http.ResponseWriter, r *http.Request) (Account, bool) {
 	token, ok := bearerToken(r)
 	if !ok {
 		writeJSON(w, http.StatusUnauthorized, errorBody(notValid))
-		return
+		return Account{}, false
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), defaultDecisionTimeout)
 	defer cancel()
 
 	acct, err := s.resolver.Resolve(ctx, token)
 	if err == nil {
-		writeJSON(w, http.StatusOK, acct)
-		return
+		return acct, true
 	}
 	text, theirs := reasonOf(err)
 	switch {
@@ -69,9 +74,85 @@ func (s *server) me(w http.ResponseWriter, r *http.Request) {
 	case theirs:
 		writeJSON(w, http.StatusForbidden, errorBody(text))
 	default:
-		s.d.Log.Warn("api/me: could not resolve the account", "err", err)
+		s.d.Log.Warn("api: could not resolve the account", "err", err)
 		writeJSON(w, http.StatusServiceUnavailable, errorBody(text))
 	}
+	return Account{}, false
+}
+
+// me tells a logged-in creator their handle.
+func (s *server) me(w http.ResponseWriter, r *http.Request) {
+	acct, ok := s.account(w, r)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, acct)
+}
+
+// sharesGet lists the caller's own shares.
+func (s *server) sharesGet(w http.ResponseWriter, r *http.Request) {
+	acct, ok := s.account(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), defaultDecisionTimeout)
+	defer cancel()
+
+	shares, err := s.d.Shares.SharesByOwner(ctx, acct.Sub)
+	if err != nil {
+		s.d.Log.Warn("api/shares: could not list the shares", "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, errorBody("shares unavailable, try again"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"shares": shares})
+}
+
+// sharesPut and sharesDelete change the caller's own shares; both are idempotent.
+func (s *server) sharesPut(w http.ResponseWriter, r *http.Request) {
+	s.changeShare(w, r, s.d.Shares.PutShare)
+}
+
+func (s *server) sharesDelete(w http.ResponseWriter, r *http.Request) {
+	s.changeShare(w, r, s.d.Shares.DeleteShare)
+}
+
+func (s *server) changeShare(w http.ResponseWriter, r *http.Request, apply func(context.Context, string, store.Share) error) {
+	acct, ok := s.account(w, r)
+	if !ok {
+		return
+	}
+	var sh store.Share
+	if err := json.NewDecoder(r.Body).Decode(&sh); err != nil || !validShare(sh) {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid share"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), defaultDecisionTimeout)
+	defer cancel()
+
+	if err := apply(ctx, acct.Sub, sh); err != nil {
+		s.d.Log.Warn("api/shares: could not store the share", "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, errorBody("shares unavailable, try again"))
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// validShare reports whether the body describes a share an owner may set. The empty tunnel is the
+// default tunnel; names.ValidTunnelName already rejects "default".
+func validShare(sh store.Share) bool {
+	if sh.Tunnel != "" && !names.ValidTunnelName(sh.Tunnel) {
+		return false
+	}
+	if sh.Grantee == "" {
+		return false
+	}
+	switch sh.Kind {
+	case "user":
+		return true
+	case "group":
+		return !strings.Contains(sh.Grantee, ",")
+	}
+	return false
 }
 
 // wellKnown is what the CLI needs to find the identity provider and the service.

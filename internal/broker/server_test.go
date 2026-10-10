@@ -32,12 +32,13 @@ func testConfig(issuer string) Config {
 
 // serverRig is the whole handler over a real idp.Client talking to the mock identity provider.
 type serverRig struct {
-	h     http.Handler
-	idp   *mockidp.Server
-	users *fakeUsers
-	frps  *fakeFrps
-	cfg   Config
-	logs  *bytes.Buffer
+	h      http.Handler
+	idp    *mockidp.Server
+	users  *fakeUsers
+	shares *fakeShares
+	frps   *fakeFrps
+	cfg    Config
+	logs   *bytes.Buffer
 }
 
 func newServerRig(t *testing.T) *serverRig {
@@ -49,9 +50,9 @@ func newServerRig(t *testing.T) *serverRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &serverRig{idp: m, users: newUsers(), frps: &fakeFrps{online: map[string]string{}}, cfg: testConfig(m.URL), logs: &bytes.Buffer{}}
+	r := &serverRig{idp: m, users: newUsers(), shares: &fakeShares{}, frps: &fakeFrps{online: map[string]string{}}, cfg: testConfig(m.URL), logs: &bytes.Buffer{}}
 	r.h = NewHandler(r.cfg, Deps{
-		IdP: client, Verifier: client, Users: r.users, Frps: r.frps,
+		IdP: client, Verifier: client, Users: r.users, Shares: r.shares, Frps: r.frps,
 		Log: slog.New(slog.NewJSONHandler(r.logs, nil)),
 	})
 	return r
@@ -314,6 +315,124 @@ func postLogin(t *testing.T, r *serverRig, token string) reply {
 		t.Fatalf("= %d %q (%v)", w.Code, w.Body, err)
 	}
 	return rep
+}
+
+func TestSharesGet(t *testing.T) {
+	r := newServerRig(t)
+	r.shares.rows = []store.Share{
+		{Tunnel: "", Kind: "user", Grantee: "bob"},
+		{Tunnel: "blog", Kind: "group", Grantee: "family"},
+	}
+	w := r.do("GET", "/api/shares", bearer(r.idp.Issue("sub-alice", mockidp.IssueOpts{})), "")
+	if w.Code != 200 {
+		t.Fatalf("= %d %q, want 200", w.Code, w.Body)
+	}
+	want := `{"shares":[{"tunnel":"","kind":"user","grantee":"bob"},{"tunnel":"blog","kind":"group","grantee":"family"}]}`
+	if strings.TrimSpace(w.Body.String()) != want {
+		t.Errorf("= %s, want %s", w.Body, want)
+	}
+	if !reflect.DeepEqual(r.shares.getSubs, []string{"sub-alice"}) {
+		t.Errorf("SharesByOwner asked for %v, want sub-alice only", r.shares.getSubs)
+	}
+}
+
+func TestSharesPutValidates(t *testing.T) {
+	tests := []struct {
+		name, body string
+		code       int
+	}{
+		{"kind admin", `{"tunnel":"blog","kind":"admin","grantee":"bob"}`, 400},
+		{"tunnel Blog", `{"tunnel":"Blog","kind":"user","grantee":"bob"}`, 400},
+		{"tunnel default", `{"tunnel":"default","kind":"user","grantee":"bob"}`, 400},
+		{"empty grantee", `{"tunnel":"blog","kind":"user","grantee":""}`, 400},
+		{"group grantee with a comma", `{"tunnel":"blog","kind":"group","grantee":"a,b"}`, 400},
+		{"good", `{"tunnel":"blog","kind":"user","grantee":"bob"}`, 204},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newServerRig(t)
+			w := r.do("PUT", "/api/shares", bearer(r.idp.Issue("sub-alice", mockidp.IssueOpts{})), tt.body)
+			if w.Code != tt.code {
+				t.Errorf("= %d %q, want %d", w.Code, w.Body, tt.code)
+			}
+			if tt.code == 204 {
+				want := []shareWrite{{"sub-alice", store.Share{Tunnel: "blog", Kind: "user", Grantee: "bob"}}}
+				if !reflect.DeepEqual(r.shares.puts, want) {
+					t.Errorf("recorded %+v, want %+v", r.shares.puts, want)
+				}
+				return
+			}
+			if len(r.shares.puts) != 0 {
+				t.Errorf("the store was called for bad input: %+v", r.shares.puts)
+			}
+		})
+	}
+}
+
+// The store deduplicates; a second identical PUT must still answer 204.
+func TestSharesPutIsIdempotent(t *testing.T) {
+	r := newServerRig(t)
+	token := r.idp.Issue("sub-alice", mockidp.IssueOpts{})
+	body := `{"tunnel":"blog","kind":"user","grantee":"bob"}`
+	for i := range 2 {
+		if w := r.do("PUT", "/api/shares", bearer(token), body); w.Code != 204 {
+			t.Fatalf("put %d = %d %q, want 204", i, w.Code, w.Body)
+		}
+	}
+}
+
+func TestSharesDelete(t *testing.T) {
+	r := newServerRig(t)
+	w := r.do("DELETE", "/api/shares", bearer(r.idp.Issue("sub-alice", mockidp.IssueOpts{})), `{"tunnel":"blog","kind":"group","grantee":"family"}`)
+	if w.Code != 204 {
+		t.Fatalf("= %d %q, want 204", w.Code, w.Body)
+	}
+	want := []shareWrite{{"sub-alice", store.Share{Tunnel: "blog", Kind: "group", Grantee: "family"}}}
+	if !reflect.DeepEqual(r.shares.deletes, want) {
+		t.Errorf("recorded %+v, want %+v", r.shares.deletes, want)
+	}
+}
+
+func TestSharesNeedsToken(t *testing.T) {
+	r := newServerRig(t)
+	body := `{"tunnel":"blog","kind":"user","grantee":"bob"}`
+	for _, method := range []string{"GET", "PUT", "DELETE"} {
+		w := r.do(method, "/api/shares", nil, body)
+		if w.Code != 401 || strings.TrimSpace(w.Body.String()) != `{"error":"your session is not valid; run: tunnel login"}` {
+			t.Errorf("%s without a token = %d %q, want 401", method, w.Code, w.Body)
+		}
+	}
+}
+
+func TestSharesNotCreator(t *testing.T) {
+	r := newServerRig(t)
+	vera := bearer(r.idp.Issue("sub-vera", mockidp.IssueOpts{}))
+	body := `{"tunnel":"blog","kind":"user","grantee":"bob"}`
+	for _, method := range []string{"GET", "PUT", "DELETE"} {
+		w := r.do(method, "/api/shares", vera, body)
+		if w.Code != 403 {
+			t.Errorf("%s as a viewer = %d %q, want 403", method, w.Code, w.Body)
+		}
+	}
+}
+
+func TestSharesStoreError(t *testing.T) {
+	r := newServerRig(t)
+	r.shares.storeErr = errors.New("dial tcp 10.0.0.5:5432: connect: connection refused")
+	raw := r.idp.Issue("sub-alice", mockidp.IssueOpts{})
+	body := `{"tunnel":"blog","kind":"user","grantee":"bob"}`
+	for _, method := range []string{"GET", "PUT", "DELETE"} {
+		w := r.do(method, "/api/shares", bearer(raw), body)
+		if w.Code != 503 || strings.Contains(w.Body.String(), "5432") {
+			t.Errorf("%s = %d %q, want 503 without an internal address", method, w.Code, w.Body)
+		}
+	}
+	if !strings.Contains(r.logs.String(), "connection refused") {
+		t.Errorf("the cause was not logged:\n%s", r.logs)
+	}
+	if strings.Contains(r.logs.String(), raw) {
+		t.Error("the token leaked into the log")
+	}
 }
 
 // frps checks the audience too, but only if it was configured to; the broker is the first layer.
