@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/layertwo/tunnels/internal/auth"
 	"github.com/layertwo/tunnels/internal/idp"
 )
 
@@ -67,21 +68,15 @@ func (s *server) me(w http.ResponseWriter, r *http.Request) {
 	case theirs:
 		writeJSON(w, http.StatusForbidden, errorBody(text))
 	default:
-		cmpLogger(s.d.Log).Warn("api/me: could not resolve the account", "err", err)
+		s.d.Log.Warn("api/me: could not resolve the account", "err", err)
 		writeJSON(w, http.StatusServiceUnavailable, errorBody(text))
 	}
 }
 
 // wellKnown is what the CLI needs to find the identity provider and the service.
 func (s *server) wellKnown(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, struct {
-		Issuer        string `json:"issuer"`
-		CLIClientID   string `json:"cli_client_id"`
-		APIResource   string `json:"api_resource"`
-		ServiceHost   string `json:"service_host"`
-		SitesDomain   string `json:"sites_domain"`
-		MinCLIVersion string `json:"min_cli_version"`
-	}{s.cfg.Issuer, s.cfg.CLIClientID, s.cfg.APIResource, s.cfg.ServiceHost, s.cfg.SitesDomain, s.cfg.MinCLIVersion})
+	writeJSON(w, http.StatusOK, auth.Bootstrap{Issuer: s.cfg.Issuer, CLIClientID: s.cfg.CLIClientID, APIResource: s.cfg.APIResource,
+		ServiceHost: s.cfg.ServiceHost, SitesDomain: s.cfg.SitesDomain, MinCLIVersion: s.cfg.MinCLIVersion})
 }
 
 // bearerToken is the token of an Authorization header that holds exactly one "Bearer <token>".

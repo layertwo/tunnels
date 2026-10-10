@@ -120,7 +120,6 @@ Settles design Verification 6 and 7 against the real service before code depends
   func HandleFromUsername(username string, reserved []string) (string, error)
   func ValidTunnelName(name string) bool            // "default" and "" are not valid names
   func Label(handle, tunnel string) string          // tunnel "" or Default -> handle; else handle+"-"+tunnel
-  func ProxyName(handle, tunnel string) string      // handle+"."+(tunnel, or Default when "")
   func ParseLabel(label string) (handle, tunnel string, ok bool)   // tunnel "" for the default tunnel
   func SiteLabel(host, sitesDomain string) (label string, ok bool) // from X-Forwarded-Host
   ```
@@ -136,11 +135,11 @@ Settles design Verification 6 and 7 against the real service before code depends
   ```
 
   - `TestValidTunnelName`: valid `blog`, `a`, `a-b`, `a--b`, 42 characters; invalid `default`, ``, `-a`, `a-`, `Blog`, `a_b`, 43 characters.
-  - `TestLabelAndProxyName`: `Label("alice","")` = `alice`, `Label("alice","default")` = `alice`, `Label("alice","blog")` = `alice-blog`; `ProxyName("alice","")` = `alice.default`, `ProxyName("alice","blog")` = `alice.blog`.
+  - `TestLabel`: `Label("alice","")` = `alice`, `Label("alice","default")` = `alice`, `Label("alice","blog")` = `alice-blog`.
   - `TestParseLabel`: `alice` -> (`alice`, ``, true); `alice-blog` -> (`alice`, `blog`, true); `alice-a-b` -> (`alice`, `a-b`, true); a 20-character handle plus `-` plus a 42-character name (63 total) is ok; invalid: `alice-`, `-blog`, `alice-default`, `Alice`, `a`, `alice--x`, `alice-Blog`, 64 characters, ``.
   - `TestSiteLabel` (domain `w.tunnels.layertwo.dev`): `alice-blog.w.tunnels.layertwo.dev` -> (`alice-blog`, true); `Alice.W.Tunnels.Layertwo.Dev` -> (`alice`, true); invalid: with `:443`, with a trailing dot, `x.alice.w.tunnels.layertwo.dev`, `w.tunnels.layertwo.dev`, `alice.tunnels.layertwo.dev`, `alice.w.tunnels.layertwo.dev.evil.com`, `a.com, b.com`, ``.
 - [ ] **Step 2: Run to verify they fail.** `go test ./internal/names/ -v`. Expected: build failure, `undefined: HandleFromUsername` (and the other functions).
-- [ ] **Step 3: Implement** the six signatures in `internal/names/names.go`. Compile the three regexps once; the error text of `HandleFromUsername` is shown to the user on a refused login, so it names the rule ("use 2 to 20 letters and digits") and, for reserved names, says the handle is reserved.
+- [ ] **Step 3: Implement** the signatures in `internal/names/names.go`. Compile the three regexps once; the error text of `HandleFromUsername` is shown to the user on a refused login, so it names the rule ("use 2 to 20 letters and digits") and, for reserved names, says the handle is reserved.
 - [ ] **Step 4: Run to verify they pass.** `go test -race ./internal/names/ -v`. Expected: PASS.
 - [ ] **Step 5: Scaffold.** `go mod init github.com/layertwo/tunnels`, set `go 1.26.0`. `README.md`: what the repo is, `go test ./...`, how to build, link to `docs/design.md` and `docs/plans/`. `renovate.json`:
 
@@ -169,7 +168,7 @@ Settles design Verification 6 and 7 against the real service before code depends
 - Produces (`package store`):
 
   ```go
-  type User struct { Sub, Handle string; Disabled bool; CreatedAt time.Time }
+  type User struct { Sub, Handle string; Disabled bool }
   var ErrNotFound, ErrHandleTaken error
   func Open(ctx context.Context, databaseURL string) (*Store, error)   // pool + Migrate
   func (s *Store) Close()
@@ -268,7 +267,6 @@ Settles design Verification 6 and 7 against the real service before code depends
   var ErrNotCreator, ErrDisabled, ErrBadHandle error   // a bad or expired token surfaces as idp.ErrInvalidToken
   type Resolver struct { IdP IdP; Verifier TokenVerifier; Users Users; CreatorsGroup string; Reserved []string }
   func (r Resolver) Resolve(ctx context.Context, accessToken string) (Account, error)
-  func Reason(err error) string   // user-facing text for a refusal; "login unavailable, try again" for anything else
   ```
 
   `Resolve`: `Verifier.VerifyAccessToken` first (decision 12; its sub must equal userinfo's); userinfo; the identity must include `CreatorsGroup` (else `ErrNotCreator`); look the user up by `sub`; if unknown, derive the handle with `names.HandleFromUsername` (failure wraps `ErrBadHandle`) and `CreateUser`; a stored user keeps their stored handle even if the username changed or is no longer a valid handle; `Disabled` gives `ErrDisabled`. `Reason` maps `idp.ErrInvalidToken` to "your session is not valid; run: tunnel login".
@@ -304,7 +302,7 @@ The security core. Pinned by Review Focus 2 and 3.
 
   Behaviour. A wrong or missing secret is 404 (constant-time compare). Unknown op, bad JSON or a non-POST is 400. Every decision is 200.
   - **Login:** `privilege_key` is the access token (empty: reject "missing token"); `Resolve` it (errors -> reject with `Reason`); if `run_id` is set, `OnlineRunIDUser`: an error rejects, online under a different handle rejects "run id belongs to another session", offline or the same handle passes; set `user` to the handle and return the whole `LoginContent` with `unchange:false`.
-  - **NewProxy:** `user.user` is the handle stored at Login. The type must be `http` with no `custom_domains` and no `locations`; `proxy_name` must equal `ProxyName(handle, n)` for some `n` that is `default` or a valid tunnel name, and `subdomain` must equal `Label(handle, n)`; `OnlineProxyCount(handle)` at or above `MaxTunnelsPerUser` rejects ("tunnel limit of N reached"), an error rejects; set `bandwidth_limit` to `BandwidthLimit` and `bandwidth_limit_mode` to `server`; return the whole content with `unchange:false`.
+  - **NewProxy:** `user.user` is the handle stored at Login. The type must be `http` with no `custom_domains` and no `locations`; `proxy_name` must equal `<handle>.<n>` for some `n` that is `default` or a valid tunnel name, and `subdomain` must equal `Label(handle, n)`; `OnlineProxyCount(handle)` at or above `MaxTunnelsPerUser` rejects ("tunnel limit of N reached"), an error rejects; set `bandwidth_limit` to `BandwidthLimit` and `bandwidth_limit_mode` to `server`; return the whole content with `unchange:false`.
   - **CloseProxy:** log, answer `unchange:true`.
   - Each decision logs op, handle, sub, result and reason (never the token).
 
@@ -379,7 +377,7 @@ Pinned by Review Focus 5.
   ```go
   type Bootstrap struct { Issuer, CLIClientID, APIResource, ServiceHost, SitesDomain, MinCLIVersion string } // json: issuer, cli_client_id, api_resource, service_host, sites_domain, min_cli_version
   func Discover(ctx context.Context, hc *http.Client, baseURL string) (Bootstrap, error)  // GET <baseURL>/.well-known/tunnels.json
-  type Me struct { Sub, Username, Handle string }
+  type Me struct { Username, Handle string }
   func GetMe(ctx context.Context, hc *http.Client, baseURL, accessToken string) (Me, error) // error text = the server's {"error"} message
 
   type Tokens struct { AccessToken, RefreshToken, Handle, Server string }

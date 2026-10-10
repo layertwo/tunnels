@@ -2,6 +2,7 @@
 package tunnel
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -52,30 +53,23 @@ func Build(o Options) (*v1.ClientCommonConfig, []v1.ProxyConfigurer, error) {
 	case o.Protocol == "wss" && o.CAFile == "":
 		return nil, nil, errors.New("tunnel: wss needs a CA file, otherwise frp does not check the server's certificate")
 	}
-	name := o.Name
-	if name == "" {
-		name = names.Default
-	}
-	heartbeat := o.HeartbeatInterval
-	if heartbeat == 0 {
-		heartbeat = 30 // with tcpMux on, frp sends no heartbeats unless told to, and then never notices a revoked token
-	}
-	tls := map[string]any{}
-	if o.CAFile != "" {
-		tls["trustedCaFile"] = o.CAFile
-	}
 	raw, err := json.Marshal(map[string]any{
 		"serverAddr": o.ServerHost,
 		"serverPort": o.ServerPort,
 		"user":       o.Handle,
-		"transport":  map[string]any{"protocol": o.Protocol, "heartbeatInterval": heartbeat, "tls": tls},
+		"transport": map[string]any{
+			"protocol": o.Protocol,
+			// with tcpMux on, frp sends no heartbeats unless told to, and then never notices a revoked token
+			"heartbeatInterval": cmp.Or(o.HeartbeatInterval, 30),
+			"tls":               map[string]any{"trustedCaFile": o.CAFile},
+		},
 		"auth": map[string]any{
 			"method":           "oidc",
 			"additionalScopes": []string{"HeartBeats", "NewWorkConns"},
 			"oidc":             map[string]any{"tokenSource": map[string]any{"type": "file", "file": map[string]any{"path": o.TokenFile}}},
 		},
 		"proxies": []any{map[string]any{
-			"name": name, "type": "http", "localIP": "127.0.0.1", "localPort": o.LocalPort,
+			"name": cmp.Or(o.Name, names.Default), "type": "http", "localIP": "127.0.0.1", "localPort": o.LocalPort,
 			"subdomain": names.Label(o.Handle, o.Name),
 			// frps sets x-forwarded-proto to http for the last hop; the visitor came over https.
 			"requestHeaders": map[string]any{"set": map[string]string{"x-forwarded-proto": "https"}},

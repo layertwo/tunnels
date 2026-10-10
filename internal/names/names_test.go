@@ -63,18 +63,15 @@ func TestValidTunnelName(t *testing.T) {
 	}
 }
 
-func TestLabelAndProxyName(t *testing.T) {
-	tests := []struct{ handle, tunnel, label, proxy string }{
-		{"alice", "", "alice", "alice.default"},
-		{"alice", "default", "alice", "alice.default"},
-		{"alice", "blog", "alice-blog", "alice.blog"},
+func TestLabel(t *testing.T) {
+	tests := []struct{ handle, tunnel, label string }{
+		{"alice", "", "alice"},
+		{"alice", "default", "alice"},
+		{"alice", "blog", "alice-blog"},
 	}
 	for _, tt := range tests {
 		if got := Label(tt.handle, tt.tunnel); got != tt.label {
 			t.Errorf("Label(%q, %q) = %q, want %q", tt.handle, tt.tunnel, got, tt.label)
-		}
-		if got := ProxyName(tt.handle, tt.tunnel); got != tt.proxy {
-			t.Errorf("ProxyName(%q, %q) = %q, want %q", tt.handle, tt.tunnel, got, tt.proxy)
 		}
 	}
 }

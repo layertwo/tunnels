@@ -57,15 +57,6 @@ func Label(handle, tunnel string) string {
 	return handle + "-" + tunnel
 }
 
-// ProxyName returns the frp proxy name of a tunnel: handle.tunnel, with Default
-// standing in for "".
-func ProxyName(handle, tunnel string) string {
-	if tunnel == "" {
-		tunnel = Default
-	}
-	return handle + "." + tunnel
-}
-
 // ParseLabel splits a site label made by Label. The owner is the text before
 // the first dash; tunnel is "" for the default tunnel.
 func ParseLabel(label string) (handle, tunnel string, ok bool) {

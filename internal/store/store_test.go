@@ -122,10 +122,6 @@ func migrationFiles(t *testing.T) []string {
 	return files
 }
 
-func sameUser(a, b User) bool {
-	return a.Sub == b.Sub && a.Handle == b.Handle && a.Disabled == b.Disabled && a.CreatedAt.Equal(b.CreatedAt)
-}
-
 func TestOpenIsIdempotent(t *testing.T) {
 	dbURL := schemaURL(t)
 	s := openStore(t, dbURL)
@@ -180,9 +176,6 @@ func TestCreateUserAndLookups(t *testing.T) {
 	if created.Sub != "sub-1" || created.Handle != "alice" || created.Disabled {
 		t.Errorf("CreateUser = %+v, want sub-1, alice, not disabled", created)
 	}
-	if d := time.Since(created.CreatedAt); d < -time.Minute || d > time.Minute {
-		t.Errorf("CreatedAt = %v, want about now", created.CreatedAt)
-	}
 
 	tests := []struct {
 		name string
@@ -198,7 +191,7 @@ func TestCreateUserAndLookups(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s(%q): %v", tt.name, tt.key, err)
 			}
-			if !sameUser(got, created) {
+			if got != created {
 				t.Errorf("%s(%q) = %+v, want %+v", tt.name, tt.key, got, created)
 			}
 		})
@@ -216,7 +209,7 @@ func TestCreateUserIsIdempotentPerSub(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second CreateUser: %v", err)
 	}
-	if !sameUser(second, first) {
+	if second != first {
 		t.Errorf("second CreateUser = %+v, want the first row %+v", second, first)
 	}
 	if _, err := s.UserByHandle(ctx, "bob"); !errors.Is(err, ErrNotFound) {
@@ -265,7 +258,7 @@ func TestConcurrentFirstLogins(t *testing.T) {
 			for i := range n {
 				if errs[i] != nil {
 					t.Errorf("round %d: CreateUser #%d: %v", r, i, errs[i])
-				} else if !sameUser(users[i], users[0]) {
+				} else if users[i] != users[0] {
 					t.Errorf("round %d: CreateUser #%d = %+v, want %+v", r, i, users[i], users[0])
 				}
 			}

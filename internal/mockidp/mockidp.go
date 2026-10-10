@@ -7,7 +7,6 @@ package mockidp
 import (
 	"crypto/rand"
 	"crypto/rsa"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -219,7 +218,7 @@ func (s *Server) Issue(sub string, o IssueOpts) string {
 func (s *Server) IssueRefreshToken(sub string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	token := randHex(16)
+	token := rand.Text()
 	s.refreshTokens[token] = &refreshGrant{sub: sub, scope: "openid profile groups offline_access", aud: []string{APIResource, ClientID, s.URL}}
 	return token
 }
@@ -239,7 +238,7 @@ func (s *Server) sign(sub string, aud []string, scope string, ttl time.Duration)
 		"scope": scope,
 		"iat":   now.Unix(),
 		"exp":   now.Add(ttl).Unix(),
-		"jti":   randHex(16), // two tokens issued in the same second still differ
+		"jti":   rand.Text(), // two tokens issued in the same second still differ
 	}).Serialize()
 	if err != nil {
 		panic(err) // cannot happen: the claims are plain JSON values
@@ -322,11 +321,8 @@ func (s *Server) deviceAuthorize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	form := make(url.Values, len(r.Form))
-	for k, v := range r.Form {
-		form[k] = slices.Clone(v)
-	}
-	deviceCode, userCode := randHex(16), randUserCode()
+	form := r.Form
+	deviceCode, userCode := rand.Text(), randUserCode()
 
 	s.mu.Lock()
 	ttl := s.deviceTTL
@@ -424,7 +420,7 @@ func (s *Server) tokenResponse(sub string, aud []string, scope string) map[strin
 		"scope":        scope,
 	}
 	if slices.Contains(strings.Fields(scope), "offline_access") {
-		token := randHex(16)
+		token := rand.Text()
 		s.refreshTokens[token] = &refreshGrant{sub: sub, scope: scope, aud: aud}
 		resp["refresh_token"] = token
 	}
@@ -439,13 +435,6 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, code string) {
 	writeJSON(w, status, map[string]string{"error": code})
-}
-
-// randHex returns n random bytes as hex.
-func randHex(n int) string {
-	b := make([]byte, n)
-	rand.Read(b) // never fails
-	return hex.EncodeToString(b)
 }
 
 // randUserCode returns a user code like ABCD-EFGH.

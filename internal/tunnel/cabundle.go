@@ -29,9 +29,6 @@ func WriteCABundle(dir string) (string, error) {
 	if old, err := os.ReadFile(path); err == nil && bytes.Equal(old, b.Bytes()) {
 		return path, nil
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("tunnel: %w", err)
-	}
 	if err := auth.WriteFileAtomic(path, b.Bytes()); err != nil {
 		return "", fmt.Errorf("tunnel: write the CA bundle: %w", err)
 	}
