@@ -515,7 +515,9 @@ All of them fail closed.
   Names are trust-based at this stage.
 - **Phase 1:** the plugin hooks, owner-only `/authz`, `tunnel login` and `tunnel up`, releases.
   Creators cannot touch each other from here on. The repo also publishes `tunnels-frps`.
-- **Phase 2:** sharing: the shares table, `/api/shares`, `share`, `unshare`, `list`.
+- **Phase 2 (implemented):** sharing: the shares table, `/api/shares`, `share`, `unshare`, `list`.
+  A group share works only while the visitor's groups reach `/authz`: the gate sets
+  `X-Tunnels-Groups` on the request it forwards to the broker.
 - **Phase 3:** hardening: heartbeat revocation proven end to end, the Ping-hook kill switch,
   tuned limits, Gatus, docs, machine clients.
 - **Later:** SSH, a web UI, share expiry, live tunnel status.
