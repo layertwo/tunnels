@@ -105,12 +105,19 @@ func (r Resolver) create(ctx context.Context, id idp.Identity) (store.User, erro
 // Reason is what to tell the person behind a failed Resolve. Only refusals and an invalid token have
 // their own sentence; any other error gets a fixed one, so no internal detail reaches them.
 func Reason(err error) string {
+	text, _ := reasonOf(err)
+	return text
+}
+
+// reasonOf is Reason plus whether the person caused the failure. The ones they did not cause (a
+// dependency is down) are the only ones worth logging in full.
+func reasonOf(err error) (text string, theirs bool) {
 	var r *refusal
 	switch {
 	case errors.As(err, &r):
-		return r.text
+		return r.text, true
 	case errors.Is(err, idp.ErrInvalidToken):
-		return "your session is not valid; run: tunnel login"
+		return "your session is not valid; run: tunnel login", true
 	}
-	return "login unavailable, try again"
+	return "login unavailable, try again", false
 }

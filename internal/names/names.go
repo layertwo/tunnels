@@ -38,6 +38,10 @@ func HandleFromUsername(username string, reserved []string) (string, error) {
 	return handle, nil
 }
 
+// ValidHandle reports whether handle is one HandleFromUsername could have made: 2 to 20 lowercase
+// letters and digits.
+func ValidHandle(handle string) bool { return handleRE.MatchString(handle) }
+
 // ValidTunnelName reports whether name is a tunnel name: 1 to 42 lowercase
 // letters, digits and inner dashes. Default and "" are not names.
 func ValidTunnelName(name string) bool {
