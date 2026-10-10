@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -609,5 +610,31 @@ func TestKeepFreshReportsAndKeepsGoing(t *testing.T) {
 	}
 	if after, _ := os.ReadFile(s.AccessTokenPath()); string(after) != string(before) {
 		t.Error("a failed refresh changed the access token file")
+	}
+}
+
+// A service reached over https may not send the login anywhere in clear: the device code and the
+// refresh token go to the issuer it names.
+func TestDiscoverRefusesAnHTTPIssuerFromAnHTTPSService(t *testing.T) {
+	for issuer, ok := range map[string]bool{"https://idp.example": true, "http://idp.example": false, "idp.example": false} {
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprintf(w, `{"issuer":%q,"cli_client_id":"c","api_resource":"a","service_host":"h","sites_domain":"s"}`, issuer)
+		}))
+		_, err := Discover(t.Context(), srv.Client(), srv.URL)
+		srv.Close()
+		if ok && err != nil {
+			t.Errorf("issuer %q from an https service: %v", issuer, err)
+		}
+		if !ok && (err == nil || !strings.Contains(err.Error(), issuer)) {
+			t.Errorf("issuer %q from an https service: err = %v, want a refusal naming it", issuer, err)
+		}
+	}
+	// A service on plain http (one on this machine, in tests) is already in clear: no new risk.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"issuer":"http://idp.example","cli_client_id":"c","api_resource":"a","service_host":"h","sites_domain":"s"}`)
+	}))
+	defer srv.Close()
+	if _, err := Discover(t.Context(), client(), srv.URL); err != nil {
+		t.Errorf("an http issuer from an http service: %v", err)
 	}
 }
