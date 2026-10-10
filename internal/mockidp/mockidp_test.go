@@ -496,3 +496,25 @@ func TestDecisionOnUnknownUserCodeFailsTheTest(t *testing.T) {
 		t.Errorf("Approve and Deny of an unknown user code reported %d errors, want 2: %q", len(rec.errs), rec.errs)
 	}
 }
+
+func TestIssueRefreshToken(t *testing.T) {
+	s := New(t)
+	rt := s.IssueRefreshToken("alice-sub")
+	status, got := refresh(t, s, rt)
+	if status != http.StatusOK {
+		t.Fatalf("refresh = %d: %v", status, got)
+	}
+	c := verify(t, s, got.str("access_token"))
+	if want := []string{APIResource, ClientID, s.URL}; !slices.Equal(c.Audience, want) || c.Subject != "alice-sub" ||
+		c.Scope != "openid profile groups offline_access" {
+		t.Errorf("aud = %v, sub = %q, scope = %q, want the device flow's audience, alice-sub and its scope", c.Audience, c.Subject, c.Scope)
+	}
+	if next := got.str("refresh_token"); next == "" || next == rt {
+		t.Errorf("refresh_token = %q, want a rotated one", next)
+	}
+
+	// It is as good as one from the device flow: revoking the user ends it.
+	s.RevokeUser("alice-sub")
+	status, body := refresh(t, s, s.IssueRefreshToken("alice-sub"))
+	wantError(t, status, body, "invalid_grant")
+}

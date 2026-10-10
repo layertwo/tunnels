@@ -214,6 +214,16 @@ func (s *Server) Issue(sub string, o IssueOpts) string {
 	return s.sign(sub, o.Audience, o.Scope, ttl)
 }
 
+// IssueRefreshToken returns a refresh token for sub as the device flow would have handed out after an
+// approval: the default audience of Issue and the scope "openid profile groups offline_access".
+func (s *Server) IssueRefreshToken(sub string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	token := randHex(16)
+	s.refreshTokens[token] = &refreshGrant{sub: sub, scope: "openid profile groups offline_access", aud: []string{APIResource, ClientID, s.URL}}
+	return token
+}
+
 // sign builds the JWT. It does not touch the mutex, so the handlers can call it while holding it.
 func (s *Server) sign(sub string, aud []string, scope string, ttl time.Duration) string {
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: s.key},
