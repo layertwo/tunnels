@@ -508,6 +508,61 @@ func TestOwnerStillAllowed(t *testing.T) {
 	}
 }
 
+// A browser page served from one creator's tunnel must not make a state-changing request to
+// another creator's tunnel riding the visitor's session: the Origin names a different owner.
+func TestCrossOwnerStateChangeRefused(t *testing.T) {
+	h := ownerRequest()
+	h.Set("Origin", "https://bob-x."+sitesDomain)
+	w := newAuthzRig().serve(http.MethodPost, h)
+	if w.Code != http.StatusForbidden || w.Body.Len() != 0 {
+		t.Errorf("= %d %q, want an empty 403", w.Code, w.Body)
+	}
+}
+
+// Safe methods cannot change anything, so they are never refused for their Origin.
+func TestCrossOwnerSafeMethodAllowed(t *testing.T) {
+	h := ownerRequest()
+	h.Set("Origin", "https://bob-x."+sitesDomain)
+	if w := newAuthzRig().serve(http.MethodGet, h); w.Code != http.StatusOK {
+		t.Errorf("= %d, want 200", w.Code)
+	}
+}
+
+func TestSameOwnerOriginAllowed(t *testing.T) {
+	h := ownerRequest()
+	h.Set("Origin", "https://alice-other."+sitesDomain)
+	if w := newAuthzRig().serve(http.MethodPost, h); w.Code != http.StatusOK {
+		t.Errorf("= %d, want 200", w.Code)
+	}
+}
+
+func TestForeignOriginAllowed(t *testing.T) {
+	h := ownerRequest()
+	h.Set("Origin", "https://example.com")
+	if w := newAuthzRig().serve(http.MethodPost, h); w.Code != http.StatusOK {
+		t.Errorf("= %d, want 200", w.Code)
+	}
+}
+
+// A non-browser client sends no Origin and is let through.
+func TestOriginAbsentAllowed(t *testing.T) {
+	if w := newAuthzRig().serve(http.MethodPost, ownerRequest()); w.Code != http.StatusOK {
+		t.Errorf("= %d, want 200", w.Code)
+	}
+}
+
+// Only a valid sites Origin owned by someone else is refused. A host that merely looks like a
+// sites host (Traefik never routes it) or an unparseable Origin is foreign, so it is allowed.
+func TestMalformedOriginAllowed(t *testing.T) {
+	for _, origin := range []string{"https://alice-blog." + sitesDomain + ".evil", "://"} {
+		h := ownerRequest()
+		h.Set("Origin", origin)
+		if w := newAuthzRig().serve(http.MethodPost, h); w.Code != http.StatusOK {
+			t.Errorf("origin %q = %d, want 200", origin, w.Code)
+		}
+	}
+}
+
 func TestGroupsOf(t *testing.T) {
 	tests := []struct {
 		name   string

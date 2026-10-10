@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -48,7 +49,7 @@ func (a Authz) timeout() time.Duration { return cmp.Or(a.Timeout, 5*time.Second)
 // outcome is one decision and what is logged about it.
 type outcome struct {
 	allow  bool
-	reason string // the class of the decision: owner, shared, host, identity, unknown_owner, disabled, not_owner, store
+	reason string // the class of the decision: owner, shared, host, identity, cross_owner, unknown_owner, disabled, not_owner, store
 	label  string
 	sub    string
 	user   string // the visitor's username, for the allow answer
@@ -104,6 +105,13 @@ func (a Authz) decide(r *http.Request) outcome {
 	}
 	o.sub = subs[0]
 
+	// A browser page served from one creator's tunnel must not drive a state-changing request to
+	// another creator's tunnel with the visitor's cookies. A foreign or absent Origin is harmless.
+	if a.crossOwner(r, handle) {
+		o.reason = "cross_owner"
+		return o
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), a.timeout())
 	defer cancel()
 	owner, err := a.Users.UserByHandle(ctx, handle)
@@ -132,6 +140,30 @@ func (a Authz) decide(r *http.Request) outcome {
 		}
 	}
 	return o
+}
+
+// crossOwner reports whether a state-changing request (not GET, HEAD or OPTIONS) carries an Origin
+// whose host is a valid sites host owned by someone other than target. A missing or foreign Origin
+// is allowed: only a browser Origin that Traefik actually routes is a cross-owner page.
+func (a Authz) crossOwner(r *http.Request, target string) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	}
+	origins := r.Header["Origin"]
+	if len(origins) == 0 {
+		return false
+	}
+	u, err := url.Parse(origins[0])
+	if err != nil {
+		return false
+	}
+	label, ok := names.SiteLabel(u.Host, a.SitesDomain)
+	if !ok {
+		return false
+	}
+	handle, _, _ := names.ParseLabel(label)
+	return handle != target
 }
 
 // groupsOf reads the visitor's groups from X-Tunnels-Groups: several values, each possibly a
