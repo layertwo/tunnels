@@ -1,0 +1,8 @@
+profile: coverage.txt
+threshold:
+  total: 100
+exclude:
+  paths:
+    # v2.14.1 strips the module prefix before matching, so this is "cmd/..." not the module-qualified path.
+    - ^cmd/
+force-annotation-comment: true

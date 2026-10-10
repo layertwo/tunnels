@@ -60,6 +60,10 @@ jobs:
         with:
           name: code-coverage
           path: coverage.txt
+      - name: Enforce 100% coverage
+        run: |
+          go install github.com/vladopajic/go-test-coverage/v2@v2.14.1
+          "$(go env GOPATH)/bin/go-test-coverage" --config=.testcoverage.yml
 
   # Posts the coverage report of `test` as a comment on the pull request; the
   # profile uploaded on mainline is the baseline it compares against.
