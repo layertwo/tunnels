@@ -22,6 +22,13 @@ type User struct {
 	Disabled bool
 }
 
+// Share grants one user or group access to one tunnel. The empty Tunnel is the default tunnel.
+type Share struct {
+	Tunnel  string `json:"tunnel"` // "" is the default tunnel
+	Kind    string `json:"kind"`   // "user" or "group"
+	Grantee string `json:"grantee"`
+}
+
 var (
 	// ErrNotFound means no row matches. A failed query is never ErrNotFound.
 	ErrNotFound = errors.New("store: user not found")
@@ -178,4 +185,64 @@ func (s *Store) CreateUser(ctx context.Context, sub, handle string) (User, error
 		return User{}, fmt.Errorf("store: create user: %w", err)
 	}
 	return s.UserBySub(ctx, sub)
+}
+
+const (
+	shareInsert = "insert into shares (owner_sub, tunnel, kind, grantee) values ($1, $2, $3, $4) on conflict (owner_sub, tunnel, kind, grantee) do nothing"
+	shareDelete = "delete from shares where owner_sub = $1 and tunnel = $2 and kind = $3 and grantee = $4"
+	shareList   = "select tunnel, kind, grantee from shares where owner_sub = $1 order by tunnel, kind, grantee"
+	shareMatch  = `select exists (
+    select 1 from shares
+    where owner_sub = $1 and tunnel = $2
+      and ((kind = 'user' and lower(grantee) = lower($3))
+        or (kind = 'group' and grantee = any($4)))
+)`
+)
+
+// PutShare grants the share. Putting a share that is already there does nothing.
+func (s *Store) PutShare(ctx context.Context, ownerSub string, sh Share) error {
+	if _, err := s.pool.Exec(ctx, shareInsert, ownerSub, sh.Tunnel, sh.Kind, sh.Grantee); err != nil {
+		return fmt.Errorf("store: put share: %w", err)
+	}
+	return nil
+}
+
+// DeleteShare removes the share. Deleting a share that is not there does nothing.
+func (s *Store) DeleteShare(ctx context.Context, ownerSub string, sh Share) error {
+	if _, err := s.pool.Exec(ctx, shareDelete, ownerSub, sh.Tunnel, sh.Kind, sh.Grantee); err != nil {
+		return fmt.Errorf("store: delete share: %w", err)
+	}
+	return nil
+}
+
+// SharesByOwner returns the owner's shares, ordered by tunnel, kind, grantee.
+func (s *Store) SharesByOwner(ctx context.Context, ownerSub string) ([]Share, error) {
+	rows, err := s.pool.Query(ctx, shareList, ownerSub)
+	if err != nil {
+		return nil, fmt.Errorf("store: list shares: %w", err)
+	}
+	defer rows.Close()
+
+	shares := []Share{}
+	for rows.Next() {
+		var sh Share
+		if err := rows.Scan(&sh.Tunnel, &sh.Kind, &sh.Grantee); err != nil {
+			return nil, fmt.Errorf("store: list shares: %w", err)
+		}
+		shares = append(shares, sh)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list shares: %w", err)
+	}
+	return shares, nil
+}
+
+// ShareMatches reports whether the owner shared the tunnel with this username, case-insensitively, or
+// with one of these groups. A failed query is an error, never false.
+func (s *Store) ShareMatches(ctx context.Context, ownerSub, tunnel, username string, groups []string) (bool, error) {
+	var ok bool
+	if err := s.pool.QueryRow(ctx, shareMatch, ownerSub, tunnel, username, groups).Scan(&ok); err != nil {
+		return false, fmt.Errorf("store: match share: %w", err)
+	}
+	return ok, nil
 }
