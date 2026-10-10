@@ -141,6 +141,9 @@ func TestLoadConfigRejects(t *testing.T) {
 		{"SITES_DOMAIN", "w_x.layertwo.dev"},
 		{"SITES_DOMAIN", "-w.layertwo.dev"},
 		{"SITES_DOMAIN", "w.layertwo.dev,x.layertwo.dev"},
+		{"SITES_DOMAIN", "w.\u212Aelvin.dev"}, // strings.ToLower makes it "w.kelvin.dev"
+		{"SERVICE_HOST", "\u212Aelvin.dev"},
+		{"SITES_DOMAIN", "w.ünal.dev"},
 		{"SERVICE_HOST", "https://tunnels.layertwo.dev"},
 		{"SERVICE_HOST", "tunnels.layertwo.dev:443"},
 		{"SERVICE_HOST", "tunnels.layertwo.dev/"},
@@ -148,6 +151,11 @@ func TestLoadConfigRejects(t *testing.T) {
 		{"FRPS_DASHBOARD_URL", "ftp://frps:7500"},
 		{"FRPS_DASHBOARD_URL", "http://"},
 		{"FRPS_DASHBOARD_URL", "7500"},
+		{"FRPS_DASHBOARD_URL", "http://broker:hunter2@frps:7500"},
+		{"FRPS_DASHBOARD_URL", "http://broker@frps:7500"},
+		{"FRPS_DASHBOARD_URL", "http://frps:7500?x=1"},
+		{"FRPS_DASHBOARD_URL", "http://frps:7500/#x"},
+		{"FRPS_DASHBOARD_URL", "http://frps:7500?"},
 		{"PLUGIN_SECRET", "short"},
 		{"PLUGIN_SECRET", goodSecret[:31]},
 		{"PLUGIN_SECRET", goodSecret + "/x"},
@@ -165,8 +173,11 @@ func TestLoadConfigRejects(t *testing.T) {
 				t.Fatalf("err = %v, want one naming %s", err, tt.name)
 			}
 			// What is wrong with a secret must not end up in a log with the secret in it.
-			if (tt.name == "PLUGIN_SECRET") && strings.Contains(err.Error(), tt.value) {
-				t.Errorf("the error repeats the secret: %v", err)
+			if (tt.name == "PLUGIN_SECRET" || tt.name == "FRPS_DASHBOARD_URL") && strings.Contains(err.Error(), tt.value) {
+				t.Errorf("the error repeats the value, which may hold a secret: %v", err)
+			}
+			if strings.Contains(err.Error(), "hunter2") {
+				t.Errorf("the error repeats a password: %v", err)
 			}
 		})
 	}

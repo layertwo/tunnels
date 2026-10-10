@@ -42,8 +42,9 @@ type Config struct {
 }
 
 var (
-	// hostRE matches a lowercase DNS name: no port, no scheme, no trailing dot, no empty label.
-	hostRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
+	// hostRE matches a DNS name: no port, no scheme, no trailing dot, no empty label. It is applied to
+	// the value as given, before lowercasing, because strings.ToLower turns U+212A into "k".
+	hostRE = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$`)
 	// secretRE is a path element that needs no escaping: the secret is part of the plugin URL.
 	secretRE = regexp.MustCompile(`^[A-Za-z0-9_-]{32,}$`)
 )
@@ -67,11 +68,10 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		return def
 	}
 	host := func(name string, v string) string {
-		v = strings.ToLower(v)
 		if v != "" && !hostRE.MatchString(v) {
 			bad(name, "must be a DNS name, without a scheme, a port or a trailing dot")
 		}
-		return v
+		return strings.ToLower(v)
 	}
 
 	c := Config{
@@ -96,8 +96,10 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		ListenAddr:     optional("LISTEN_ADDR", ":8080"),
 	}
 
-	if u, err := url.Parse(c.FrpsDashboardURL); c.FrpsDashboardURL != "" && (err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "") {
-		bad("FRPS_DASHBOARD_URL", "must be an http or https URL with a host") // the URL may hold credentials: not repeated
+	// The credentials are separate variables; none in the URL, which would also end up in errors and logs.
+	if u, err := url.Parse(c.FrpsDashboardURL); c.FrpsDashboardURL != "" &&
+		(err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery) {
+		bad("FRPS_DASHBOARD_URL", "must be an http or https URL with a host and nothing else: no credentials, query or fragment") // not repeated: it may hold a password
 	}
 	if c.PluginSecret != "" && !secretRE.MatchString(c.PluginSecret) {
 		bad("PLUGIN_SECRET", `must be at least 32 characters from A-Z, a-z, 0-9, "-" and "_"`)
