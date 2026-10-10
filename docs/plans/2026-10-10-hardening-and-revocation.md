@@ -14,14 +14,14 @@
 
 - The plugin's `Ping` hook receives `{user, privilege_key, timestamp}`; `privilege_key` is the client's current access token (frpc re-reads the file every heartbeat).
 - A rejected ping is a decision, HTTP 200 with `reject:true`; the reason reaches the client and frpc closes the session. frps additionally does not update `lastPing` on a rejection, so a client that ignores the pong is dropped by the 90 s server-side heartbeat timeout.
-- **Fail open on our own failures, fail closed on theirs.** A ping whose token the identity provider rejects, or whose account is disabled or out of the creators group, is a rejection. A ping that fails because Pocket ID or Postgres is *down* must be **allowed** (the tunnel survives until its token expires), matching the design's failure modes. Use `reasonOf`'s `theirs` flag to tell them apart.
+- **The ping fails closed only on an identity refusal.** A ping is rejected only when `Resolve` returns a `*refusal` — the account is disabled, out of the creators group, or has a handle the store refuses. Every other failure (an invalid or expired token, or Pocket ID or Postgres being *down*) is **allowed**: the tunnel survives, and frps re-verifies the ping token itself (`VerifyPing`, HeartBeats scope), so a genuinely bad token still fails end-to-end without this hook tearing down a session frps would accept.
 - The `/plugin/<secret>` handler never logs an accepted ping (they arrive every 30 s per client); a rejected ping is logged.
 - The share API hardening must not change any successful response shape: `GET /api/shares` still returns `{"shares":[…]}` (never `null`); `PUT`/`DELETE` still 204; a bad body is still 400.
 - Tests: `go test -race ./...`, table-driven. Postgres tests read `TEST_DATABASE_URL` and skip when unset.
 
 ## Review Focus
 
-1. A ping is rejected exactly when the account is invalid, disabled, or out of the creators group — and **allowed** when the identity provider or store is down.
+1. A ping is rejected **only** on an identity refusal (the account is disabled or out of the creators group, or has a handle the store refuses), and **allowed** on every other failure — an invalid, expired or locally unverifiable token, or the identity provider or store being down — where frps re-verifies the ping token itself (`VerifyPing`, HeartBeats scope).
 2. `GET /api/shares` returns `[]`, never `null`, for an owner with no shares.
 3. A share request body over the cap, or with trailing JSON after the object, is refused (400), not silently accepted.
 4. A missing dependency (`Deps.Shares`) yields 503, not a 500 from a panic.
@@ -63,14 +63,14 @@
 - Modify: `internal/broker/server.go` only if the op needs registering (it does not; `Hooks` already owns `/plugin/`)
 
 **Interfaces:**
-- Consumes: `Resolver.Resolve` (existing), `reasonOf` (existing), `plugin.OpPing` / `plugin.PingContent` / `msg.Ping`.
+- Consumes: `Resolver.Resolve` (existing), `*refusal` via `errors.As` (existing), `plugin.OpPing` / `plugin.PingContent` / `msg.Ping`.
 - Produces: `case plugin.OpPing` in `Hooks.ServeHTTP` dispatching to `func (h *Hooks) ping(ctx, raw json.RawMessage) (plugin.Response, error)`.
 
-- [ ] **Step 1: Write the failing tests.** In `hooks_test.go` with fakes: `TestPingAllowsAValidCreator` (a `PingContent` with the owner's `privilege_key` and `user.user = alice` → `reject` false, `unchange` true, and the accept is not logged at info); `TestPingRejectsAMissingToken` (`privilege_key:""` → reject); `TestPingRejectsANonCreator` (resolver `ErrNotCreator` → reject with the refusal text); `TestPingRejectsADisabledAccount` (`ErrDisabled` → reject); `TestPingRejectsAnInvalidToken` (`idp.ErrInvalidToken` → reject); `TestPingAllowsWhenTheIdentityProviderIsDown` (resolver returns a plain infrastructure error → **allow**, `reject` false; the failure is logged at warn); `TestPingIsNotLoggedWhenAccepted` (capture slog; a successful ping emits no `info` line).
+- [ ] **Step 1: Write the failing tests.** In `hooks_test.go` with fakes: `TestPingAllowsAValidCreator` (a `PingContent` with the owner's `privilege_key` and `user.user = alice` → `reject` false, `unchange` true, and the accept is not logged at info); `TestPingRejectsAMissingToken` (`privilege_key:""` → reject); `TestPingRejectsANonCreator` (resolver `ErrNotCreator` → reject with the refusal text); `TestPingRejectsADisabledAccount` (`ErrDisabled` → reject); `TestPingAllowsAnInvalidTokenLocally` (`idp.ErrInvalidToken` → **allow**, `reject` false: frps re-verifies the token itself); `TestPingAllowsWhenTheIdentityProviderIsDown` (resolver returns a plain infrastructure error → **allow**, `reject` false; the failure is logged at **debug**); `TestPingIsNotLoggedWhenAccepted` (capture slog; a successful ping emits no `info` line).
 
 - [ ] **Step 2: Run them to verify they fail.** `go test ./internal/broker/ -run Ping -v`. Expected: `unknown op "Ping"` / FAIL.
 
-- [ ] **Step 3: Implement.** Add `case plugin.OpPing: res, err = h.ping(ctx, req.Content)`. In `ping`: unmarshal `plugin.PingContent`; empty `PrivilegeKey` → `h.reject(..., "missing token", ...)`; `acct, err := h.Resolver.Resolve(ctx, c.PrivilegeKey)`; on error call `reasonOf(err)` — if `theirs`, reject with the text; otherwise log at warn and **allow** (return the content unchanged). On success, if `c.User.User != "" && c.User.User != acct.Handle` reject "run id belongs to another session"; otherwise return `plugin.Response{Unchange: true}` with no accepted-ping log line.
+- [ ] **Step 3: Implement.** Add `case plugin.OpPing: res, err = h.ping(ctx, req.Content)`. In `ping`: unmarshal `plugin.PingContent`; empty `PrivilegeKey` → `h.reject(..., "missing token", ...)`; `acct, err := h.Resolver.Resolve(ctx, c.PrivilegeKey)`; on error reject **only** when `errors.As(err, &(*refusal))` (a disabled or non-creator account, or a handle the store refuses) using the refusal's own text; for every other failure (an invalid or expired token, or a dependency down) log at **debug** and **allow** (return the content unchanged) — frps re-verifies the ping token itself (`VerifyPing`, HeartBeats scope), so this hook must not duplicate or second-guess that check. On success, if `c.User.User != "" && c.User.User != acct.Handle` reject with the handle-mismatch sentence; otherwise return `plugin.Response{Unchange: true}` with no accepted-ping log line.
 
 - [ ] **Step 4: Run them to verify they pass.** `go test -race ./internal/broker/ -v`. Expected: PASS.
 

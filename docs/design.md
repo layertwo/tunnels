@@ -528,8 +528,9 @@ All of them fail closed.
   A group share works only once the gate forwards the visitor's groups to `/authz` as
   `X-Tunnels-Groups` (a deferred homelab change); until then the header is stripped and group
   shares admit no one. User shares work today.
-- **Phase 3:** hardening: heartbeat revocation proven end to end, the Ping-hook kill switch,
-  tuned limits, Gatus, docs, machine clients.
+- **Phase 3:** hardening: heartbeat revocation proven end to end, the Ping-hook kill switch
+  (implemented; enabling it is the frps `ops` change), tuned limits, Gatus, docs, machine
+  clients.
 - **Later:** SSH, a web UI, share expiry, live tunnel status.
 
 ## Verification

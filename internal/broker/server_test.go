@@ -483,6 +483,20 @@ func TestSharesNilSharesIs503(t *testing.T) {
 	}
 }
 
+// The GET side has its nil check too, after the account is resolved, so a missing store is a 503
+// there as well rather than a panic.
+func TestSharesGetNilSharesIs503(t *testing.T) {
+	r := newServerRig(t)
+	h := NewHandler(r.cfg, Deps{IdP: r.client, Verifier: r.client, Users: r.users, Shares: nil, Frps: r.frps, Log: slog.New(slog.DiscardHandler)})
+	req := httptest.NewRequest("GET", "/api/shares", nil)
+	req.Header.Set("Authorization", "Bearer "+r.idp.Issue("sub-alice", mockidp.IssueOpts{}))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("= %d %q, want 503", w.Code, w.Body)
+	}
+}
+
 // frps checks the audience too, but only if it was configured to; the broker is the first layer.
 func TestLoginRefusesATokenIssuedForAnotherAPI(t *testing.T) {
 	r := newServerRig(t)

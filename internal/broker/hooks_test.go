@@ -787,7 +787,7 @@ func TestPingAllowsWhenTheIdentityProviderIsDown(t *testing.T) {
 // A heartbeat that claims another handle is not this client's heartbeat, whatever its token.
 func TestPingRejectsAHandleMismatch(t *testing.T) {
 	rep := pingReply(t, nil, secretToken, "bob")
-	const want = "run id belongs to another session"
+	const want = "token does not belong to this session"
 	if !rep.Reject || rep.RejectReason != want {
 		t.Errorf("reply = %+v, want reject with %q", rep, want)
 	}

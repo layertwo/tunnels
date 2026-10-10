@@ -23,7 +23,7 @@ type Frps interface {
 	OnlineProxyCount(ctx context.Context, user string) (int, error)
 }
 
-// Hooks is frps's HTTP plugin for the Login, NewProxy and CloseProxy ops, mounted at /plugin/<Secret>.
+// Hooks is frps's HTTP plugin for the Login, NewProxy, CloseProxy and Ping ops, mounted at /plugin/<Secret>.
 // It keeps no state and is safe for concurrent use.
 //
 // Every decision, accept or reject, is HTTP 200: frps shows its client any other status as an opaque
@@ -212,9 +212,9 @@ func (h *Hooks) ping(ctx context.Context, raw json.RawMessage) (plugin.Response,
 		h.Log.DebugContext(ctx, "ping: could not verify the session, allowed", "err", err)
 		return plugin.Response{Unchange: true}, nil
 	}
-	// A heartbeat claiming somebody else's run ID is not this client's heartbeat.
+	// A heartbeat claiming another handle is not this client's heartbeat, whatever its token.
 	if c.User.User != "" && c.User.User != acct.Handle {
-		return h.reject(ctx, plugin.OpPing, "run id belongs to another session", nil), nil
+		return h.reject(ctx, plugin.OpPing, "token does not belong to this session", nil), nil
 	}
 	return plugin.Response{Unchange: true}, nil
 }
