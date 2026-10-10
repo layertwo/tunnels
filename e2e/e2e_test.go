@@ -179,7 +179,7 @@ func newStack(t *testing.T, maxTunnels int) *stack {
 		ServiceHost: "tunnels.test", SitesDomain: sites, Issuer: s.mock.URL, APIResource: mockidp.APIResource,
 		CreatorsGroup: "tunnels-creators", CLIClientID: mockidp.ClientID, MinCLIVersion: "0.0.0",
 		PluginSecret: secret, MaxTunnelsPerUser: maxTunnels, BandwidthLimit: "10MB", Reserved: []string{"admin"},
-	}, broker.Deps{IdP: provider, Verifier: provider, Users: users, Frps: s.frps, Log: slog.New(slog.NewJSONHandler(brokerLog, nil))}))
+	}, broker.Deps{IdP: provider, Verifier: provider, Users: users, Shares: users, Frps: s.frps, Log: slog.New(slog.NewJSONHandler(brokerLog, nil))}))
 	t.Cleanup(b.Close)
 	s.plugin = b.URL + "/plugin/" + secret
 

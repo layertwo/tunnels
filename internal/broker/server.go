@@ -17,6 +17,7 @@ type Deps struct {
 	IdP      IdP
 	Verifier TokenVerifier
 	Users    Users
+	Shares   Shares
 	Frps     Frps
 	Log      *slog.Logger
 }
@@ -33,7 +34,7 @@ func NewHandler(cfg Config, d Deps) http.Handler {
 		Resolver: resolver, Frps: d.Frps, Secret: cfg.PluginSecret,
 		MaxTunnelsPerUser: cfg.MaxTunnelsPerUser, BandwidthLimit: cfg.BandwidthLimit, Log: d.Log,
 	})
-	mux.Handle("/authz", Authz{Users: d.Users, SitesDomain: cfg.SitesDomain, Log: d.Log})
+	mux.Handle("/authz", Authz{Users: d.Users, Shares: d.Shares, SitesDomain: cfg.SitesDomain, Log: d.Log})
 	mux.HandleFunc("GET /api/me", s.me)
 	mux.HandleFunc("GET /.well-known/tunnels.json", s.wellKnown)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
