@@ -1,10 +1,13 @@
 package broker
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -289,5 +292,26 @@ func TestAuthzLogsOneLinePerDecision(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Header names arrive in any case on the wire; net/http stores them under their canonical names,
+// which is what Authz looks up.
+func TestHeaderNamesInAnyCase(t *testing.T) {
+	r := newAuthzRig()
+	srv := httptest.NewServer(r.authz)
+	t.Cleanup(srv.Close)
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprintf(conn, "GET /authz HTTP/1.1\r\nHost: broker\r\nx-forwarded-host: alice-blog.%s\r\nx-tunnels-sub: sub-alice\r\nX-TUNNELS-USER: alice\r\nConnection: close\r\n\r\n", sitesDomain)
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("X-Tunnel-User") != "alice" {
+		t.Errorf("= %d %v, want 200 for the owner whatever the case of the header names", resp.StatusCode, resp.Header)
 	}
 }
