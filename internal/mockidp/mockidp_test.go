@@ -492,8 +492,9 @@ func TestBrokenFormIsBadRequest(t *testing.T) {
 	}
 }
 
-// sign must not hand out an unsigned token when it cannot build the signer; with a real RSA key that
-// cannot happen, so a nil key is the one fault that reaches the panic.
+// sign must not hand out an unsigned token when it cannot build the signer: a nil key makes
+// jose.NewSigner fail, which is the panic this test reaches (mockidp.go:231). The later panic on
+// Serialize (mockidp.go:244) is the ignored, unreachable one.
 func TestSignWithoutAKeyPanics(t *testing.T) {
 	s := New(t)
 	s.key = nil

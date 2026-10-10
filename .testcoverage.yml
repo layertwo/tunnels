@@ -5,4 +5,5 @@ exclude:
   paths:
     # v2.14.1 strips the module prefix before matching, so this is "cmd/..." not the module-qualified path.
     - ^cmd/
+# Inert on the pinned go-test-coverage v2.14.1 (the key does not exist there); kept for a future version.
 force-annotation-comment: true
