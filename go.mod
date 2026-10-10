@@ -10,7 +10,7 @@ require (
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/spf13/pflag v1.0.5
 	golang.org/x/crypto/x509roots/fallback v0.0.0-20261009200856-99e4382b128e
-	golang.org/x/oauth2 v0.36.0
+	golang.org/x/oauth2 v0.37.0
 )
 
 require (
