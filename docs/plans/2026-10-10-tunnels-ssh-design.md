@@ -47,8 +47,13 @@ terminal, authenticated with Pocket ID. No host is exposed directly; no anonymou
 - `github.com/fatedier/frp` stays pinned to the frps image version and both bump together.
 - Broker and frps stay distroless, non-root, read-only root, dropped capabilities, default-deny
   NetworkPolicy.
-- Cloudflare cannot proxy the SSH subtree, so it is a DNS-only record with its own wildcard
-  certificate, like `*.w.`.
+- Cloudflare **can** proxy the SSH-over-WebSocket path: WebSockets are supported on all plans, and
+  the control channel already proves wss works through the edge. The reason the subtree is a
+  **DNS-only** record with its own wildcard certificate, like `*.w.`, is the certificate: the free
+  Universal SSL covers only one subdomain level, so `*.ssh.tunnels.layertwo.dev` cannot be proxied
+  without a paid multi-level certificate. DNS-only also keeps TLS end to end (Cloudflare would
+  otherwise terminate it and see the SSH bytes) and avoids Cloudflare's 100 s idle WebSocket
+  timeout dropping a quiet session.
 - `frps` has a single `subDomainHost` (`w.tunnels.layertwo.dev`), so the SSH subtree is expressed
   with frp **custom domains**, not subdomains. frp's README warns custom domains should not be
   subdomains of `subDomainHost`; `ssh.tunnels.layertwo.dev` is not under `w.`, so it is clear.
