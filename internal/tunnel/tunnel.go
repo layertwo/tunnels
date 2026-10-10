@@ -107,6 +107,8 @@ func Build(o Options) (*v1.ClientCommonConfig, []v1.ProxyConfigurer, error) {
 // "closed", ...), and Err why a start failed: the service's own sentence when it refused the tunnel.
 type Status struct{ Phase, Err string }
 
+var initLog sync.Once
+
 // loginFailExitNote is what frp appends to the reason a first login failed.
 const loginFailExitNote = ". With loginFailExit enabled, no additional retries will be attempted"
 
@@ -118,7 +120,7 @@ func Run(ctx context.Context, o Options, onStatus func(Status)) error {
 	if err != nil {
 		return err
 	}
-	log.InitLogger("console", "warn", 1, true)
+	initLog.Do(func() { log.InitLogger("console", "warn", 1, true) }) // frp's logger is global
 
 	src := source.NewConfigSource()
 	if err := src.ReplaceAll(proxies, nil); err != nil {

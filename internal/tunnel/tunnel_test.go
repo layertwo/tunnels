@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -269,4 +270,26 @@ func TestRunStopsWithItsContext(t *testing.T) {
 	if took := time.Since(start); took > 5*time.Second {
 		t.Errorf("took %v", took)
 	}
+}
+
+// Several tunnels in one process (the end-to-end test runs many) share frp's global logger, which
+// must be set up once, not by every Run while another is logging. Run with -race.
+func TestRunConcurrently(t *testing.T) {
+	o := opts()
+	o.ServerHost, o.ServerPort, o.Protocol, o.CAFile = "127.0.0.1", 1, "tcp", ""
+	o.TokenFile = filepath.Join(t.TempDir(), "access-token")
+	if err := os.WriteFile(o.TokenFile, []byte("tok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := Run(t.Context(), o, nil); err == nil {
+				t.Error("Run against a closed port succeeded")
+			}
+		}()
+	}
+	wg.Wait()
 }
