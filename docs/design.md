@@ -147,6 +147,11 @@ Each ping re-reads a file token source, so the CLI keeps the token file fresh. R
 from `tunnels-creators` or disabling the account stops refresh, and the tunnel ends about an hour
 plus 90 seconds later. A Ping-hook kill switch for instant removal is phase 3.
 
+`tunnel logout` only deletes the token files on that computer. Pocket ID publishes no token
+revocation endpoint (its discovery document lists none), so a copied refresh token stays good
+until it expires: ending a session for certain is done in Pocket ID (remove the person from
+`tunnels-creators`, or disable the account), as above.
+
 ### The control channel must verify the server certificate
 
 `pkg/transport/tls.go` (`NewClientTLSConfig`) sets `InsecureSkipVerify = true` whenever no CA file
@@ -462,6 +467,7 @@ tunnels.layertwo.dev                      proxied; covered by the existing *.lay
 | Threat | Control |
 |--------|---------|
 | Creator claims or squats another user's name | plugin binds `user` to the verified handle; NewProxy enforces the `<handle>.` proxy name and `<handle>[-<name>]` subdomain; duplicates fail in frps |
+| Somebody takes a handle before its owner logs in | a handle is the username of whoever logs in with it first, then belongs to that `sub` for good; keep self-service username changes off in Pocket ID, so nobody can rename themselves into a name that is not theirs |
 | Creator takes over a live control connection | Login with a run ID is refused if frps shows it online under another user |
 | Non-http exposure, custom domains | plugin allows only http proxies with no custom domains or locations |
 | Forged or stolen-for-another-audience token | frps verifies signature, issuer, expiry and audience (API resource); userinfo must also succeed |
