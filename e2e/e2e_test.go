@@ -164,7 +164,7 @@ func newStack(t *testing.T, maxTunnels int) *stack {
 		t.Fatal(err)
 	}
 	t.Cleanup(users.Close)
-	provider, err := idp.New(t.Context(), s.mock.URL, mockidp.APIResource, ua)
+	provider, err := idp.New(t.Context(), s.mock.URL, mockidp.APIResource, ua, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

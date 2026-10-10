@@ -46,7 +46,7 @@ func newServerRig(t *testing.T) *serverRig {
 	m := mockidp.New(t)
 	m.AddUser(mockidp.User{Sub: "sub-alice", Username: "Alice", Groups: []string{creators, "tunnels-viewers"}})
 	m.AddUser(mockidp.User{Sub: "sub-vera", Username: "vera", Groups: []string{"tunnels-viewers"}})
-	client, err := idp.New(t.Context(), m.URL, mockidp.APIResource, "tunnels-test/1")
+	client, err := idp.New(t.Context(), m.URL, mockidp.APIResource, "tunnels-test/1", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

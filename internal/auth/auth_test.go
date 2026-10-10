@@ -177,7 +177,7 @@ func newOIDC(t *testing.T) (OIDC, *mockidp.Server) {
 // verifies reports the sub of an access token the way the broker does: signed by the provider, meant for the API.
 func verifies(t *testing.T, m *mockidp.Server, token string) string {
 	t.Helper()
-	c, err := idp.New(t.Context(), m.URL, mockidp.APIResource, ua)
+	c, err := idp.New(t.Context(), m.URL, mockidp.APIResource, ua, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

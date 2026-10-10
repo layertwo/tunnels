@@ -52,8 +52,7 @@ func run() error {
 		return err
 	}
 	defer users.Close()
-	provider, err := idp.New(ctx, cfg.Issuer, cfg.APIResource, userAgent,
-		idp.WithUsernameClaim(cfg.UsernameClaim), idp.WithGroupsClaim(cfg.GroupsClaim))
+	provider, err := idp.New(ctx, cfg.Issuer, cfg.APIResource, userAgent, cfg.UsernameClaim, cfg.GroupsClaim)
 	if err != nil {
 		return err
 	}

@@ -4,6 +4,7 @@
 package idp
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,9 +18,8 @@ import (
 	"github.com/layertwo/tunnels/internal/httpx"
 )
 
-// Identity is the account behind an access token. Username and Groups come from userinfo claims
-// whose names are options (preferred_username and groups unless told otherwise); a claim the
-// provider leaves out stays empty.
+// Identity is the account behind an access token. Username and Groups come from the userinfo claims
+// named in New; a claim the provider leaves out stays empty.
 type Identity struct {
 	Sub, Username string
 	Groups        []string
@@ -38,32 +38,11 @@ type Client struct {
 	usernameClaim, groupsClaim string
 }
 
-// Option changes how a Client reads the userinfo claims.
-type Option func(*Client)
-
-// WithUsernameClaim reads the username from the userinfo claim name instead of preferred_username.
-// An empty name keeps the default.
-func WithUsernameClaim(name string) Option {
-	return func(c *Client) {
-		if name != "" {
-			c.usernameClaim = name
-		}
-	}
-}
-
-// WithGroupsClaim reads the group names, a list of strings, from the userinfo claim name instead
-// of groups. An empty name keeps the default.
-func WithGroupsClaim(name string) Option {
-	return func(c *Client) {
-		if name != "" {
-			c.groupsClaim = name
-		}
-	}
-}
-
 // New discovers the identity provider at issuer. Access tokens must be addressed to apiResource.
-// All requests carry userAgent and give up after 10 seconds.
-func New(ctx context.Context, issuer, apiResource, userAgent string, opts ...Option) (*Client, error) {
+// All requests carry userAgent and give up after 10 seconds. The username and the group names are
+// read from the userinfo claims usernameClaim and groupsClaim; "" means preferred_username and
+// groups.
+func New(ctx context.Context, issuer, apiResource, userAgent, usernameClaim, groupsClaim string) (*Client, error) {
 	hc := httpx.Client(userAgent, 10*time.Second)
 	// ctx bounds the discovery only. go-oidc keeps just hc from it (it fetches the key set later
 	// on a context of its own), so ctx may end once New returns; the tests check both.
@@ -75,11 +54,8 @@ func New(ctx context.Context, issuer, apiResource, userAgent string, opts ...Opt
 		hc:            hc,
 		provider:      provider,
 		verifier:      provider.Verifier(&oidc.Config{ClientID: apiResource}),
-		usernameClaim: "preferred_username",
-		groupsClaim:   "groups",
-	}
-	for _, opt := range opts {
-		opt(c)
+		usernameClaim: cmp.Or(usernameClaim, "preferred_username"),
+		groupsClaim:   cmp.Or(groupsClaim, "groups"),
 	}
 	return c, nil
 }

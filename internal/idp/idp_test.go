@@ -27,11 +27,12 @@ func newMock(t *testing.T) *mockidp.Server {
 
 // newClient returns a client for the identity provider at issuer. The context it hands to New ends
 // when this helper returns: the client must keep working without it.
-func newClient(t *testing.T, issuer string, opts ...Option) *Client {
+func newClient(t *testing.T, issuer string, claims ...string) *Client {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	c, err := New(ctx, issuer, mockidp.APIResource, userAgent, opts...)
+	claims = append(claims, "", "")
+	c, err := New(ctx, issuer, mockidp.APIResource, userAgent, claims[0], claims[1])
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -213,7 +214,7 @@ func TestNewFailsWhenDiscoveryFails(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	srv.Close()
 
-	if _, err := New(t.Context(), srv.URL, mockidp.APIResource, userAgent); err == nil {
+	if _, err := New(t.Context(), srv.URL, mockidp.APIResource, userAgent, "", ""); err == nil {
 		t.Error("New succeeded against a server that is gone")
 	}
 }
@@ -230,7 +231,7 @@ func TestNewHonoursCallerDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	if _, err := New(ctx, srv.URL, mockidp.APIResource, userAgent); err == nil {
+	if _, err := New(ctx, srv.URL, mockidp.APIResource, userAgent, "", ""); err == nil {
 		t.Error("New succeeded against an IdP that never answers")
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
@@ -267,33 +268,33 @@ func userinfoJSON(body string) http.HandlerFunc {
 	}
 }
 
-// Providers differ in what they call the username and the groups: the claim names are options.
+// Providers differ in what they call the username and the groups: New takes the claim names.
 func TestUserInfoClaimNames(t *testing.T) {
 	mock := newMock(t)
 	alice := Identity{Sub: "u1", Username: "alice", Groups: []string{"tunnels-creators"}}
 	tests := []struct {
-		name string
-		body string
-		opts []Option
-		want Identity // compared unless the call must fail
-		fail bool     // an error that is not ErrInvalidToken
+		name   string
+		body   string
+		claims []string // username and groups claim names
+		want   Identity // compared unless the call must fail
+		fail   bool     // an error that is not ErrInvalidToken
 	}{
 		{"defaults", `{"sub":"u1","preferred_username":"alice","groups":["tunnels-creators"]}`, nil, alice, false},
 		{"custom names", `{"sub":"u1","nickname":"alice","roles":["tunnels-creators"],"preferred_username":"x","groups":["x"]}`,
-			[]Option{WithUsernameClaim("nickname"), WithGroupsClaim("roles")}, alice, false},
+			[]string{"nickname", "roles"}, alice, false},
 		{"empty names keep the defaults", `{"sub":"u1","preferred_username":"alice","groups":["tunnels-creators"]}`,
-			[]Option{WithUsernameClaim(""), WithGroupsClaim("")}, alice, false},
+			[]string{"", ""}, alice, false},
 		{"claims absent", `{"sub":"u1"}`, nil, Identity{Sub: "u1"}, false},
 		{"groups null", `{"sub":"u1","preferred_username":"alice","groups":null}`, nil, Identity{Sub: "u1", Username: "alice"}, false},
 		{"groups is a string", `{"sub":"u1","preferred_username":"alice","groups":"tunnels-creators"}`, nil, Identity{}, true},
 		{"groups hold numbers", `{"sub":"u1","preferred_username":"alice","groups":[1,2]}`, nil, Identity{}, true},
 		{"username is a number", `{"sub":"u1","preferred_username":7}`, nil, Identity{}, true},
 		{"sub is a number", `{"sub":7}`, nil, Identity{}, true},
-		{"custom group claim is the wrong type", `{"sub":"u1","roles":"x"}`, []Option{WithGroupsClaim("roles")}, Identity{}, true},
+		{"custom group claim is the wrong type", `{"sub":"u1","roles":"x"}`, []string{"", "roles"}, Identity{}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := newClient(t, fakeIdP(t, mock, userinfoJSON(tt.body)).URL, tt.opts...)
+			c := newClient(t, fakeIdP(t, mock, userinfoJSON(tt.body)).URL, tt.claims...)
 			got, err := c.UserInfo(t.Context(), "token")
 			if tt.fail {
 				wantOtherError(t, err)

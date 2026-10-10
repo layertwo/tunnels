@@ -202,10 +202,7 @@ Settles design Verification 6 and 7 against the real service before code depends
   // package idp
   type Identity struct { Sub, Username string; Groups []string }   // Username and Groups come from userinfo claims
   var ErrInvalidToken error                             // the IdP answered 401 or 403 for the token
-  type Option func(*Client)
-  func WithUsernameClaim(name string) Option               // default preferred_username; empty keeps it
-  func WithGroupsClaim(name string) Option                 // default groups, a list of strings; empty keeps it
-  func New(ctx context.Context, issuer, apiResource, userAgent string, opts ...Option) (*Client, error)   // OIDC discovery
+  func New(ctx context.Context, issuer, apiResource, userAgent, usernameClaim, groupsClaim string) (*Client, error)   // OIDC discovery; "" claims mean preferred_username and groups
   func (c *Client) UserInfo(ctx context.Context, accessToken string) (Identity, error)    // other failures are plain errors
   func (c *Client) VerifyAccessToken(ctx context.Context, raw string) (sub string, err error) // signature, issuer, exp, aud contains apiResource
 
@@ -349,7 +346,7 @@ Pinned by Review Focus 1 and 4.
 - Create: `internal/broker/config.go`, `internal/broker/server.go`, `internal/broker/server_test.go`, `internal/broker/config_test.go`, `cmd/broker/main.go`
 
 **Interfaces:**
-- Consumes: everything above, `idp.Client` (built with `idp.WithUsernameClaim(cfg.UsernameClaim)` and `idp.WithGroupsClaim(cfg.GroupsClaim)`), `store.Store`, `frpsapi.Client`.
+- Consumes: everything above, `idp.Client` (built with `cfg.UsernameClaim` and `cfg.GroupsClaim`), `store.Store`, `frpsapi.Client`.
 - Produces:
 
   ```go
