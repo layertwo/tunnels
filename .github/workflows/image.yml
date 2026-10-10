@@ -88,7 +88,7 @@ jobs:
       - name: Build the broker binaries
         if: matrix.component == 'broker'
         run: |
-          version=${GITHUB_REF_NAME}
+          version=${GITHUB_REF_NAME#v} # 0.1.0, as the CLI reports itself
           [[ "$GITHUB_REF" == refs/tags/v* ]] || version=${GITHUB_SHA::7}
           for a in amd64 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH=$a go build -trimpath -ldflags "-s -w -X main.version=$version" -o dist/broker-linux-$a ./cmd/broker
