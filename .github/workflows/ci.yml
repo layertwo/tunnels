@@ -55,6 +55,10 @@ jobs:
           go-version: '1.27'
       - name: Test with coverage
         run: go test -race -covermode=atomic -coverprofile=coverage.txt ./...
+      - name: Enforce 100% coverage
+        run: |
+          go install github.com/vladopajic/go-test-coverage/v2@v2.14.1
+          "$(go env GOPATH)/bin/go-test-coverage" --config=.testcoverage.yml
       - name: Upload coverage
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:

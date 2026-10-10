@@ -13,6 +13,7 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -779,6 +780,7 @@ func TestListShares(t *testing.T) {
 		{"session", 401, `{"error":"your session is not valid; run: tunnel login"}`,
 			"your session is not valid; run: tunnel login"},
 		{"no json", 502, "<html>bad gateway</html>", "the service answered 502"},
+		{"ok but not json", 200, "<html>bad gateway</html>", "auth: the service did not list your shares"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			status, body = tt.status, tt.body
@@ -787,5 +789,192 @@ func TestListShares(t *testing.T) {
 				t.Errorf("ListShares = %+v, %v, want nil and %q", got, err, tt.want)
 			}
 		})
+	}
+
+	// A service that names no shares at all is an empty list, not a nil one the caller must guard.
+	status, body = http.StatusOK, `{}`
+	got, err = ListShares(t.Context(), client(), srv.URL, "tok-123")
+	if err != nil || got == nil || len(got) != 0 {
+		t.Errorf("ListShares of no shares field = %+v, %v, want an empty, non-nil list", got, err)
+	}
+}
+
+// ---- fault injection: the transport and the provider endpoints fail
+
+// roundTripFunc lets a test answer a request with a response of its own, so send's body handling
+// can be driven over a failing reader.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+// errBody fails every read, like a connection reset in the middle of a response.
+type errBody struct{ err error }
+
+func (e errBody) Read([]byte) (int, error) { return 0, e.err }
+
+// send's own failure branches: the callers only ever hand it a Share, a request that builds and a
+// healthy body, so they are exercised here.
+func TestSendErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, "ok")
+	}))
+	defer srv.Close()
+
+	_, _, err := send(t.Context(), client(), http.MethodPost, srv.URL, "", make(chan int))
+	if err == nil || !strings.Contains(err.Error(), "auth:") {
+		t.Errorf("send of a payload JSON cannot encode: err = %v, want an auth error", err)
+	}
+
+	_, _, err = send(t.Context(), client(), "BAD METHOD", srv.URL, "", nil)
+	if err == nil || !strings.Contains(err.Error(), "auth:") {
+		t.Errorf("send with a method that is not a token: err = %v, want an auth error", err)
+	}
+
+	readErr := errors.New("connection reset")
+	hc := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(errBody{readErr})}, nil
+	})}
+	if _, _, err := send(t.Context(), hc, http.MethodGet, srv.URL, "", nil); !errors.Is(err, readErr) {
+		t.Errorf("send with a body that fails mid-read: err = %v, want %v", err, readErr)
+	}
+}
+
+// GetMe reaches the transport before the service can answer; Discover's closed-port case does not
+// exercise this call.
+func TestGetMeTransportError(t *testing.T) {
+	got, err := GetMe(t.Context(), client(), "http://127.0.0.1:1", "tok")
+	if err == nil || got != (Me{}) {
+		t.Errorf("GetMe against a closed port = %+v, %v, want the zero value and an error", got, err)
+	}
+}
+
+// A share change that cannot reach the service returns the transport error; the refusal tests all
+// reach a live server.
+func TestShareTransportErrors(t *testing.T) {
+	sh := Share{Tunnel: "blog", Kind: "user", Grantee: "bob"}
+	if err := PutShare(t.Context(), client(), "http://127.0.0.1:1", "tok", sh); err == nil {
+		t.Error("PutShare against a closed port succeeded")
+	}
+	got, err := ListShares(t.Context(), client(), "http://127.0.0.1:1", "tok")
+	if err == nil || got != nil {
+		t.Errorf("ListShares against a closed port = %+v, %v, want nil and an error", got, err)
+	}
+}
+
+// brokenIDP serves a discovery document pointing at handlers the test supplies, so one of the
+// device or token endpoints can fail while the provider still looks well-formed.
+func brokenIDP(t *testing.T, device, token http.HandlerFunc) string {
+	t.Helper()
+	var srv *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"issuer": srv.URL, "authorization_endpoint": srv.URL + "/auth",
+			"token_endpoint": srv.URL + "/token", "jwks_uri": srv.URL + "/jwks",
+			"device_authorization_endpoint":         srv.URL + "/device",
+			"id_token_signing_alg_values_supported": []string{"RS256"},
+		})
+	})
+	mux.HandleFunc("/device", device)
+	mux.HandleFunc("/token", token)
+	srv = httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+func TestDeviceLoginDiscoveryFails(t *testing.T) {
+	o := OIDC{Issuer: "http://127.0.0.1:1", ClientID: "c", Resource: "r", HTTP: client()}
+	if _, err := o.DeviceLogin(t.Context(), io.Discard); err == nil || !strings.Contains(err.Error(), "discover") {
+		t.Errorf("DeviceLogin without a provider: err = %v, want a discovery error", err)
+	}
+}
+
+// The device authorization request itself can be refused; the person is told the login could not
+// start rather than waiting forever on a code that was never handed out.
+func TestDeviceLoginDeviceAuthFails(t *testing.T) {
+	issuer := brokenIDP(t,
+		func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "no", http.StatusInternalServerError) },
+		func(w http.ResponseWriter, _ *http.Request) {})
+	o := OIDC{Issuer: issuer, ClientID: "c", Resource: "r", HTTP: client()}
+	if _, err := o.DeviceLogin(t.Context(), io.Discard); err == nil || !strings.Contains(err.Error(), "start the login") {
+		t.Errorf("DeviceLogin when device authorization fails: err = %v, want a start-the-login error", err)
+	}
+}
+
+// A provider that does not hand back a ready-made verification URI still tells the person where to
+// go and which code to enter.
+func TestDeviceLoginWithoutVerificationURIComplete(t *testing.T) {
+	issuer := brokenIDP(t,
+		func(w http.ResponseWriter, _ *http.Request) {
+			json.NewEncoder(w).Encode(map[string]any{
+				"device_code": "dc", "user_code": "ABCD-EFGH",
+				"verification_uri": "http://idp.example/device", "expires_in": 600, "interval": 1,
+			})
+		},
+		func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, `{"error":"access_denied"}`)
+		})
+	o := OIDC{Issuer: issuer, ClientID: "c", Resource: "r", HTTP: client()}
+	var out bytes.Buffer
+	_, err := o.DeviceLogin(t.Context(), &out)
+	if err == nil || err.Error() != "the login was denied" {
+		t.Errorf("err = %v, want the login was denied", err)
+	}
+	if !strings.Contains(out.String(), "and enter the code ABCD-EFGH") {
+		t.Errorf("output does not tell the person to enter the code:\n%s", out.String())
+	}
+}
+
+// A token endpoint that answers 500 with no OAuth2 error is not the code expiring or being denied:
+// the person gets the generic wait error, not a wrong instruction.
+func TestDeviceLoginTokenEndpointFails(t *testing.T) {
+	issuer := brokenIDP(t,
+		func(w http.ResponseWriter, _ *http.Request) {
+			json.NewEncoder(w).Encode(map[string]any{
+				"device_code": "dc", "user_code": "ABCD-EFGH",
+				"verification_uri": "http://idp.example/device", "expires_in": 600, "interval": 1,
+			})
+		},
+		func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "boom", http.StatusInternalServerError) })
+	o := OIDC{Issuer: issuer, ClientID: "c", Resource: "r", HTTP: client()}
+	if _, err := o.DeviceLogin(t.Context(), io.Discard); err == nil || !strings.Contains(err.Error(), "wait for the login") {
+		t.Errorf("DeviceLogin when the token endpoint fails: err = %v, want a wait-for-the-login error", err)
+	}
+}
+
+// A provider that errors on refresh without saying invalid_grant is a plain refresh failure: the
+// login is not declared expired, because it may not be.
+func TestRefreshTokenEndpointFails(t *testing.T) {
+	issuer := brokenIDP(t,
+		func(http.ResponseWriter, *http.Request) {},
+		func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "boom", http.StatusInternalServerError) })
+	o := OIDC{Issuer: issuer, ClientID: "c", Resource: "r", HTTP: client()}
+	if _, err := o.Refresh(t.Context(), "rt"); err == nil || !strings.Contains(err.Error(), "auth: refresh") {
+		t.Errorf("Refresh when the token endpoint fails: err = %v, want a refresh error", err)
+	}
+}
+
+// A refresh that works but cannot be saved is still an error: the caller must not believe the new
+// tokens are on disk. The files keep the previous login.
+func TestRefreshStoredWhenSaveFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no permission bits")
+	}
+	o, m := newOIDC(t)
+	dir := t.TempDir()
+	s := Store{Dir: dir}
+	before := saved(t, s, m)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0o700) // let t.TempDir clean up
+
+	if _, err := RefreshStored(t.Context(), s, o); err == nil {
+		t.Fatal("RefreshStored saved into an unwritable directory")
+	}
+	if got, err := s.Load(); err != nil || got != before {
+		t.Errorf("stored tokens changed after a failed save: %+v, %v, want %+v", got, err, before)
 	}
 }

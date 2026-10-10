@@ -496,6 +496,7 @@ func TestMalformedRequests(t *testing.T) {
 		{"login with a string for content", http.MethodPost, `{"op":"Login","content":"tok"}`},
 		{"login with an array for content", http.MethodPost, `{"op":"Login","content":[]}`},
 		{"new proxy with a number for content", http.MethodPost, `{"op":"NewProxy","content":1}`},
+		{"ping with a number for content", http.MethodPost, `{"op":"Ping","content":1}`},
 		{"close proxy without content", http.MethodPost, `{"op":"CloseProxy"}`},
 		{"over a megabyte", http.MethodPost, `{"op":"Login","content":{"privilege_key":"` + strings.Repeat("a", 2<<20) + `"}}`},
 	}

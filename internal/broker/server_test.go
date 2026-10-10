@@ -470,16 +470,20 @@ func TestSharesTrailingJSON(t *testing.T) {
 	}
 }
 
-// A broker that came up without a shares store must answer 503, not panic into a 500.
+// A broker that came up without a shares store must answer 503, not panic into a 500. DELETE takes
+// the store method value too, so it has the same nil guard as PUT.
 func TestSharesNilSharesIs503(t *testing.T) {
 	r := newServerRig(t)
 	h := NewHandler(r.cfg, Deps{IdP: r.client, Verifier: r.client, Users: r.users, Shares: nil, Frps: r.frps, Log: slog.New(slog.DiscardHandler)})
-	req := httptest.NewRequest("PUT", "/api/shares", strings.NewReader(`{"tunnel":"blog","kind":"user","grantee":"bob"}`))
-	req.Header.Set("Authorization", "Bearer "+r.idp.Issue("sub-alice", mockidp.IssueOpts{}))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-	if w.Code != http.StatusServiceUnavailable {
-		t.Errorf("= %d %q, want 503", w.Code, w.Body)
+	token := r.idp.Issue("sub-alice", mockidp.IssueOpts{})
+	for _, method := range []string{"PUT", "DELETE"} {
+		req := httptest.NewRequest(method, "/api/shares", strings.NewReader(`{"tunnel":"blog","kind":"user","grantee":"bob"}`))
+		req.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "sharing is unavailable") {
+			t.Errorf("%s = %d %q, want 503 saying sharing is unavailable", method, w.Code, w.Body)
+		}
 	}
 }
 

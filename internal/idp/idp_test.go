@@ -291,6 +291,8 @@ func TestUserInfoClaimNames(t *testing.T) {
 		{"username is a number", `{"sub":"u1","preferred_username":7}`, nil, Identity{}, true},
 		{"sub is a number", `{"sub":7}`, nil, Identity{}, true},
 		{"custom group claim is the wrong type", `{"sub":"u1","roles":"x"}`, []string{"", "roles"}, Identity{}, true},
+		{"body is not json", `<html>not json</html>`, nil, Identity{}, true},
+		{"no sub", `{"preferred_username":"alice","groups":["tunnels-creators"]}`, nil, Identity{}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -305,6 +307,27 @@ func TestUserInfoClaimNames(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A userinfo endpoint the provider advertises but that cannot become a request (here: an unclosed
+// IPv6 host) is a "could not ask" error, not an invalid token.
+func TestUserInfoUnbuildableRequest(t *testing.T) {
+	mock := newMock(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"issuer":            "http://" + r.Host,
+			"jwks_uri":          mock.URL + "/jwks",
+			"userinfo_endpoint": "http://[::1",
+		})
+	}))
+	t.Cleanup(srv.Close)
+	c := newClient(t, srv.URL)
+
+	// The endpoint is a URL net/url refuses to build a request from. This is an indirect
+	// trigger: if the stdlib ever accepted it, the request would fail later and line 74
+	// would silently go uncovered — the coverage gate, not this assertion, would catch that.
+	_, err := c.UserInfo(t.Context(), "token")
+	wantOtherError(t, err)
 }
 
 // A provider without a userinfo endpoint cannot say who a token belongs to. Refuse it when the

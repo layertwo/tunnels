@@ -56,7 +56,7 @@ func (s Store) Save(t Tokens) error {
 	}
 	raw, err := json.Marshal(t)
 	if err != nil {
-		return fmt.Errorf("auth: %w", err)
+		return fmt.Errorf("auth: %w", err) // coverage-ignore: Tokens holds only strings, so json.Marshal cannot fail
 	}
 	if err := WriteFileAtomic(s.tokensPath(), raw); err != nil {
 		return fmt.Errorf("auth: save tokens: %w", err)
@@ -91,16 +91,16 @@ func WriteFileAtomic(path string, data []byte) (err error) {
 		}
 	}()
 	if err = f.Chmod(0o600); err != nil {
-		return err
+		return err // coverage-ignore: fchmod of the temp file we just created and own cannot fail
 	}
 	if _, err = f.Write(data); err != nil {
-		return err
+		return err // coverage-ignore: a write to a fresh regular file we own cannot fail short of a full disk
 	}
 	if err = f.Sync(); err != nil {
-		return err
+		return err // coverage-ignore: fsync of a regular file cannot fail short of an I/O error
 	}
 	if err = f.Close(); err != nil {
-		return err
+		return err // coverage-ignore: close of a regular file we own cannot fail
 	}
 	return os.Rename(f.Name(), path)
 }

@@ -209,9 +209,7 @@ func up(ctx context.Context, env Env, args []string) int {
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel() // ends the refresher with the tunnel
-	go auth.KeepFresh(ctx, s, o, 30*time.Minute, func(err error) {
-		fmt.Fprintf(env.Stderr, "could not refresh your session, will try again: %v\n", err)
-	})
+	go auth.KeepFresh(ctx, s, o, 30*time.Minute, warnRefreshFailed(env.Stderr))
 
 	url := "https://" + names.Label(tok.Handle, *name) + "." + b.SitesDomain
 	printed := map[string]bool{}
@@ -241,6 +239,14 @@ func up(ctx context.Context, env Env, args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// warnRefreshFailed is KeepFresh's onErr for a running tunnel: it says the login could not be
+// refreshed and will be tried again, so a failed refresh is not mistaken for the tunnel ending.
+func warnRefreshFailed(out io.Writer) func(error) {
+	return func(err error) {
+		fmt.Fprintf(out, "could not refresh your session, will try again: %v\n", err)
+	}
 }
 
 // session loads the stored login, finds the service and refreshes the token. It prints what up

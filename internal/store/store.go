@@ -92,27 +92,35 @@ func migrate(ctx context.Context, pool *pgxpool.Pool) (err error) {
 	}
 	files, err := migrations.ReadDir("migrations") // sorted by name
 	if err != nil {
-		return fmt.Errorf("store: list migrations: %w", err)
+		return fmt.Errorf("store: list migrations: %w", err) // coverage-ignore: migrations are embedded at build time, so ReadDir on the embedded FS cannot fail
 	}
 	for _, f := range files {
-		v, err := version(f.Name())
-		if err != nil {
+		if err := applyMigrationFile(ctx, conn, f.Name()); err != nil {
 			return err
 		}
-		var applied bool
-		if err := conn.QueryRow(ctx, "select exists (select 1 from schema_migrations where version = $1)", v).Scan(&applied); err != nil {
-			return fmt.Errorf("store: check migration %s: %w", f.Name(), err)
-		}
-		if applied {
-			continue
-		}
-		sql, err := migrations.ReadFile(path.Join("migrations", f.Name()))
-		if err != nil {
-			return fmt.Errorf("store: read migration %s: %w", f.Name(), err)
-		}
-		if err := apply(ctx, conn, v, string(sql)); err != nil {
-			return fmt.Errorf("store: apply migration %s: %w", f.Name(), err)
-		}
+	}
+	return nil
+}
+
+// applyMigrationFile applies one embedded migration unless schema_migrations already records it.
+func applyMigrationFile(ctx context.Context, conn *pgxpool.Conn, name string) error {
+	v, err := version(name)
+	if err != nil {
+		return err // coverage-ignore: the embedded file names are fixed and valid, so version cannot fail here
+	}
+	var applied bool
+	if err := conn.QueryRow(ctx, "select exists (select 1 from schema_migrations where version = $1)", v).Scan(&applied); err != nil {
+		return fmt.Errorf("store: check migration %s: %w", name, err)
+	}
+	if applied {
+		return nil
+	}
+	sql, err := migrations.ReadFile(path.Join("migrations", name))
+	if err != nil {
+		return fmt.Errorf("store: read migration %s: %w", name, err) // coverage-ignore: the embedded file just read by ReadDir always exists
+	}
+	if err := apply(ctx, conn, v, string(sql)); err != nil {
+		return fmt.Errorf("store: apply migration %s: %w", name, err)
 	}
 	return nil
 }

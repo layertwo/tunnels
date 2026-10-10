@@ -83,7 +83,7 @@ func New(t testing.TB) *Server {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		t.Fatalf("mockidp: generate key: %v", err)
+		t.Fatalf("mockidp: generate key: %v", err) // coverage-ignore: crypto/rand.Reader does not fail, so rsa.GenerateKey cannot return an error here
 	}
 	s := &Server{
 		key:           key,
@@ -241,7 +241,7 @@ func (s *Server) sign(sub string, aud []string, scope string, ttl time.Duration)
 		"jti":   rand.Text(), // two tokens issued in the same second still differ
 	}).Serialize()
 	if err != nil {
-		panic(err) // cannot happen: the claims are plain JSON values
+		panic(err) // coverage-ignore: the claims are plain JSON values, so Serialize cannot fail
 	}
 	return raw
 }
