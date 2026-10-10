@@ -241,6 +241,17 @@ func TestErrors(t *testing.T) {
 	}
 }
 
+// A base URL that cannot become a request is an error, not a value that reads as "nobody is online".
+func TestUnbuildableRequestIsAnError(t *testing.T) {
+	c := New("://bad", "broker", "pw", userAgent)
+	if user, online, err := c.OnlineRunIDUser(t.Context(), "r1"); err == nil || online || user != "" {
+		t.Errorf("OnlineRunIDUser = %q, %v, %v, want an error and no user", user, online, err)
+	}
+	if n, err := c.OnlineProxyCount(t.Context(), "alice"); err == nil || n != 0 {
+		t.Errorf("OnlineProxyCount = %d, %v, want 0 and an error", n, err)
+	}
+}
+
 func TestCallerDeadlineIsHonoured(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
