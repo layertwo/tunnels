@@ -365,3 +365,24 @@ func TestMigrationFilesAscend(t *testing.T) {
 		last = v
 	}
 }
+
+// An admin disables an account in the table; both lookups must report it, or the broker would never
+// refuse a disabled account.
+func TestDisabledIsRead(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	if _, err := s.CreateUser(ctx, "sub-1", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, "update users set disabled = true where sub = $1", "sub-1"); err != nil {
+		t.Fatal(err)
+	}
+	for name, find := range map[string]func() (User, error){
+		"by sub":    func() (User, error) { return s.UserBySub(ctx, "sub-1") },
+		"by handle": func() (User, error) { return s.UserByHandle(ctx, "alice") },
+	} {
+		if u, err := find(); err != nil || !u.Disabled {
+			t.Errorf("%s: %+v, %v; want the account disabled", name, u, err)
+		}
+	}
+}
