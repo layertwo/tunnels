@@ -28,6 +28,23 @@ go build -o broker ./cmd/broker   # settings are environment variables, see inte
 go build -o tunnel ./cmd/tunnel   # the CLI: tunnel login, then tunnel up PORT [--name NAME]
 ```
 
+## Verify a release
+
+Every archive of a release comes with a signed build provenance. It says which workflow built
+the archive from which commit of this repository:
+
+```sh
+gh attestation verify tunnel_0.1.0_darwin_arm64.tar.gz --repo layertwo/tunnels
+```
+
+The images are signed by digest with cosign (keyless, from the `image` workflow):
+
+```sh
+cosign verify ghcr.io/layertwo/tunnels-broker:latest \
+  --certificate-identity-regexp '^https://github.com/layertwo/tunnels/\.github/workflows/image\.yml@' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
 ## Test
 
 ```sh
