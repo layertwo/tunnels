@@ -473,6 +473,16 @@ func TestShareLookupErrorIs503(t *testing.T) {
 	}
 }
 
+// A broker without a shares store must answer 503 when a visitor needs the share lookup, not panic.
+func TestAuthzNilSharesIs503(t *testing.T) {
+	r := newAuthzRig()
+	r.authz.Shares = nil
+	w := r.serve(http.MethodGet, sharedRequest("alice-blog"))
+	if w.Code != http.StatusServiceUnavailable || w.Body.Len() != 0 || len(w.Header()) != 0 {
+		t.Errorf("= %d %v %q, want an empty 503 without headers", w.Code, w.Header(), w.Body)
+	}
+}
+
 func TestOwnerStillAllowed(t *testing.T) {
 	r := newAuthzRig()
 	if w := r.serve(http.MethodGet, ownerRequest()); w.Code != http.StatusOK {

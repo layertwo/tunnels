@@ -516,3 +516,10 @@ func TestShareArgumentErrors(t *testing.T) {
 		})
 	}
 }
+
+// A group share only works if the OIDC gate forwards groups; the help must say so.
+func TestUsageMentionsGroupPrerequisite(t *testing.T) {
+	if !strings.Contains(usage, "group shares need the gate to forward groups") {
+		t.Errorf("the usage does not warn that group shares need the gate to forward groups:\n%s", usage)
+	}
+}

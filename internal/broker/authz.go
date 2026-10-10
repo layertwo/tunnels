@@ -113,6 +113,10 @@ func (a Authz) decide(r *http.Request) outcome {
 	case owner.Sub == o.sub:
 		o.allow, o.reason, o.user = true, "owner", users[0]
 	default:
+		if a.Shares == nil {
+			o.reason, o.err = "store", errors.New("authz: no shares store")
+			return o
+		}
 		shared, err := a.Shares.ShareMatches(ctx, owner.Sub, tunnel, users[0], groupsOf(r))
 		switch {
 		case err != nil:

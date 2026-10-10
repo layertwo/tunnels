@@ -36,7 +36,7 @@ type Env struct {
 const usage = `Usage:
   tunnel login [--server HOST]                    log in with your browser
   tunnel up PORT [--name NAME]                    publish http://127.0.0.1:PORT until you stop it
-  tunnel share [--name NAME] [--group] GRANTEE    let someone else reach a tunnel
+  tunnel share [--name NAME] [--group] GRANTEE    let someone else reach a tunnel (group shares need the gate to forward groups)
   tunnel unshare [--name NAME] [--group] GRANTEE  stop sharing a tunnel
   tunnel list                                     show what you share
   tunnel logout                                   forget the login on this computer

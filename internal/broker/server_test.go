@@ -34,6 +34,7 @@ func testConfig(issuer string) Config {
 type serverRig struct {
 	h      http.Handler
 	idp    *mockidp.Server
+	client *idp.Client
 	users  *fakeUsers
 	shares *fakeShares
 	frps   *fakeFrps
@@ -50,7 +51,7 @@ func newServerRig(t *testing.T) *serverRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &serverRig{idp: m, users: newUsers(), shares: &fakeShares{}, frps: &fakeFrps{online: map[string]string{}}, cfg: testConfig(m.URL), logs: &bytes.Buffer{}}
+	r := &serverRig{idp: m, client: client, users: newUsers(), shares: &fakeShares{}, frps: &fakeFrps{online: map[string]string{}}, cfg: testConfig(m.URL), logs: &bytes.Buffer{}}
 	r.h = NewHandler(r.cfg, Deps{
 		IdP: client, Verifier: client, Users: r.users, Shares: r.shares, Frps: r.frps,
 		Log: slog.New(slog.NewJSONHandler(r.logs, nil)),
@@ -432,6 +433,53 @@ func TestSharesStoreError(t *testing.T) {
 	}
 	if strings.Contains(r.logs.String(), raw) {
 		t.Error("the token leaked into the log")
+	}
+}
+
+// An owner with nothing shared must read an empty list, not null.
+func TestSharesGetEmptyIsArray(t *testing.T) {
+	r := newServerRig(t)
+	w := r.do("GET", "/api/shares", bearer(r.idp.Issue("sub-alice", mockidp.IssueOpts{})), "")
+	if w.Code != 200 || strings.TrimSpace(w.Body.String()) != `{"shares":[]}` {
+		t.Errorf("= %d %s, want 200 {\"shares\":[]}", w.Code, w.Body)
+	}
+}
+
+// A body over the cap must be refused before it is decoded into memory.
+func TestSharesBodyTooLarge(t *testing.T) {
+	r := newServerRig(t)
+	body := `{"tunnel":"blog","kind":"user","grantee":"bob","pad":"` + strings.Repeat("x", maxBody) + `"}`
+	w := r.do("PUT", "/api/shares", bearer(r.idp.Issue("sub-alice", mockidp.IssueOpts{})), body)
+	if w.Code != 400 {
+		t.Errorf("= %d %q, want 400 for a body over 1 MiB", w.Code, w.Body)
+	}
+	if len(r.shares.puts) != 0 {
+		t.Errorf("the store was called for an oversized body: %+v", r.shares.puts)
+	}
+}
+
+// A second JSON value after the first is not the share the caller asked for; refuse it.
+func TestSharesTrailingJSON(t *testing.T) {
+	r := newServerRig(t)
+	w := r.do("PUT", "/api/shares", bearer(r.idp.Issue("sub-alice", mockidp.IssueOpts{})), `{"tunnel":"","kind":"user","grantee":"bob"}{}`)
+	if w.Code != 400 {
+		t.Errorf("= %d %q, want 400 for a body with trailing JSON", w.Code, w.Body)
+	}
+	if len(r.shares.puts) != 0 {
+		t.Errorf("the store was called for a body with trailing JSON: %+v", r.shares.puts)
+	}
+}
+
+// A broker that came up without a shares store must answer 503, not panic into a 500.
+func TestSharesNilSharesIs503(t *testing.T) {
+	r := newServerRig(t)
+	h := NewHandler(r.cfg, Deps{IdP: r.client, Verifier: r.client, Users: r.users, Shares: nil, Frps: r.frps, Log: slog.New(slog.DiscardHandler)})
+	req := httptest.NewRequest("PUT", "/api/shares", strings.NewReader(`{"tunnel":"blog","kind":"user","grantee":"bob"}`))
+	req.Header.Set("Authorization", "Bearer "+r.idp.Issue("sub-alice", mockidp.IssueOpts{}))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("= %d %q, want 503", w.Code, w.Body)
 	}
 }
 
