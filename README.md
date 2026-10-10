@@ -25,6 +25,7 @@ One Go module and one repository for everything this project ships:
 
 ```sh
 go build -o broker ./cmd/broker   # settings are environment variables, see internal/broker/config.go
+go build -o tunnel ./cmd/tunnel   # the CLI: tunnel login, then tunnel up PORT [--name NAME]
 ```
 
 ## Test
