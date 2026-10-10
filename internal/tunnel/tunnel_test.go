@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fatedier/frp/client/proxy"
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 )
 
@@ -233,6 +234,102 @@ func TestWriteCABundle(t *testing.T) {
 	}
 }
 
+// A directory that does not exist cannot take the bundle, and the failure is reported, not ignored.
+func TestWriteCABundleUnwritableDir(t *testing.T) {
+	path, err := WriteCABundle(filepath.Join(t.TempDir(), "missing"))
+	if path != "" || err == nil || !strings.Contains(err.Error(), "write the CA bundle") {
+		t.Errorf("WriteCABundle = %q, %v; want the write error", path, err)
+	}
+}
+
+// fakeStatus is a client.StatusExporter the test drives by hand.
+type fakeStatus struct {
+	mu     sync.Mutex
+	polled string
+	status *proxy.WorkingStatus
+	ok     bool
+}
+
+func (f *fakeStatus) GetProxyStatus(name string) (*proxy.WorkingStatus, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.polled = name
+	return f.status, f.ok
+}
+
+func (f *fakeStatus) set(phase, reason string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.status, f.ok = &proxy.WorkingStatus{Phase: phase, Err: reason}, true
+}
+
+func (f *fakeStatus) lastPolled() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.polled
+}
+
+// watch polls the proxy's name and reports each change of its status once, until stopped.
+func TestWatchReportsChangesUntilStopped(t *testing.T) {
+	f := &fakeStatus{}
+	statuses := make(chan Status, 8)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watch(f, "blog", func(s Status) { statuses <- s }, stop)
+	}()
+
+	// Until the proxy has a status, watch keeps polling and reports nothing.
+	deadline := time.After(5 * time.Second)
+	for f.lastPolled() == "" {
+		select {
+		case s := <-statuses:
+			t.Fatalf("reported %+v before the proxy had a status", s)
+		case <-deadline:
+			t.Fatal("watch never asked for the proxy status")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if name := f.lastPolled(); name != "blog" {
+		t.Errorf("polled proxy %q, want blog", name)
+	}
+
+	f.set("wait start", "")
+	if got := nextStatus(t, statuses); got != (Status{Phase: "wait start"}) {
+		t.Errorf("reported %+v, want wait start", got)
+	}
+	// The same status again is not repeated.
+	select {
+	case s := <-statuses:
+		t.Fatalf("reported the unchanged status %+v again", s)
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	f.set("start error", "the service refused the tunnel")
+	if got := nextStatus(t, statuses); got != (Status{Phase: "start error", Err: "the service refused the tunnel"}) {
+		t.Errorf("reported %+v, want the changed status with its reason", got)
+	}
+
+	close(stop)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watch did not stop when told")
+	}
+}
+
+func nextStatus(t *testing.T, ch <-chan Status) Status {
+	t.Helper()
+	select {
+	case s := <-ch:
+		return s
+	case <-time.After(5 * time.Second):
+		t.Fatal("watch reported no status")
+		return Status{}
+	}
+}
+
 func TestRunRefusesBadOptions(t *testing.T) {
 	o := opts()
 	o.Handle = ""
@@ -250,7 +347,8 @@ func TestRunFirstLoginFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- Run(t.Context(), o, nil) }()
+	reported := make(chan Status, 8) // a failed first login never reaches a proxy status
+	go func() { done <- Run(t.Context(), o, func(s Status) { reported <- s }) }()
 	select {
 	case err := <-done:
 		if err == nil || !strings.Contains(err.Error(), "refused") || strings.Contains(err.Error(), "loginFailExit") {
@@ -258,6 +356,11 @@ func TestRunFirstLoginFails(t *testing.T) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("Run did not return after a failed first login")
+	}
+	select {
+	case s := <-reported:
+		t.Errorf("reported %+v for a login that never reached the proxy", s)
+	default:
 	}
 }
 
