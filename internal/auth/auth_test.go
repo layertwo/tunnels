@@ -110,7 +110,7 @@ func TestGetMe(t *testing.T) {
 	defer srv.Close()
 
 	got, err := GetMe(t.Context(), client(), srv.URL, "tok-123")
-	if err != nil || got != (Me{Sub: "sub-alice", Username: "Alice", Handle: "alice"}) {
+	if err != nil || got != (Me{Username: "Alice", Handle: "alice"}) {
 		t.Fatalf("GetMe = %+v, %v", got, err)
 	}
 	if gotAuth != "Bearer tok-123" || gotPath != "/api/me" || gotUA != ua {
@@ -177,7 +177,7 @@ func newOIDC(t *testing.T) (OIDC, *mockidp.Server) {
 // verifies reports the sub of an access token the way the broker does: signed by the provider, meant for the API.
 func verifies(t *testing.T, m *mockidp.Server, token string) string {
 	t.Helper()
-	c, err := idp.New(t.Context(), m.URL, mockidp.APIResource, ua)
+	c, err := idp.New(t.Context(), m.URL, mockidp.APIResource, ua, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -610,15 +610,4 @@ func TestKeepFreshReportsAndKeepsGoing(t *testing.T) {
 	if after, _ := os.ReadFile(s.AccessTokenPath()); string(after) != string(before) {
 		t.Error("a failed refresh changed the access token file")
 	}
-}
-
-// Without a callback a failure is simply tried again at the next tick.
-func TestKeepFreshWithoutCallback(t *testing.T) {
-	o, m := newOIDC(t)
-	s := Store{Dir: t.TempDir()}
-	saved(t, s, m)
-	m.RevokeUser("sub-alice")
-	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
-	defer cancel()
-	KeepFresh(ctx, s, o, 20*time.Millisecond, nil) // must neither panic nor block past the context
 }

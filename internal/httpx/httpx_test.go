@@ -2,11 +2,14 @@ package httpx
 
 import (
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 )
@@ -72,5 +75,45 @@ func TestClientTimeout(t *testing.T) {
 	var ne net.Error
 	if !errors.As(err, &ne) || !ne.Timeout() {
 		t.Errorf("err = %v, want a timeout error", err)
+	}
+}
+
+// A redirect is never followed. Go would forward the Authorization header to the same host on
+// another scheme or port (https to http included) and re-send a POST body (a refresh token, a
+// device code) to any host on a 307; nothing the broker or the CLI calls needs a redirect.
+func TestClientFollowsNoRedirect(t *testing.T) {
+	var mu sync.Mutex
+	var leaked []string
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		leaked = append(leaked, r.Method+" "+r.Header.Get("Authorization")+" "+string(body))
+		mu.Unlock()
+	}))
+	t.Cleanup(elsewhere.Close)
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		code := http.StatusFound
+		if r.Method == http.MethodPost {
+			code = http.StatusTemporaryRedirect // keeps the method and the body
+		}
+		http.Redirect(w, r, elsewhere.URL+r.URL.Path, code)
+	}))
+	t.Cleanup(redirector.Close)
+	c := Client("tunnels-test/1", 5*time.Second)
+
+	req, _ := http.NewRequest(http.MethodGet, redirector.URL+"/api/me", nil)
+	req.Header.Set("Authorization", "Bearer secret-access-token")
+	resp, err := c.Do(req)
+	if err != nil || resp.StatusCode != http.StatusFound {
+		t.Errorf("GET = %v, %v; want the 302 itself", resp, err)
+	}
+	resp, err = c.PostForm(redirector.URL+"/token", url.Values{"refresh_token": {"secret-refresh-token"}})
+	if err != nil || resp.StatusCode != http.StatusTemporaryRedirect {
+		t.Errorf("POST = %v, %v; want the 307 itself", resp, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(leaked) != 0 {
+		t.Errorf("the redirect was followed: %q", leaked)
 	}
 }

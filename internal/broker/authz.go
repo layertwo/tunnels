@@ -24,7 +24,7 @@ type Authz struct {
 	Users       Users
 	SitesDomain string        // the domain sites live under, without a port or a trailing dot
 	Timeout     time.Duration // for the store lookup; zero means 5 s
-	Log         *slog.Logger  // nil means slog.Default()
+	Log         *slog.Logger
 }
 
 func (a Authz) timeout() time.Duration { return cmp.Or(a.Timeout, 5*time.Second) }
@@ -42,7 +42,7 @@ type outcome struct {
 func (a Authz) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	o := a.decide(r)
 
-	log := cmp.Or(a.Log, slog.Default())
+	log := a.Log
 	attrs := []slog.Attr{slog.String("reason", o.reason)}
 	if o.label != "" {
 		attrs = append(attrs, slog.String("label", o.label))

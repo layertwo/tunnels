@@ -52,7 +52,6 @@ func Discover(ctx context.Context, hc *http.Client, baseURL string) (Bootstrap, 
 
 // Me is who the service says a token belongs to.
 type Me struct {
-	Sub      string `json:"sub"`
 	Username string `json:"username"`
 	Handle   string `json:"handle"`
 }
@@ -206,7 +205,7 @@ func RefreshStored(ctx context.Context, s Store, o OIDC) (Tokens, error) {
 }
 
 // KeepFresh refreshes the stored login every `every` until ctx ends. A failed refresh is reported to
-// onErr (which may be nil) and tried again at the next tick: the access token in the file stays good
+// onErr and tried again at the next tick: the access token in the file stays good
 // for its lifetime, so one failure is not the end of a tunnel.
 func KeepFresh(ctx context.Context, s Store, o OIDC, every time.Duration, onErr func(error)) {
 	tick := time.NewTicker(every)
@@ -216,7 +215,7 @@ func KeepFresh(ctx context.Context, s Store, o OIDC, every time.Duration, onErr 
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			if _, err := RefreshStored(ctx, s, o); err != nil && onErr != nil && ctx.Err() == nil {
+			if _, err := RefreshStored(ctx, s, o); err != nil && ctx.Err() == nil {
 				onErr(err)
 			}
 		}

@@ -36,7 +36,7 @@ type Hooks struct {
 	MaxTunnelsPerUser int           // proxies one user may have online
 	BandwidthLimit    string        // applied to every proxy, in "server" mode
 	Timeout           time.Duration // for one decision; zero means 8 s
-	Log               *slog.Logger  // nil means slog.Default()
+	Log               *slog.Logger
 }
 
 const maxBody = 1 << 20
@@ -46,11 +46,6 @@ const maxBody = 1 << 20
 const defaultDecisionTimeout = 8 * time.Second
 
 func (h *Hooks) timeout() time.Duration { return cmp.Or(h.Timeout, defaultDecisionTimeout) }
-
-func (h *Hooks) logger() *slog.Logger { return cmpLogger(h.Log) }
-
-// cmpLogger is l, or the default logger when l is nil.
-func cmpLogger(l *slog.Logger) *slog.Logger { return cmp.Or(l, slog.Default()) }
 
 func (h *Hooks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	secret, ok := strings.CutPrefix(r.URL.Path, "/plugin/")
@@ -186,7 +181,7 @@ func (h *Hooks) closeProxy(ctx context.Context, raw json.RawMessage) (plugin.Res
 
 // accept answers with content, the whole of it, in place of what frps sent.
 func (h *Hooks) accept(ctx context.Context, op string, content any, attrs ...slog.Attr) plugin.Response {
-	h.logger().LogAttrs(ctx, slog.LevelInfo, "plugin decision", append(attrs, slog.String("op", op), slog.String("result", "accepted"))...)
+	h.Log.LogAttrs(ctx, slog.LevelInfo, "plugin decision", append(attrs, slog.String("op", op), slog.String("result", "accepted"))...)
 	return plugin.Response{Content: content}
 }
 
@@ -199,6 +194,6 @@ func (h *Hooks) reject(ctx context.Context, op, reason string, cause error, attr
 		level = slog.LevelWarn
 		attrs = append(attrs, slog.String("err", cause.Error()))
 	}
-	h.logger().LogAttrs(ctx, level, "plugin decision", attrs...)
+	h.Log.LogAttrs(ctx, level, "plugin decision", attrs...)
 	return plugin.Response{Reject: true, RejectReason: reason}
 }

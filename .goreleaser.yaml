@@ -1,7 +1,6 @@
 version: 2
 builds:
-  - id: tunnel
-    main: ./cmd/tunnel
+  - main: ./cmd/tunnel
     binary: tunnel
     env: [CGO_ENABLED=0]
     flags: [-trimpath]
@@ -14,9 +13,7 @@ builds:
       - {goos: darwin, goarch: arm}
       - {goos: windows, goarch: arm}
 archives:
-  - id: tunnel
-    formats: [tar.gz]
-    format_overrides:
+  - format_overrides:
       - {goos: windows, formats: [zip]}
     name_template: "tunnel_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
 checksum:

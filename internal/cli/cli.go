@@ -3,7 +3,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -240,7 +239,7 @@ func logout(env Env) int {
 	if err == nil {
 		err = s.Clear()
 	}
-	if err != nil && !errors.Is(err, auth.ErrNotLoggedIn) {
+	if err != nil {
 		fmt.Fprintln(env.Stderr, err)
 		return 1
 	}

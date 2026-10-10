@@ -9,7 +9,6 @@ import (
 	"path"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -18,10 +17,9 @@ import (
 
 // User is a person who has logged in at least once.
 type User struct {
-	Sub       string
-	Handle    string
-	Disabled  bool
-	CreatedAt time.Time
+	Sub      string
+	Handle   string
+	Disabled bool
 }
 
 var (
@@ -114,18 +112,13 @@ func migrate(ctx context.Context, pool *pgxpool.Pool) (err error) {
 
 // apply runs one migration and records its version in the same transaction.
 func apply(ctx context.Context, conn *pgxpool.Conn, v int, sql string) error {
-	tx, err := conn.Begin(ctx)
-	if err != nil {
+	return pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, sql); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, "insert into schema_migrations (version) values ($1)", v)
 		return err
-	}
-	defer tx.Rollback(ctx) // no-op once committed
-	if _, err := tx.Exec(ctx, sql); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, "insert into schema_migrations (version) values ($1)", v); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	})
 }
 
 // version is the integer before the first "_" or "." of a migration file name: 001_users.sql is 1.
@@ -140,8 +133,8 @@ func version(name string) (int, error) {
 }
 
 const (
-	userBySub    = "select sub, handle, disabled, created_at from users where sub = $1"
-	userByHandle = "select sub, handle, disabled, created_at from users where handle = $1"
+	userBySub    = "select sub, handle, disabled from users where sub = $1"
+	userByHandle = "select sub, handle, disabled from users where handle = $1"
 )
 
 // UserBySub returns the user with this sub, or ErrNotFound.
@@ -156,7 +149,7 @@ func (s *Store) UserByHandle(ctx context.Context, handle string) (User, error) {
 
 func (s *Store) queryUser(ctx context.Context, query, arg string) (User, error) {
 	var u User
-	err := s.pool.QueryRow(ctx, query, arg).Scan(&u.Sub, &u.Handle, &u.Disabled, &u.CreatedAt)
+	err := s.pool.QueryRow(ctx, query, arg).Scan(&u.Sub, &u.Handle, &u.Disabled)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, ErrNotFound
 	}

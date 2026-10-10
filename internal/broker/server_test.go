@@ -2,7 +2,6 @@ package broker
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -46,7 +45,7 @@ func newServerRig(t *testing.T) *serverRig {
 	m := mockidp.New(t)
 	m.AddUser(mockidp.User{Sub: "sub-alice", Username: "Alice", Groups: []string{creators, "tunnels-viewers"}})
 	m.AddUser(mockidp.User{Sub: "sub-vera", Username: "vera", Groups: []string{"tunnels-viewers"}})
-	client, err := idp.New(t.Context(), m.URL, mockidp.APIResource, "tunnels-test/1")
+	client, err := idp.New(t.Context(), m.URL, mockidp.APIResource, "tunnels-test/1", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,20 +111,13 @@ func TestRoutes(t *testing.T) {
 }
 
 // failing dependencies: the health check must say "alive" without asking any of them.
-type countingVerifier struct{ calls int }
-
-func (v *countingVerifier) VerifyAccessToken(context.Context, string) (string, error) {
-	v.calls++
-	return "", errors.New("down")
-}
-
 func TestHealthzAsksNoDependency(t *testing.T) {
 	boom := errors.New("down")
 	i := &fakeIdP{err: boom}
 	users := newUsers()
 	users.bySubErr, users.byHandleErr, users.createErr = boom, boom, boom
 	f := &fakeFrps{runErr: boom, countErr: boom}
-	v := &countingVerifier{}
+	v := &fakeVerifier{idp: i, err: boom}
 	h := NewHandler(testConfig("https://idp.example.com"), Deps{IdP: i, Verifier: v, Users: users, Frps: f, Log: slog.New(slog.DiscardHandler)})
 
 	w := httptest.NewRecorder()
@@ -245,10 +237,8 @@ func TestWellKnown(t *testing.T) {
 		t.Errorf("document =\n%v\nwant\n%v", got, want)
 	}
 	// Nothing in it is a secret, and the endpoint needs no login.
-	for _, secret := range []string{pluginSecret} {
-		if strings.Contains(w.Body.String(), secret) {
-			t.Errorf("the document contains %q", secret)
-		}
+	if strings.Contains(w.Body.String(), pluginSecret) {
+		t.Error("the document contains the plugin secret")
 	}
 }
 

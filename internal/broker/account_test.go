@@ -140,6 +140,9 @@ func resolver(id idp.Identity, users *fakeUsers) (Resolver, *fakeIdP) {
 
 func verifierOf(r Resolver) *fakeVerifier { return r.Verifier.(*fakeVerifier) }
 
+// Reason is the sentence a failed Resolve shows the person.
+func Reason(err error) string { text, _ := reasonOf(err); return text }
+
 func TestResolveNewUser(t *testing.T) {
 	users := newUsers()
 	r, i := resolver(identity("sub-1", "Alice", creators, "tunnels-viewers"), users)
