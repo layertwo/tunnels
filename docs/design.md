@@ -154,8 +154,8 @@ or no longer in the creators group, and frpc then closes the session. It rejects
 refusal: a token the broker cannot verify (invalid, expired, or Pocket ID unreachable) is allowed
 and left to frps, which re-verifies the ping's token itself, so a key we cannot fetch does not tear
 down a session frps would have accepted. Enabling it is adding `"Ping"` to `[[httpPlugins]].ops` in
-`frps.toml`; the homelab `ops` change that adds `"Ping"` and `"NewWorkConn"` together is deferred
-until the next release.
+`frps.toml`; `"Ping"` has been in `ops` since v0.2.0 (homelab #2486), and `"NewWorkConn"` is enabled
+by adding it to `ops` with the next release.
 
 `tunnel logout` only deletes the token files on that computer. Pocket ID publishes no token
 revocation endpoint (its discovery document lists none), so a copied refresh token stays good
@@ -553,8 +553,8 @@ All of them fail closed.
 
 - `kubectl -n tunnels get deploy broker` shows `2/2`, and `kubectl -n tunnels get pdb broker`
   shows `MIN AVAILABLE 1`.
-- frps's plugin `ops` includes `"Ping"` and `"NewWorkConn"` after the homelab `ops` change (deferred
-  until the next release).
+- frps's plugin `ops` includes `"Ping"` (deployed in v0.2.0, homelab #2486) and picks up
+  `"NewWorkConn"` with the next release, once this branch's broker image is pinned.
 - A user share: a second account reaches the site, and `tunnel unshare` denies that visitor on
   their next request (the share row is gone and `/authz` has no cache).
 - A revoked creator's tunnel: remove them from `tunnels-creators` (or disable the account) and
@@ -564,8 +564,8 @@ All of them fail closed.
 - A cross-owner state-changing request: a `POST` to `alice-blog.w.tunnels.layertwo.dev` with
   `Origin: https://bob-x.w.tunnels.layertwo.dev` is refused, while a `GET` or an `Origin`-less
   request is allowed.
-- The `NewWorkConn` hook is dormant until the deferred homelab `ops` change lands with the next
-  release, which adds `"NewWorkConn"` alongside `"Ping"`.
+- The `NewWorkConn` hook is dormant until `"NewWorkConn"` is added to frps's `ops` with the next
+  release, once the broker image containing it is pinned; `"Ping"` is already enabled.
 
 ## Phasing
 
