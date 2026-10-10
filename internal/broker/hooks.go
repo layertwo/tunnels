@@ -79,6 +79,8 @@ func (h *Hooks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		res, err = h.newProxy(ctx, req.Content)
 	case plugin.OpCloseProxy:
 		res, err = h.closeProxy(ctx, req.Content)
+	case plugin.OpPing:
+		res, err = h.ping(ctx, req.Content)
 	default:
 		err = fmt.Errorf("unknown op %q", req.Op)
 	}
@@ -182,6 +184,34 @@ func (h *Hooks) closeProxy(ctx context.Context, raw json.RawMessage) (plugin.Res
 	res := h.accept(ctx, plugin.OpCloseProxy, nil, slog.String("handle", c.User.User), slog.String("proxy", c.ProxyName))
 	res.Unchange = true
 	return res, nil
+}
+
+// ping is frps's heartbeat check, run for every client every 30 s with the token the client just read
+// from disk. Re-resolving that token ends a revoked, expired or disabled account's tunnel on the next
+// heartbeat: a rejection makes frpc close the session. A failure of ours (the identity provider or the
+// store is down) is not the account's doing, so the tunnel is allowed to live out the token it has.
+func (h *Hooks) ping(ctx context.Context, raw json.RawMessage) (plugin.Response, error) {
+	var c plugin.PingContent
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return plugin.Response{}, err
+	}
+	if c.PrivilegeKey == "" {
+		return h.reject(ctx, plugin.OpPing, "missing token", nil), nil
+	}
+	acct, err := h.Resolver.Resolve(ctx, c.PrivilegeKey)
+	if err != nil {
+		text, theirs := reasonOf(err)
+		if !theirs {
+			h.Log.WarnContext(ctx, "ping: could not verify the session, allowed", "err", err)
+			return plugin.Response{Unchange: true}, nil
+		}
+		return h.reject(ctx, plugin.OpPing, text, nil), nil
+	}
+	// A heartbeat claiming somebody else's run ID is not this client's heartbeat.
+	if c.User.User != "" && c.User.User != acct.Handle {
+		return h.reject(ctx, plugin.OpPing, "run id belongs to another session", nil), nil
+	}
+	return plugin.Response{Unchange: true}, nil
 }
 
 // accept answers with content, the whole of it, in place of what frps sent.
