@@ -544,6 +544,21 @@ All of them fail closed.
   takeover and revocation by heartbeat.
 - **Smoke test** after deploy: a test creator and a test viewer through the real path.
 
+### Verify a deploy
+
+- `kubectl -n tunnels get deploy broker` shows `2/2`, and `kubectl -n tunnels get pdb broker`
+  shows `MIN AVAILABLE 1`.
+- frps's plugin `ops` lists `"Ping"` and `"NewWorkConn"`.
+- A user share: a second account reaches the site, and `tunnel unshare` denies them within one
+  heartbeat (the Ping hook).
+- A group share: a member of the group reaches the site (needs the gate to forward
+  `X-Tunnels-Groups`).
+- A cross-owner state-changing request: a `POST` to `alice-blog.w.tunnels.layertwo.dev` with
+  `Origin: https://bob-x.w.tunnels.layertwo.dev` is refused, while a `GET` or an `Origin`-less
+  request is allowed.
+- The `NewWorkConn` hook is dormant until `"NewWorkConn"` is added to frps's `ops` and a broker
+  image containing it is pinned (it ships in a release), exactly as `Ping` did.
+
 ## Phasing
 
 - **Phase 0 (optional, no custom code):** a machine client, stock `frpc`, and the existing OIDC

@@ -16,6 +16,7 @@ tunnel login                    # shows a URL and a code to approve in your brow
 tunnel up 3000                  # https://<handle>.w.tunnels.layertwo.dev serves http://127.0.0.1:3000
 tunnel up 3000 --name blog      # https://<handle>-blog.w.tunnels.layertwo.dev
 tunnel share --name blog bob    # lets bob reach the blog tunnel
+tunnel share --for 7d bob       # the share ends after a duration (7d, 24h, ...)
 tunnel share --group family     # --group shares with a Pocket ID group instead of a username
 tunnel unshare --name blog bob  # stops sharing it
 tunnel list                     # shows the shares you set
