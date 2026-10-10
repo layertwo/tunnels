@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -68,13 +69,7 @@ func GetMe(ctx context.Context, hc *http.Client, baseURL, accessToken string) (M
 		return Me{}, err
 	}
 	if status != http.StatusOK {
-		var e struct {
-			Error string `json:"error"`
-		}
-		if json.Unmarshal(body, &e) == nil && e.Error != "" {
-			return Me{}, errors.New(e.Error)
-		}
-		return Me{}, fmt.Errorf("the service answered %d", status)
+		return Me{}, serviceError(status, body)
 	}
 	var me Me
 	if err := json.Unmarshal(body, &me); err != nil || me.Handle == "" {
@@ -83,25 +78,53 @@ func GetMe(ctx context.Context, hc *http.Client, baseURL, accessToken string) (M
 	return me, nil
 }
 
-// get returns the status and the first megabyte of the body. A bearer token is sent when given.
-func get(ctx context.Context, hc *http.Client, url, bearer string) (int, []byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+// send returns the status and the first megabyte of the body of one request. A bearer token is sent
+// when given; a non-nil payload is encoded as JSON.
+func send(ctx context.Context, hc *http.Client, method, url, bearer string, payload any) (int, []byte, error) {
+	var body io.Reader
+	if payload != nil {
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return 0, nil, fmt.Errorf("auth: %w", err)
+		}
+		body = bytes.NewReader(raw)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
 		return 0, nil, fmt.Errorf("auth: %w", err)
 	}
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	resp, err := hc.Do(req)
 	if err != nil {
 		return 0, nil, fmt.Errorf("auth: %w", err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	if err != nil {
 		return 0, nil, fmt.Errorf("auth: read %s: %w", url, err)
 	}
-	return resp.StatusCode, body, nil
+	return resp.StatusCode, respBody, nil
+}
+
+// get returns the status and the first megabyte of the body. A bearer token is sent when given.
+func get(ctx context.Context, hc *http.Client, url, bearer string) (int, []byte, error) {
+	return send(ctx, hc, http.MethodGet, url, bearer, nil)
+}
+
+// serviceError is the service's own sentence ({"error": "..."}) when it gave one, else the status.
+func serviceError(status int, body []byte) error {
+	var e struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(body, &e) == nil && e.Error != "" {
+		return errors.New(e.Error)
+	}
+	return fmt.Errorf("the service answered %d", status)
 }
 
 // OIDC is the identity provider as the CLI uses it: a public client of Issuer that asks for tokens
