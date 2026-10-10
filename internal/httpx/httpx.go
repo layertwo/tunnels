@@ -6,11 +6,15 @@ import (
 	"time"
 )
 
-// Client returns an HTTP client with an overall deadline of timeout and the given User-Agent on every request.
+// Client returns an HTTP client with an overall deadline of timeout and the given User-Agent on every
+// request. It follows no redirect: Go would forward the Authorization header to the same host on
+// another scheme (https to http) and re-send a POST body, a refresh token, to any host on a 307, and
+// nothing the broker or the CLI calls redirects.
 func Client(userAgent string, timeout time.Duration) *http.Client {
 	return &http.Client{
-		Timeout:   timeout,
-		Transport: uaTransport{base: http.DefaultTransport.(*http.Transport).Clone(), userAgent: userAgent},
+		Timeout:       timeout,
+		Transport:     uaTransport{base: http.DefaultTransport.(*http.Transport).Clone(), userAgent: userAgent},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 }
 
