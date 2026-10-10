@@ -260,3 +260,20 @@ func TestCallerDeadlineIsHonoured(t *testing.T) {
 		t.Errorf("took %v for a 100 ms deadline", took)
 	}
 }
+
+// The dashboard is asked about run IDs and handles, and its errors end up in the broker's log: the
+// query must not be part of what an error says.
+func TestErrorsDoNotCarryTheQuery(t *testing.T) {
+	c := New("http://127.0.0.1:1", "broker", "pw-secret", userAgent)
+	_, _, err := c.OnlineRunIDUser(t.Context(), "930a3a060e21c161")
+	if err == nil || strings.Contains(err.Error(), "930a3a060e21c161") || strings.Contains(err.Error(), "pw-secret") {
+		t.Errorf("OnlineRunIDUser error = %v, want one without the run id", err)
+	}
+	_, err = c.OnlineProxyCount(t.Context(), "alice")
+	if err == nil || strings.Contains(err.Error(), "alice") || strings.Contains(err.Error(), "?") {
+		t.Errorf("OnlineProxyCount error = %v, want one without the handle", err)
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("error = %v, want the cause kept", err)
+	}
+}
