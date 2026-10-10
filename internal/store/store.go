@@ -92,12 +92,12 @@ func migrate(ctx context.Context, pool *pgxpool.Pool) (err error) {
 	}
 	files, err := migrations.ReadDir("migrations") // sorted by name
 	if err != nil {
-		return fmt.Errorf("store: list migrations: %w", err)
+		return fmt.Errorf("store: list migrations: %w", err) // coverage-ignore: migrations are embedded at build time, so ReadDir on the embedded FS cannot fail
 	}
 	for _, f := range files {
 		v, err := version(f.Name())
 		if err != nil {
-			return err
+			return err // coverage-ignore: the embedded file names are fixed and valid, so version cannot fail here
 		}
 		var applied bool
 		if err := conn.QueryRow(ctx, "select exists (select 1 from schema_migrations where version = $1)", v).Scan(&applied); err != nil {
@@ -108,7 +108,7 @@ func migrate(ctx context.Context, pool *pgxpool.Pool) (err error) {
 		}
 		sql, err := migrations.ReadFile(path.Join("migrations", f.Name()))
 		if err != nil {
-			return fmt.Errorf("store: read migration %s: %w", f.Name(), err)
+			return fmt.Errorf("store: read migration %s: %w", f.Name(), err) // coverage-ignore: the embedded file just read by ReadDir always exists
 		}
 		if err := apply(ctx, conn, v, string(sql)); err != nil {
 			return fmt.Errorf("store: apply migration %s: %w", f.Name(), err)

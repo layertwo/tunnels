@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -572,5 +573,217 @@ func TestShareMatchesError(t *testing.T) {
 	}
 	if got {
 		t.Errorf("ShareMatches on a closed store = true with error %v, want false", err)
+	}
+}
+
+// withParam adds one query parameter to dbURL; pgx hands unknown parameters to the server as
+// runtime settings (the same trick schemaURL uses for search_path).
+func withParam(t *testing.T, dbURL, key, value string) string {
+	t.Helper()
+	u, err := url.Parse(dbURL)
+	if err != nil {
+		t.Fatalf("parse %q: %v", dbURL, err)
+	}
+	q := u.Query()
+	q.Set(key, value)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// An unparseable URL fails in pgxpool.New, before any connection is made.
+func TestOpenInvalidDatabaseURLFails(t *testing.T) {
+	s, err := Open(testCtx(t), "postgres://postgres@localhost:notaport/postgres?sslmode=disable")
+	if err == nil {
+		s.Close()
+		t.Fatal("Open with an invalid DATABASE_URL succeeded, want an error")
+	}
+	if !strings.Contains(err.Error(), "store: open pool") {
+		t.Errorf("Open error = %v, want it to name the pool", err)
+	}
+}
+
+// The pool connects lazily, so a reachable URL whose server is down fails in migrate's Acquire.
+func TestOpenUnreachableDatabaseFails(t *testing.T) {
+	s, err := Open(testCtx(t), "postgres://postgres:postgres@127.0.0.1:1/postgres?sslmode=disable&connect_timeout=1")
+	if err == nil {
+		s.Close()
+		t.Fatal("Open against an unreachable server succeeded, want an error")
+	}
+	if !strings.Contains(err.Error(), "store: connect for migrations") {
+		t.Errorf("Open error = %v, want it to name the migration connection", err)
+	}
+}
+
+// migrate acquires an advisory lock; while another session holds it and the statement timeout is
+// short, the lock attempt aborts instead of waiting forever.
+func TestMigrateLockTimeoutFails(t *testing.T) {
+	base := os.Getenv("TEST_DATABASE_URL")
+	if base == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	ctx := testCtx(t)
+	holder, err := pgx.Connect(ctx, base)
+	if err != nil {
+		t.Fatalf("connect lock holder: %v", err)
+	}
+	t.Cleanup(func() { holder.Close(context.Background()) })
+	if _, err := holder.Exec(ctx, "select pg_advisory_lock($1)", migrationLock); err != nil {
+		t.Fatalf("hold migration lock: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := holder.Exec(context.Background(), "select pg_advisory_unlock($1)", migrationLock); err != nil {
+			t.Errorf("release migration lock: %v", err)
+		}
+	})
+
+	dbURL := withParam(t, schemaURL(t), "statement_timeout", "100")
+	s, err := Open(ctx, dbURL)
+	if err == nil {
+		s.Close()
+		t.Fatal("Open while the migration lock is held succeeded, want an error")
+	}
+	if !strings.Contains(err.Error(), "store: lock migrations") {
+		t.Errorf("Open error = %v, want it to name the migration lock", err)
+	}
+}
+
+// A read-only connection cannot create schema_migrations.
+func TestMigrateCreateTableFails(t *testing.T) {
+	dbURL := withParam(t, schemaURL(t), "default_transaction_read_only", "on")
+	s, err := Open(testCtx(t), dbURL)
+	if err == nil {
+		s.Close()
+		t.Fatal("Open on a read-only connection succeeded, want an error")
+	}
+	if !strings.Contains(err.Error(), "store: create schema_migrations") {
+		t.Errorf("Open error = %v, want it to name schema_migrations", err)
+	}
+}
+
+// A schema_migrations table without a version column makes the applied check fail.
+func TestMigrateCheckMigrationFails(t *testing.T) {
+	dbURL := schemaURL(t)
+	if err := run(dbURL, "create table schema_migrations (not_version int)"); err != nil {
+		t.Fatalf("create schema_migrations: %v", err)
+	}
+	s, err := Open(testCtx(t), dbURL)
+	if err == nil {
+		s.Close()
+		t.Fatal("Open with an unreadable schema_migrations succeeded, want an error")
+	}
+	if !strings.Contains(err.Error(), "store: check migration") {
+		t.Errorf("Open error = %v, want it to name the migration check", err)
+	}
+}
+
+// A conflicting users table makes the first migration's statement fail, rolling back its transaction.
+func TestMigrateApplyFails(t *testing.T) {
+	dbURL := schemaURL(t)
+	if err := run(dbURL, "create table users (not_our_users int)"); err != nil {
+		t.Fatalf("create conflicting users: %v", err)
+	}
+	s, err := Open(testCtx(t), dbURL)
+	if err == nil {
+		s.Close()
+		t.Fatal("Open with a conflicting users table succeeded, want an error")
+	}
+	if !strings.Contains(err.Error(), "store: apply migration") {
+		t.Errorf("Open error = %v, want it to name the failed migration", err)
+	}
+	if got := count(t, dbURL, "select count(*) from schema_migrations"); got != 0 {
+		t.Errorf("schema_migrations has %d rows after a failed migration, want 0", got)
+	}
+}
+
+// With a schema-local pg_advisory_unlock shadowing the built-in, the migrations succeed but the
+// deferred unlock raises, which migrate reports.
+func TestMigrateUnlockFails(t *testing.T) {
+	dbURL := schemaURL(t)
+	u, err := url.Parse(dbURL)
+	if err != nil {
+		t.Fatalf("parse %q: %v", dbURL, err)
+	}
+	schema := u.Query().Get("search_path")
+	if err := run(dbURL, `create function pg_advisory_unlock(bigint) returns boolean language plpgsql volatile as $$ begin raise exception 'unlock shadow'; end $$`); err != nil {
+		t.Fatalf("create the unlock shadow: %v", err)
+	}
+	// Listing the schema before pg_catalog makes its function win the name lookup.
+	dbURL = withParam(t, dbURL, "search_path", schema+",pg_catalog")
+	s, err := Open(testCtx(t), dbURL)
+	if err == nil {
+		s.Close()
+		t.Fatal("Open with a shadowed unlock succeeded, want an error")
+	}
+	if !strings.Contains(err.Error(), "store: unlock migrations") {
+		t.Errorf("Open error = %v, want it to name the migration unlock", err)
+	}
+}
+
+// On a closed pool every statement fails; none may come back as a zero value or a nil error.
+func TestStoreClosedPoolErrors(t *testing.T) {
+	dbURL := schemaURL(t)
+	s := openStore(t, dbURL)
+	ctx := testCtx(t)
+	createUser(t, s, ctx, "sub-1", "alice")
+	sh := Share{Tunnel: "blog", Kind: "user", Grantee: "bob"}
+	putShare(t, s, ctx, "sub-1", sh)
+	s.Close()
+
+	if _, err := s.CreateUser(ctx, "sub-2", "carol"); err == nil {
+		t.Error("CreateUser on a closed store succeeded, want an error")
+	}
+	if err := s.PutShare(ctx, "sub-1", sh); err == nil {
+		t.Error("PutShare on a closed store succeeded, want an error")
+	}
+	if err := s.DeleteShare(ctx, "sub-1", sh); err == nil {
+		t.Error("DeleteShare on a closed store succeeded, want an error")
+	}
+	if shares, err := s.SharesByOwner(ctx, "sub-1"); err == nil || shares != nil {
+		t.Errorf("SharesByOwner on a closed store = %v, %v; want nil, error", shares, err)
+	}
+	if got := count(t, dbURL, "select count(*) from users"); got != 1 {
+		t.Errorf("users has %d rows after the failed writes, want 1", got)
+	}
+	if got := count(t, dbURL, "select count(*) from shares"); got != 1 {
+		t.Errorf("shares has %d rows after the failed writes, want 1", got)
+	}
+}
+
+// A grantee that is not text makes the query succeed but the row scan fail.
+func TestSharesByOwnerScanFails(t *testing.T) {
+	dbURL := schemaURL(t)
+	s := openStore(t, dbURL)
+	ctx := testCtx(t)
+	createUser(t, s, ctx, "sub-1", "alice")
+	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob"})
+	if err := run(dbURL, "alter table shares alter column grantee type bytea using convert_to(grantee, 'UTF8')"); err != nil {
+		t.Fatalf("alter shares.grantee: %v", err)
+	}
+	shares, err := s.SharesByOwner(ctx, "sub-1")
+	if err == nil || shares != nil {
+		t.Errorf("SharesByOwner with an unreadable column = %v, %v; want nil, error", shares, err)
+	}
+}
+
+// A row whose expression raises ends the stream with an error instead of a partial list.
+func TestSharesByOwnerRowsError(t *testing.T) {
+	dbURL := schemaURL(t)
+	s := openStore(t, dbURL)
+	ctx := testCtx(t)
+	createUser(t, s, ctx, "sub-1", "alice")
+	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob"})
+	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "boom"})
+	if err := run(dbURL, "alter table shares rename to shares_base"); err != nil {
+		t.Fatalf("rename shares: %v", err)
+	}
+	if err := run(dbURL, `create function boom() returns text language plpgsql volatile as $$ begin raise exception 'boom'; end $$`); err != nil {
+		t.Fatalf("create boom: %v", err)
+	}
+	if err := run(dbURL, `create view shares as select owner_sub, tunnel, case when grantee = 'boom' then boom() else kind end as kind, grantee from shares_base`); err != nil {
+		t.Fatalf("create failing view: %v", err)
+	}
+	shares, err := s.SharesByOwner(ctx, "sub-1")
+	if err == nil || shares != nil {
+		t.Errorf("SharesByOwner with a failing row = %v, %v; want nil, error", shares, err)
 	}
 }
