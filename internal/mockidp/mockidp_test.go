@@ -499,8 +499,11 @@ func TestSignWithoutAKeyPanics(t *testing.T) {
 	s := New(t)
 	s.key = nil
 	defer func() {
-		if recover() == nil {
+		r := recover()
+		if r == nil {
 			t.Error("sign returned a token with no signing key")
+		} else if msg := fmt.Sprint(r); !strings.Contains(msg, "invalid private key") {
+			t.Errorf("panicked with %q, want the jose signer's invalid-key error", msg)
 		}
 	}()
 	_ = s.Issue("alice-sub", IssueOpts{})

@@ -323,6 +323,9 @@ func TestUserInfoUnbuildableRequest(t *testing.T) {
 	t.Cleanup(srv.Close)
 	c := newClient(t, srv.URL)
 
+	// The endpoint is a URL net/url refuses to build a request from. This is an indirect
+	// trigger: if the stdlib ever accepted it, the request would fail later and line 74
+	// would silently go uncovered — the coverage gate, not this assertion, would catch that.
 	_, err := c.UserInfo(t.Context(), "token")
 	wantOtherError(t, err)
 }

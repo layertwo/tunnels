@@ -550,6 +550,19 @@ func TestMainDefaultsClients(t *testing.T) {
 	if want := "tunnel 1.2.3 (server tunnels.layertwo.dev)\n"; out.String() != want {
 		t.Errorf("stdout %q, want %q", out.String(), want)
 	}
+
+	// A command that goes through the defaulted HTTP client: pointed at a closed port so
+	// it fails fast, the message names the server, proving Main supplied the client.
+	t.Run("default http client", func(t *testing.T) {
+		var out, errb bytes.Buffer
+		env := Env{Stdout: &out, Stderr: &errb, ConfigDir: t.TempDir(), Version: "1.2.3", DefaultServer: "127.0.0.1:1"}
+		if c := Main([]string{"login"}, env); c != 1 {
+			t.Fatalf("exit %d, want 1; stderr %q", c, errb.String())
+		}
+		if !strings.Contains(errb.String(), "cannot reach https://127.0.0.1:1") {
+			t.Errorf("stderr %q, want the default server named", errb.String())
+		}
+	})
 }
 
 // store falls back to the platform config dir when neither the environment nor ConfigDir names one.
@@ -609,8 +622,12 @@ func TestCommandsWithoutAConfigDir(t *testing.T) {
 			if c := Main(tc.args, env); c != tc.wantCode {
 				t.Errorf("exit %d, want %d; stderr:\n%s", c, tc.wantCode, errb.String())
 			}
-			if got := out.String() + errb.String(); !strings.Contains(got, tc.want) {
-				t.Errorf("output lacks %q:\n%s", tc.want, got)
+			if tc.wantCode != 0 {
+				if !strings.Contains(errb.String(), tc.want) {
+					t.Errorf("stderr lacks %q:\n%s", tc.want, errb.String())
+				}
+			} else if !strings.Contains(out.String(), tc.want) {
+				t.Errorf("stdout lacks %q:\n%s", tc.want, out.String())
 			}
 		})
 	}
