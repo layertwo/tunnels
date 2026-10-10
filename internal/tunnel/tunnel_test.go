@@ -21,6 +21,7 @@ func opts() Options {
 		ServerHost: "tunnels.layertwo.dev", ServerPort: 443, Protocol: "wss",
 		Handle: "alice", Name: "blog", LocalPort: 3000,
 		TokenFile: "/home/alice/.config/tunnels/access-token", CAFile: "/home/alice/.config/tunnels/cacert.pem",
+		Version: "1.2.3",
 	}
 }
 
@@ -61,6 +62,9 @@ func TestBuildFields(t *testing.T) {
 	}
 	if c.LoginFailExit == nil || !*c.LoginFailExit {
 		t.Error("loginFailExit is off: a refused first login would retry for ever instead of saying why")
+	}
+	if c.Metadatas["tunnel_version"] != "1.2.3" {
+		t.Errorf("metadatas = %v, want tunnel_version 1.2.3: the broker logs it with every login", c.Metadatas)
 	}
 	if c.WebServer.Port != 0 {
 		t.Errorf("the admin web server is on (port %d)", c.WebServer.Port)

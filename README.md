@@ -28,6 +28,15 @@ go build -o broker ./cmd/broker   # settings are environment variables, see inte
 go build -o tunnel ./cmd/tunnel   # the CLI: tunnel login, then tunnel up PORT [--name NAME]
 ```
 
+## Versions
+
+- `tunnel version` prints the CLI's version and its default server. Every request it makes carries
+  `User-Agent: tunnels/<version>`, and every tunnel login carries the version to the broker, which logs
+  it as `cli_version` with each login decision.
+- `broker --version` prints the broker's; it also logs it when it starts (`"msg":"broker listening"`).
+  Release images are tagged with it, mainline images with `sha-<commit>`.
+- The frps image runs upstream frps: `--version` prints frp's version.
+
 ## Verify a release
 
 Every archive of a release comes with a signed build provenance. It says which workflow built
