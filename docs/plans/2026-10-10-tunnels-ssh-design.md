@@ -51,7 +51,9 @@ terminal, authenticated with Pocket ID. No host is exposed directly; no anonymou
   the control channel already proves wss works through the edge. The reason the subtree is a
   **DNS-only** record with its own wildcard certificate, like `*.w.`, is the certificate: the free
   Universal SSL covers only one subdomain level, so `*.ssh.tunnels.layertwo.dev` cannot be proxied
-  without a paid multi-level certificate. DNS-only also keeps TLS end to end (Cloudflare would
+  without Cloudflare's Advanced Certificate Manager add-on (about $10/month per zone), which can
+  carry `*.layertwo.dev` and `*.ssh.tunnels.layertwo.dev` on one certificate. (Uploading the
+  origin's own cert instead needs the Business plan, $200/month.) DNS-only also keeps TLS end to end (Cloudflare would
   otherwise terminate it and see the SSH bytes) and avoids Cloudflare's 100 s idle WebSocket
   timeout dropping a quiet session.
 - `frps` has a single `subDomainHost` (`w.tunnels.layertwo.dev`), so the SSH subtree is expressed
