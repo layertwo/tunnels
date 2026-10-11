@@ -22,10 +22,11 @@ import (
 const sitesDomain = "w.tunnels.layertwo.dev"
 
 type authzRig struct {
-	authz  Authz
-	users  *fakeUsers
-	shares *fakeShares
-	logs   *bytes.Buffer
+	authz    Authz
+	users    *fakeUsers
+	machines *fakeMachines
+	shares   *fakeShares
+	logs     *bytes.Buffer
 }
 
 func newAuthzRig() *authzRig {
@@ -34,22 +35,31 @@ func newAuthzRig() *authzRig {
 		store.User{Sub: "sub-bob", Handle: "bob"},
 		store.User{Sub: "sub-dave", Handle: "dave", Disabled: true},
 	)
+	machines := newMachines(store.Machine{Handle: "nas", OwnerRef: "sub-alice", ClientID: "nas-client"})
 	shares := &fakeShares{}
 	logs := &bytes.Buffer{}
 	return &authzRig{
-		authz:  Authz{Users: users, Shares: shares, SitesDomain: sitesDomain, Log: slog.New(slog.NewJSONHandler(logs, nil))},
-		users:  users,
-		shares: shares,
-		logs:   logs,
+		authz:    Authz{Users: users, Machines: machines, Shares: shares, SitesDomain: sitesDomain, Log: slog.New(slog.NewJSONHandler(logs, nil))},
+		users:    users,
+		machines: machines,
+		shares:   shares,
+		logs:     logs,
 	}
+}
+
+// useMachines replaces the rig's machines table and points the authz decision at it.
+func (r *authzRig) useMachines(existing ...store.Machine) {
+	r.machines = newMachines(existing...)
+	r.authz.Machines = r.machines
 }
 
 // fakeShares is an in-memory Shares: a user grantee matches case-insensitively, a group grantee exactly,
 // and it records every call.
 type fakeShares struct {
-	users   []string  // user grantees
-	groups  []string  // group grantees
-	expires time.Time // when non-zero and past, every grant has expired
+	users   []string    // user grantees
+	groups  []string    // group grantees
+	sites   []siteShare // grants keyed by the whole site: owner sub, handle and tunnel must all match
+	expires time.Time   // when non-zero and past, every grant has expired
 	err     error
 	calls   []shareCall
 
@@ -58,6 +68,12 @@ type fakeShares struct {
 	getSubs  []string      // ownerSub of every SharesByOwner call
 	puts     []shareWrite  // every PutShare call
 	deletes  []shareWrite  // every DeleteShare call
+}
+
+// siteShare is one grant keyed by the site it was made on: a share on the owner's alice-blog and a
+// share on the owner's nas-blog are different sites even though the owner is the same (invariant 10).
+type siteShare struct {
+	ownerSub, handle, tunnel, grantee string
 }
 
 type shareCall struct {
@@ -102,6 +118,11 @@ func (f *fakeShares) ShareMatches(_ context.Context, ownerSub, handle, tunnel, u
 	}
 	if !f.expires.IsZero() && !f.expires.After(time.Now()) {
 		return false, nil // the store ignores expired rows
+	}
+	for _, s := range f.sites {
+		if s.ownerSub == ownerSub && s.handle == handle && s.tunnel == tunnel && strings.EqualFold(s.grantee, username) {
+			return true, nil
+		}
 	}
 	for _, grantee := range f.users {
 		if strings.EqualFold(grantee, username) {
@@ -634,5 +655,106 @@ func TestGroupsOf(t *testing.T) {
 				t.Errorf("groupsOf(%q) = %q, want %q", tt.values, got, tt.want)
 			}
 		})
+	}
+}
+
+// A machine's site is owned by the machine's owner_ref (sub-alice), not by the machine's handle, so
+// the owner gets in.
+func TestMachineOwnerAllowed(t *testing.T) {
+	r := newAuthzRig()
+	h := ownerRequest()
+	h.Set("X-Forwarded-Host", "nas-blog."+sitesDomain)
+	w := r.serve(http.MethodGet, h)
+	if w.Code != http.StatusOK || w.Header().Get("X-Tunnel-User") != "alice" || w.Body.Len() != 0 {
+		t.Errorf("= %d %v %q, want 200 as alice", w.Code, w.Header(), w.Body)
+	}
+}
+
+// The machine's handle is not a subject: a visitor whose sub happens to be it is a stranger.
+func TestMachineHandleIsNotASub(t *testing.T) {
+	r := newAuthzRig()
+	h := sharedRequest("nas-blog")
+	h.Set("X-Tunnels-Sub", "nas")
+	if w := r.serve(http.MethodGet, h); w.Code != http.StatusForbidden {
+		t.Errorf("= %d, want an empty 403: the machine's handle is not an owner sub", w.Code)
+	}
+}
+
+func TestMachineStrangerDenied(t *testing.T) {
+	r := newAuthzRig()
+	if w := r.serve(http.MethodGet, sharedRequest("nas-blog")); w.Code != http.StatusForbidden || w.Body.Len() != 0 {
+		t.Errorf("= %d %q, want an empty 403", w.Code, w.Body)
+	}
+}
+
+// A share is keyed by the whole site: a share on the owner's own alice-blog must not admit the
+// machine's nas-blog even though the owner is the same (invariant 10).
+func TestMachineShareIsKeyedByTheSite(t *testing.T) {
+	// A share that names the machine's site admits the grantee.
+	r := newAuthzRig()
+	r.shares.sites = []siteShare{{ownerSub: "sub-alice", handle: "nas", tunnel: "blog", grantee: "bob"}}
+	if w := r.serve(http.MethodGet, sharedRequest("nas-blog")); w.Code != http.StatusOK {
+		t.Errorf("= %d, want 200 for a share on the machine's site", w.Code)
+	}
+	if got := r.shares.calls; len(got) != 1 || got[0].ownerSub != "sub-alice" || got[0].handle != "nas" || got[0].tunnel != "blog" {
+		t.Errorf("ShareMatches calls %+v, want the machine site (sub-alice, nas, blog)", got)
+	}
+
+	// The owner's share on their own alice-blog does not reach the machine's site.
+	r = newAuthzRig()
+	r.shares.sites = []siteShare{{ownerSub: "sub-alice", handle: "alice", tunnel: "blog", grantee: "bob"}}
+	if w := r.serve(http.MethodGet, sharedRequest("nas-blog")); w.Code != http.StatusForbidden {
+		t.Errorf("= %d, want an empty 403: a share on alice-blog must not admit nas-blog", w.Code)
+	}
+}
+
+func TestMachineDisabledDenied(t *testing.T) {
+	r := newAuthzRig()
+	r.useMachines(store.Machine{Handle: "nas", OwnerRef: "sub-alice", Disabled: true})
+	h := ownerRequest()
+	h.Set("X-Forwarded-Host", "nas-blog."+sitesDomain)
+	if w := r.serve(http.MethodGet, h); w.Code != http.StatusForbidden || w.Body.Len() != 0 {
+		t.Errorf("= %d %q, want an empty 403 for a disabled machine", w.Code, w.Body)
+	}
+}
+
+func TestMachineDisabledOwnerDenied(t *testing.T) {
+	r := newAuthzRig()
+	r.useMachines(store.Machine{Handle: "nas", OwnerRef: "sub-dave"})
+	h := ownerRequest()
+	h.Set("X-Forwarded-Host", "nas-blog."+sitesDomain)
+	h.Set("X-Tunnels-Sub", "sub-dave")
+	if w := r.serve(http.MethodGet, h); w.Code != http.StatusForbidden || w.Body.Len() != 0 {
+		t.Errorf("= %d %q, want an empty 403 for a disabled owner", w.Code, w.Body)
+	}
+}
+
+// A handle in neither table is unknown, and so is a machine whose owner has no row: both are the same
+// empty 403 as an unknown person.
+func TestMachineUnknownOwnerDenied(t *testing.T) {
+	r := newAuthzRig()
+	if w := r.serve(http.MethodGet, sharedRequest("ghost-blog")); w.Code != http.StatusForbidden || w.Body.Len() != 0 {
+		t.Errorf("no machine row = %d %q, want an empty 403", w.Code, w.Body)
+	}
+
+	r = newAuthzRig()
+	r.useMachines(store.Machine{Handle: "nas", OwnerRef: "sub-ghost"})
+	if w := r.serve(http.MethodGet, sharedRequest("nas-blog")); w.Code != http.StatusForbidden || w.Body.Len() != 0 {
+		t.Errorf("machine with no owner row = %d %q, want an empty 403", w.Code, w.Body)
+	}
+}
+
+// A store that cannot answer about the machine, or about the owner it names, is an outage, not a deny.
+func TestMachineLookupErrorIs503(t *testing.T) {
+	r := newAuthzRig()
+	r.machines.err = errors.New("dial tcp 10.0.0.5:5432: connect: connection refused")
+	if w := r.serve(http.MethodGet, sharedRequest("ghost-blog")); w.Code != http.StatusServiceUnavailable || w.Body.Len() != 0 || len(w.Header()) != 0 {
+		t.Errorf("machine lookup = %d %v %q, want an empty 503", w.Code, w.Header(), w.Body)
+	}
+
+	r = newAuthzRig()
+	r.users.bySubErr = errors.New("dial tcp 10.0.0.5:5432: connect: connection refused")
+	if w := r.serve(http.MethodGet, sharedRequest("nas-blog")); w.Code != http.StatusServiceUnavailable || w.Body.Len() != 0 || len(w.Header()) != 0 {
+		t.Errorf("owner lookup = %d %v %q, want an empty 503", w.Code, w.Header(), w.Body)
 	}
 }

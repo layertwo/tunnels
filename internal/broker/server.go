@@ -40,7 +40,7 @@ func NewHandler(cfg Config, d Deps) http.Handler {
 		Resolver: resolver, Frps: d.Frps, Secret: cfg.PluginSecret,
 		MaxTunnelsPerUser: cfg.MaxTunnelsPerUser, BandwidthLimit: cfg.BandwidthLimit, Log: d.Log,
 	})
-	mux.Handle("/authz", Authz{Users: d.Users, Shares: d.Shares, SitesDomain: cfg.SitesDomain, Log: d.Log, Metrics: m})
+	mux.Handle("/authz", Authz{Users: d.Users, Machines: d.Machines, Shares: d.Shares, SitesDomain: cfg.SitesDomain, Log: d.Log, Metrics: m})
 	mux.HandleFunc("GET /api/me", s.me)
 	mux.HandleFunc("GET /api/shares", s.sharesGet)
 	mux.HandleFunc("PUT /api/shares", s.sharesPut)

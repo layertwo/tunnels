@@ -44,6 +44,7 @@ type LookupObserver interface {
 // for concurrent use.
 type Authz struct {
 	Users       Users
+	Machines    MachineStore
 	Shares      ShareMatcher
 	SitesDomain string        // the domain sites live under, without a port or a trailing dot
 	Timeout     time.Duration // for the store lookup; zero means 5 s
@@ -129,16 +130,16 @@ func (a Authz) decide(r *http.Request) outcome {
 	ctx, cancel := context.WithTimeout(r.Context(), a.timeout())
 	defer cancel()
 	ownerStart := time.Now()
-	owner, err := a.Users.UserByHandle(ctx, handle)
+	owner, err := a.siteOwner(ctx, handle)
 	a.observe("owner", ownerStart)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		o.reason = "unknown_owner"
 	case err != nil:
 		o.reason, o.err = "store", err
-	case owner.Disabled:
+	case owner.disabled:
 		o.reason = "disabled"
-	case owner.Sub == o.sub:
+	case owner.ref == o.sub:
 		o.allow, o.reason, o.user = true, "owner", users[0]
 	default:
 		if a.Shares == nil {
@@ -146,7 +147,7 @@ func (a Authz) decide(r *http.Request) outcome {
 			return o
 		}
 		sharesStart := time.Now()
-		shared, err := a.Shares.ShareMatches(ctx, owner.Sub, handle, tunnel, users[0], groupsOf(r))
+		shared, err := a.Shares.ShareMatches(ctx, owner.ref, handle, tunnel, users[0], groupsOf(r))
 		a.observe("shares", sharesStart)
 		switch {
 		case err != nil:
@@ -158,6 +159,43 @@ func (a Authz) decide(r *http.Request) outcome {
 		}
 	}
 	return o
+}
+
+// siteOwner is who owns the site named by handle. A person's own handle is their row. A machine's
+// handle names a machine, whose site is owned by the machine's owner_ref (a user), never by the
+// machine's own handle: the share that admits a viewer is keyed by that owner and the machine's
+// handle together. A disabled machine, or a disabled or absent owner, is refused.
+func (a Authz) siteOwner(ctx context.Context, handle string) (siteOwner, error) {
+	u, err := a.Users.UserByHandle(ctx, handle)
+	switch {
+	case err == nil:
+		return siteOwner{ref: u.Sub, disabled: u.Disabled}, nil
+	case !errors.Is(err, store.ErrNotFound):
+		return siteOwner{}, err
+	}
+	m, err := a.Machines.MachineByHandle(ctx, handle)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return siteOwner{}, store.ErrNotFound
+	case err != nil:
+		return siteOwner{}, err
+	case m.Disabled:
+		return siteOwner{ref: m.OwnerRef, disabled: true}, nil
+	}
+	owner, err := a.Users.UserBySub(ctx, m.OwnerRef)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return siteOwner{}, store.ErrNotFound
+	case err != nil:
+		return siteOwner{}, err
+	}
+	return siteOwner{ref: owner.Sub, disabled: owner.Disabled}, nil
+}
+
+// siteOwner is the principal that owns a site: the users row whose shares may admit a visitor.
+type siteOwner struct {
+	ref      string // a users sub
+	disabled bool
 }
 
 // crossOwner reports whether a state-changing request (not GET, HEAD or OPTIONS) carries an Origin

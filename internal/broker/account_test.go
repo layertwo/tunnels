@@ -218,6 +218,19 @@ func (f *fakeMachines) MachineByClientID(_ context.Context, clientID string) (st
 	return store.Machine{}, store.ErrNotFound
 }
 
+func (f *fakeMachines) MachineByHandle(_ context.Context, handle string) (store.Machine, error) {
+	f.calls = append(f.calls, "MachineByHandle "+handle)
+	if f.err != nil {
+		return store.Machine{}, f.err
+	}
+	for _, m := range f.machines {
+		if m.Handle == handle {
+			return m, nil
+		}
+	}
+	return store.Machine{}, store.ErrNotFound
+}
+
 // A machine is its own principal: its Pocket ID client id (client-<id>) resolves through the machines
 // table to its own handle, and never through a person's row or the identity provider.
 func TestResolveMachine(t *testing.T) {

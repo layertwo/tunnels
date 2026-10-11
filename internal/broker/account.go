@@ -36,6 +36,7 @@ type Users interface {
 // MachineStore is where machines are kept; store.Store implements it.
 type MachineStore interface {
 	MachineByClientID(ctx context.Context, clientID string) (store.Machine, error)
+	MachineByHandle(ctx context.Context, handle string) (store.Machine, error)
 }
 
 // Account is a principal who may publish tunnels: a person or a machine. Handle is the stored one and
