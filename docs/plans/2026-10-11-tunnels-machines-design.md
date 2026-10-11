@@ -175,8 +175,16 @@ removing.
 
 ## Infra changes (homelab repo)
 
-- A Pocket ID API key for the broker, in the secret store; broker network access to Pocket ID's API.
-- Nothing else new: the frps plugin `ops` already gains `"NewWorkConn"` with the next release.
+- A Pocket ID API key for the broker, in the secret store. Broker egress to Pocket ID's API is already
+  allowed (TCP 443).
+- **The apex IngressRoute must route `/api/machines`** (owner bearer; add it beside `/api/me`). The
+  broker's `/authz`, `/plugin/` and `/metrics` stay internal: the apex route already routes only
+  `/api/me`, `/.well-known/tunnels.json` and `/healthz`, and the broker NetworkPolicy admits only
+  Traefik and frps to port 8080.
+- The frps plugin `ops` already gains `"NewWorkConn"` with the next release — the machine binding
+  depends on it.
+- Unrelated but pending: the broker NetworkPolicy must admit the Prometheus namespace to scrape
+  `/metrics` (the metrics work, `#40`).
 
 ## Security model
 
