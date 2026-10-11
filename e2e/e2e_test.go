@@ -154,7 +154,10 @@ type stack struct {
 	brokerLog *lockedBuffer
 }
 
-func newStack(t *testing.T, maxTunnels int) *stack {
+func newStack(t *testing.T, maxTunnels int) *stack { return newStackWith(t, maxTunnels, nil) }
+
+// newStackWith is newStack with the broker's machine-client mapping set, for the machine tests.
+func newStackWith(t *testing.T, maxTunnels int, machines map[string]string) *stack {
 	t.Helper()
 	s := &stack{mock: mockidp.New(t)}
 	s.mock.AddUser(mockidp.User{Sub: "sub-alice", Username: "Alice", Groups: []string{"tunnels-creators"}})
@@ -180,6 +183,7 @@ func newStack(t *testing.T, maxTunnels int) *stack {
 		ServiceHost: "tunnels.test", SitesDomain: sites, Issuer: s.mock.URL, APIResource: mockidp.APIResource,
 		CreatorsGroup: "tunnels-creators", CLIClientID: mockidp.ClientID, MinCLIVersion: "0.0.0",
 		PluginSecret: secret, MaxTunnelsPerUser: maxTunnels, BandwidthLimit: "10MB", Reserved: []string{"admin"},
+		MachineClients: machines,
 	}, broker.Deps{IdP: provider, Verifier: provider, Users: users, Shares: users, Frps: s.frps, Log: slog.New(slog.NewJSONHandler(brokerLog, nil))}))
 	t.Cleanup(b.Close)
 	s.url = b.URL
@@ -203,7 +207,7 @@ func newStack(t *testing.T, maxTunnels int) *stack {
 		"transport": map[string]any{"heartbeatTimeout": 90},
 		"webServer": map[string]any{"addr": "127.0.0.1", "port": dash, "user": dashUser, "password": dashPassword},
 		"httpPlugins": []any{map[string]any{
-			"name": "broker", "addr": b.URL, "path": "/plugin/" + secret, "ops": []string{"Login", "NewProxy", "CloseProxy"},
+			"name": "broker", "addr": b.URL, "path": "/plugin/" + secret, "ops": []string{"Login", "NewProxy", "CloseProxy", "NewWorkConn"},
 		}},
 	})
 	path := filepath.Join(t.TempDir(), "frps.json")
@@ -417,6 +421,46 @@ func TestRefusedLogins(t *testing.T) {
 	}
 }
 
+// The machine-client design rests on frps deferring to the broker: a client_credentials token for a
+// client the broker was not told about is a valid OIDC token (signed, right audience, unexpired)
+// that frps admits and the plugin refuses. A rogue client gets no tunnel and no handle, and the
+// token never reaches the log.
+func TestUnknownMachineClientGetsNoTunnel(t *testing.T) {
+	s := newStack(t, 5)
+
+	resp, err := http.PostForm(s.mock.URL+"/token", url.Values{
+		"grant_type": {"client_credentials"},
+		"client_id":  {"rogue"},
+		"resource":   {mockidp.APIResource},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var tok struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tok); err != nil || tok.AccessToken == "" {
+		t.Fatalf("client_credentials answered %v (%+v)", err, tok)
+	}
+
+	// The plugin refuses it before setting a handle, so the connection has no user.
+	reject, reason, user := s.pluginLogin(t, tok.AccessToken, "")
+	if !reject || user != "" || !strings.Contains(reason, "not configured") {
+		t.Errorf("unknown machine login: reject=%v user=%q reason=%q, want a rejection with no user", reject, user, reason)
+	}
+
+	// A whole `tunnel up` with it never serves: the first login is refused.
+	if err := s.up(t, tok.AccessToken, "rogue", "").wait(t); err == nil || !strings.HasPrefix(err.Error(), "login to the server failed: ") {
+		t.Errorf("Run = %v, want the login refused by the broker", err)
+	}
+
+	// The credential is never written to the log.
+	if logs := s.brokerLog.String(); strings.Contains(logs, tok.AccessToken) {
+		t.Errorf("the access token reached the broker log:\n%s", logs)
+	}
+}
+
 // pluginLogin posts a Login to the broker as frps would.
 func (s *stack) pluginLogin(t *testing.T, token, runID string) (reject bool, reason, user string) {
 	t.Helper()
@@ -493,6 +537,85 @@ func TestWorkConnNeedsAToken(t *testing.T) {
 		if code, body := s.get(t, "alice."+sites); code != 200 || body != "hello" {
 			t.Errorf("request %d to alice's site = %d %q", i, code, body)
 		}
+	}
+}
+
+// machineToken mints a client_credentials access token for clientID, as `tunnel login --machine` does.
+func (s *stack) machineToken(t *testing.T, clientID string) string {
+	t.Helper()
+	resp, err := http.PostForm(s.mock.URL+"/token", url.Values{
+		"grant_type": {"client_credentials"}, "client_id": {clientID}, "resource": {mockidp.APIResource},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var tok struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tok); err != nil || tok.AccessToken == "" {
+		t.Fatalf("client_credentials answered %v (%+v)", err, tok)
+	}
+	return tok.AccessToken
+}
+
+// openWorkConn opens a work connection for runID carrying token, and returns what frps answered: ""
+// when it was accepted and that control's visitors are handed to it, otherwise the refusal reason.
+func (s *stack) openWorkConn(t *testing.T, runID, token string) string {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", s.bind), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	cfg := yamux.DefaultConfig()
+	cfg.LogOutput = io.Discard
+	session, err := yamux.Client(conn, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := session.OpenStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rw := msg.NewV1ReadWriter(stream)
+	if err := rw.WriteMsg(&msg.NewWorkConn{RunID: runID, PrivilegeKey: token}); err != nil {
+		t.Fatal(err)
+	}
+	// frps answers a refusal with StartWorkConn{Error}; an accepted work connection gets no answer,
+	// so a read that times out means frps registered it and handed it that control's visitors.
+	stream.SetReadDeadline(time.Now().Add(3 * time.Second))
+	m, err := rw.ReadMsg()
+	if err != nil {
+		return ""
+	}
+	if sw, ok := m.(*msg.StartWorkConn); ok {
+		return sw.Error
+	}
+	return ""
+}
+
+// The work-connection binding is the defense against a run-ID thief being handed a control's
+// visitors. frps binds a work connection to a control by run ID alone, and its OIDC check only asks
+// that the token's subject was seen at a login (frp auth/oidc.go:309) - so the broker's NewWorkConn
+// hook is the binder. It resolves the work connection's token subject to a *users* row, so it holds
+// for a user and cannot hold for a machine client, whose subject is not a user. This is the security
+// property a shared platform-client subject cannot restore, hence the per-machine subject.
+func TestWorkConnBindingHoldsForUsersNotMachines(t *testing.T) {
+	s := newStackWith(t, 5, map[string]string{"m1": "bob"})
+	s.up(t, s.token("sub-alice"), "alice", "").waitPhase(t, "running")
+	victim := s.runID(t, "alice")
+	s.up(t, s.token("sub-bob"), "bob", "").waitPhase(t, "running") // frps now knows sub-bob
+	s.up(t, s.machineToken(t, "m1"), "bob", "m").waitPhase(t, "running")
+
+	// The binding holds for a user: bob's own token with alice's run ID is refused.
+	if errText := s.openWorkConn(t, victim, s.token("sub-bob")); errText == "" {
+		t.Errorf("bob's work conn with alice's run ID was accepted; the user binding did not hold")
+	}
+	// It cannot hold for a machine: the hook has no users row for the machine subject, so the work
+	// connection is accepted and frps hands alice's control to it.
+	if errText := s.openWorkConn(t, victim, s.machineToken(t, "m1")); errText != "" {
+		t.Errorf("the machine's work conn with alice's run ID was refused (%q); want accepted, which is the gap", errText)
 	}
 }
 
