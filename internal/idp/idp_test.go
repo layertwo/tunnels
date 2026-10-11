@@ -2,6 +2,9 @@ package idp
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -185,6 +188,72 @@ func TestVerifyAccessTokenRefuses(t *testing.T) {
 			wantInvalidToken(t, err)
 		})
 	}
+}
+
+// The public key is public. Two classic forgeries follow from that: a token with "alg":"none", and
+// an HMAC token signed with the RSA public key as the HMAC secret. go-oidc must refuse both; this
+// pins the property instead of trusting the dependency never to change.
+func TestVerifyAccessTokenRejectsAlgorithmConfusion(t *testing.T) {
+	mock := newMock(t)
+	c := newClient(t, mock.URL)
+	kid, modulus := jwksRSAModulus(t, mock.URL)
+
+	now := time.Now()
+	claims := map[string]any{
+		"iss": mock.URL, "sub": "u-alice",
+		"aud": []string{mockidp.APIResource, mockidp.ClientID, mock.URL},
+		"iat": now.Unix(), "exp": now.Add(time.Hour).Unix(),
+	}
+
+	for _, tt := range []struct {
+		name string
+		alg  string
+		hmac bool
+	}{
+		{"alg none", "none", false},
+		{"HS256 with the RSA public key", "HS256", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			head, _ := json.Marshal(map[string]any{"alg": tt.alg, "typ": "JWT", "kid": kid})
+			payload, _ := json.Marshal(claims)
+			signing := b64url(head) + "." + b64url(payload)
+			var sig []byte
+			if tt.hmac {
+				mac := hmac.New(sha256.New, modulus)
+				_, _ = mac.Write([]byte(signing))
+				sig = mac.Sum(nil)
+			}
+			if _, err := c.VerifyAccessToken(t.Context(), signing+"."+b64url(sig)); !errors.Is(err, ErrInvalidToken) {
+				t.Errorf("VerifyAccessToken = %v, want ErrInvalidToken", err)
+			}
+		})
+	}
+}
+
+func b64url(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
+
+// jwksRSAModulus reads the key id and RSA modulus from the provider's key set: the public key an
+// attacker would use as an HMAC secret.
+func jwksRSAModulus(t *testing.T, issuer string) (kid string, modulus []byte) {
+	t.Helper()
+	resp, err := http.Get(issuer + "/jwks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var set struct {
+		Keys []struct {
+			Kid string `json:"kid"`
+			N   string `json:"n"`
+		} `json:"keys"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&set); err != nil || len(set.Keys) != 1 || set.Keys[0].N == "" {
+		t.Fatalf("jwks = %+v, %v", set, err)
+	}
+	if modulus, err = base64.RawURLEncoding.DecodeString(set.Keys[0].N); err != nil {
+		t.Fatal(err)
+	}
+	return set.Keys[0].Kid, modulus
 }
 
 func TestSendsUserAgent(t *testing.T) {
