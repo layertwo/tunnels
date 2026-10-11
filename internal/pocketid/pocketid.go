@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/layertwo/tunnels/internal/httpx"
 )
 
 // Client is Pocket ID's REST API as the broker uses it: create and delete OIDC clients.
@@ -94,11 +96,7 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		var ue *url.Error
-		if errors.As(err, &ue) {
-			err = ue.Err
-		}
-		return fmt.Errorf("pocketid: %s %s: %w", method, path, err)
+		return fmt.Errorf("pocketid: %s %s: %w", method, path, httpx.UnwrapURLError(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

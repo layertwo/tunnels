@@ -32,10 +32,15 @@ func HandleFromUsername(username string, reserved []string) (string, error) {
 		return "", fmt.Errorf("username %q cannot be a tunnel handle: use 2 to 20 letters and digits (A-Z, a-z, 0-9)", username)
 	}
 	handle := strings.ToLower(username)
-	if slices.ContainsFunc(reserved, func(r string) bool { return strings.EqualFold(r, handle) }) {
+	if Reserved(reserved, handle) {
 		return "", fmt.Errorf("handle %q is reserved", handle)
 	}
 	return handle, nil
+}
+
+// Reserved reports whether handle is in reserved, compared case-insensitively.
+func Reserved(reserved []string, handle string) bool {
+	return slices.ContainsFunc(reserved, func(r string) bool { return strings.EqualFold(r, handle) })
 }
 
 // ValidHandle reports whether handle is one HandleFromUsername could have made: 2 to 20 lowercase

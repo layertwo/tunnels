@@ -92,7 +92,7 @@ func (s *server) machinesCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	// Lowercased before ValidHandle, because Task 1's uniqueness is exact and a handle is lowercase.
 	handle := strings.ToLower(body.Handle)
-	if !names.ValidHandle(handle) || reservedHandle(s.cfg.Reserved, handle) {
+	if !names.ValidHandle(handle) || names.Reserved(s.cfg.Reserved, handle) {
 		writeJSON(w, http.StatusBadRequest, errorBody("invalid handle"))
 		return
 	}
@@ -219,14 +219,4 @@ func (s *server) machinesDisable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// reservedHandle reports whether handle is one nobody gets, compared case-insensitively.
-func reservedHandle(list []string, handle string) bool {
-	for _, r := range list {
-		if strings.EqualFold(r, handle) {
-			return true
-		}
-	}
-	return false
 }
