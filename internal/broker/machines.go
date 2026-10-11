@@ -27,6 +27,7 @@ const (
 	machinesUnavailable = "machines unavailable, try again"
 	machineCreateFailed = "could not create the machine, try again"
 	invalidMachine      = "invalid machine"
+	noPocketID          = "machines are not configured; ask an admin"
 )
 
 // ownerOnly resolves the caller and refuses a machine. A machine is marked Machine on its Account (see
@@ -79,6 +80,10 @@ func decodeStrict(w http.ResponseWriter, r *http.Request, v any, invalid string)
 func (s *server) machinesCreate(w http.ResponseWriter, r *http.Request) {
 	acct, ok := s.ownerOnly(w, r)
 	if !ok {
+		return
+	}
+	if s.d.PocketID == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorBody(noPocketID))
 		return
 	}
 	var body machineRequest
@@ -173,6 +178,10 @@ func (s *server) ownedMachine(ctx context.Context, w http.ResponseWriter, r *htt
 func (s *server) machinesDelete(w http.ResponseWriter, r *http.Request) {
 	acct, ok := s.ownerOnly(w, r)
 	if !ok {
+		return
+	}
+	if s.d.PocketID == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorBody(noPocketID))
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), defaultDecisionTimeout)

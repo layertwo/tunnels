@@ -43,7 +43,7 @@ func load(vars map[string]string) (Config, error) {
 
 var required = []string{
 	"SERVICE_HOST", "SITES_DOMAIN", "ISSUER", "API_RESOURCE", "CREATORS_GROUP", "CLI_CLIENT_ID",
-	"DATABASE_URL", "POCKET_ID_URL", "POCKET_ID_API_KEY", "POCKET_ID_API_ID",
+	"DATABASE_URL",
 	"FRPS_DASHBOARD_URL", "FRPS_DASHBOARD_USER", "FRPS_DASHBOARD_PASSWORD", "PLUGIN_SECRET",
 }
 
@@ -113,6 +113,29 @@ func TestLoadConfigRequired(t *testing.T) {
 			vars[name] = ""
 			if _, err := load(vars); err == nil || !strings.Contains(err.Error(), name) {
 				t.Errorf("with %s empty: err = %v, want one naming it", name, err)
+			}
+		})
+	}
+}
+
+// The machine-admin config is optional and all-or-nothing: set none and the broker serves people only;
+// a half-set one is a mistake, not "machines off".
+func TestLoadConfigMachineAdminIsOptional(t *testing.T) {
+	vars := allVars()
+	for _, k := range []string{"POCKET_ID_URL", "POCKET_ID_API_KEY", "POCKET_ID_API_ID"} {
+		delete(vars, k)
+	}
+	got, err := load(vars)
+	if err != nil || got.PocketIDURL != "" || got.PocketIDAPIKey != "" || got.PocketIDAPIID != "" {
+		t.Fatalf("without the machine admin config: %+v, %v; want no error and no values", got, err)
+	}
+
+	for _, missing := range []string{"POCKET_ID_URL", "POCKET_ID_API_KEY", "POCKET_ID_API_ID"} {
+		t.Run("without "+missing, func(t *testing.T) {
+			vars := allVars()
+			delete(vars, missing)
+			if _, err := load(vars); err == nil || !strings.Contains(err.Error(), "POCKET_ID_") {
+				t.Errorf("without %s: err = %v, want one naming the machine config", missing, err)
 			}
 		})
 	}
