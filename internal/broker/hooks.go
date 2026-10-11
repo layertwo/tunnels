@@ -241,12 +241,12 @@ func (h *Hooks) newWorkConn(ctx context.Context, raw json.RawMessage) (plugin.Re
 		h.Log.DebugContext(ctx, "new work conn: could not verify the session, allowed", "err", err)
 		return plugin.Response{Unchange: true}, nil
 	}
-	u, err := h.Resolver.Users.UserBySub(ctx, sub)
+	acct, err := h.Resolver.AccountBySubject(ctx, sub)
 	if err != nil {
 		h.Log.DebugContext(ctx, "new work conn: could not look up the account, allowed", "err", err)
 		return plugin.Response{Unchange: true}, nil
 	}
-	if u.Handle != c.User.User {
+	if acct.Handle != c.User.User {
 		return h.reject(ctx, plugin.OpNewWorkConn, "token does not belong to this session", nil), nil
 	}
 	return plugin.Response{Unchange: true}, nil

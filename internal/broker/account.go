@@ -33,8 +33,13 @@ type Users interface {
 	CreateUser(ctx context.Context, sub, handle string) (store.User, error)
 }
 
-// Account is a person who may publish tunnels. Handle is the stored one and never changes;
-// Username is whatever the identity provider says today.
+// MachineStore is where machines are kept; store.Store implements it.
+type MachineStore interface {
+	MachineByClientID(ctx context.Context, clientID string) (store.Machine, error)
+}
+
+// Account is a principal who may publish tunnels: a person or a machine. Handle is the stored one and
+// never changes; Username is whatever the identity provider says today, and empty for a machine.
 type Account struct {
 	Sub      string `json:"sub"`
 	Username string `json:"username"`
@@ -47,7 +52,7 @@ var (
 	ErrNotCreator     = errors.New("broker: not in the creators group")
 	ErrDisabled       = errors.New("broker: account is disabled")
 	ErrBadHandle      = errors.New("broker: username cannot be a handle")
-	ErrUnknownMachine = errors.New("broker: machine client is not configured")
+	ErrUnknownMachine = errors.New("broker: machine is not registered")
 )
 
 // notValid is what a person is told when their token is refused.
@@ -64,12 +69,12 @@ func (e *refusal) Unwrap() error { return e.kind }
 
 // Resolver turns an access token into an Account. It keeps no state and is safe for concurrent use.
 type Resolver struct {
-	IdP            IdP
-	Verifier       TokenVerifier
-	Users          Users
-	CreatorsGroup  string            // the group whose members may publish
-	Reserved       []string          // handles nobody gets
-	MachineClients map[string]string // client ids, each allowed to publish as the mapped handle
+	IdP           IdP
+	Verifier      TokenVerifier
+	Users         Users
+	Machines      MachineStore
+	CreatorsGroup string   // the group whose members may publish
+	Reserved      []string // handles nobody gets
 }
 
 // Resolve says who the token belongs to and creates their row on the first login. Every failure is
@@ -82,10 +87,11 @@ func (r Resolver) Resolve(ctx context.Context, accessToken string) (Account, err
 	if err != nil {
 		return Account{}, err
 	}
-	// A client_credentials token names its client, not a person: it is pre-authorised by config, so
-	// it has no username or groups to ask the identity provider about and never passes the group check.
-	if id, ok := strings.CutPrefix(sub, "client-"); ok {
-		return r.machine(ctx, id)
+	// A client_credentials token names its client, not a person: it is a machine, resolved from the
+	// machines table, so it has no username or groups to ask the identity provider about and never
+	// passes the group check.
+	if _, ok := strings.CutPrefix(sub, "client-"); ok {
+		return r.AccountBySubject(ctx, sub)
 	}
 	id, err := r.IdP.UserInfo(ctx, accessToken)
 	if err != nil {
@@ -114,22 +120,27 @@ func (r Resolver) Resolve(ctx context.Context, accessToken string) (Account, err
 	return Account{Sub: u.Sub, Username: id.Username, Handle: u.Handle}, nil
 }
 
-// machine turns a machine client id into the account of the handle config maps it to. The handle's
-// row must already exist: a machine publishes as its person, and never creates or picks a handle.
-func (r Resolver) machine(ctx context.Context, id string) (Account, error) {
-	handle, ok := r.MachineClients[id]
-	if !ok {
-		return Account{}, &refusal{ErrUnknownMachine, "this machine client is not configured; ask an admin"}
+// AccountBySubject resolves a verified token's subject to the account that may publish. A
+// client_credentials subject is a machine: its handle comes only from the machines row (invariant 5),
+// so it can never claim another's and a disabled or deleted machine is refused. Anything else is a
+// person's stored row. It creates nothing.
+func (r Resolver) AccountBySubject(ctx context.Context, sub string) (Account, error) {
+	if id, ok := strings.CutPrefix(sub, "client-"); ok {
+		m, err := r.Machines.MachineByClientID(ctx, id)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			return Account{}, &refusal{ErrUnknownMachine, "this machine is not registered; ask its owner to create it"}
+		case err != nil:
+			return Account{}, fmt.Errorf("broker: look up machine: %w", err)
+		}
+		if m.Disabled {
+			return Account{}, &refusal{ErrDisabled, "this machine is disabled; ask its owner"}
+		}
+		return Account{Handle: m.Handle}, nil
 	}
-	u, err := r.Users.UserByHandle(ctx, handle)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		return Account{}, &refusal{store.ErrNotFound, "the handle " + strconv.Quote(handle) + " has no account yet; ask them to log in"}
-	case err != nil:
-		return Account{}, fmt.Errorf("broker: look up user by handle: %w", err)
-	}
-	if u.Disabled {
-		return Account{}, &refusal{ErrDisabled, "your account is disabled: ask an admin"}
+	u, err := r.Users.UserBySub(ctx, sub)
+	if err != nil {
+		return Account{}, fmt.Errorf("broker: look up user: %w", err)
 	}
 	return Account{Sub: u.Sub, Handle: u.Handle}, nil
 }

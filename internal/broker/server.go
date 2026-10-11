@@ -21,6 +21,7 @@ type Deps struct {
 	IdP      IdP
 	Verifier TokenVerifier
 	Users    Users
+	Machines MachineStore
 	Shares   Shares
 	Frps     Frps
 	Log      *slog.Logger
@@ -29,7 +30,7 @@ type Deps struct {
 // NewHandler serves everything the broker answers: the frps plugin, /authz for Traefik, the API the
 // CLI uses and the document that tells it where to log in.
 func NewHandler(cfg Config, d Deps) http.Handler {
-	resolver := Resolver{IdP: d.IdP, Verifier: d.Verifier, Users: d.Users, CreatorsGroup: cfg.CreatorsGroup, Reserved: cfg.Reserved, MachineClients: cfg.MachineClients}
+	resolver := Resolver{IdP: d.IdP, Verifier: d.Verifier, Users: d.Users, Machines: d.Machines, CreatorsGroup: cfg.CreatorsGroup, Reserved: cfg.Reserved}
 	s := &server{cfg: cfg, d: d, resolver: resolver}
 	m := NewMetrics()
 

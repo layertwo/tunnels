@@ -32,14 +32,15 @@ func testConfig(issuer string) Config {
 
 // serverRig is the whole handler over a real idp.Client talking to the mock identity provider.
 type serverRig struct {
-	h      http.Handler
-	idp    *mockidp.Server
-	client *idp.Client
-	users  *fakeUsers
-	shares *fakeShares
-	frps   *fakeFrps
-	cfg    Config
-	logs   *bytes.Buffer
+	h        http.Handler
+	idp      *mockidp.Server
+	client   *idp.Client
+	users    *fakeUsers
+	machines *fakeMachines
+	shares   *fakeShares
+	frps     *fakeFrps
+	cfg      Config
+	logs     *bytes.Buffer
 }
 
 func newServerRig(t *testing.T) *serverRig {
@@ -51,9 +52,9 @@ func newServerRig(t *testing.T) *serverRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &serverRig{idp: m, client: client, users: newUsers(), shares: &fakeShares{}, frps: &fakeFrps{online: map[string]string{}}, cfg: testConfig(m.URL), logs: &bytes.Buffer{}}
+	r := &serverRig{idp: m, client: client, users: newUsers(), machines: newMachines(), shares: &fakeShares{}, frps: &fakeFrps{online: map[string]string{}}, cfg: testConfig(m.URL), logs: &bytes.Buffer{}}
 	r.h = NewHandler(r.cfg, Deps{
-		IdP: client, Verifier: client, Users: r.users, Shares: r.shares, Frps: r.frps,
+		IdP: client, Verifier: client, Users: r.users, Machines: r.machines, Shares: r.shares, Frps: r.frps,
 		Log: slog.New(slog.NewJSONHandler(r.logs, nil)),
 	})
 	return r
@@ -191,21 +192,16 @@ func TestAPIMeKeepsTheStoredHandle(t *testing.T) {
 	}
 }
 
-// NewHandler takes the machine-client map from the Configuration, not from Deps: there is exactly
-// one place to set it, so a handler built from cfg alone still resolves a machine client.
-func TestNewHandlerMachineClientsComeFromConfig(t *testing.T) {
+// A machine comes from the store the handler was given: /api/me resolves a client_credentials subject
+// to its machine's own handle, never to a person's.
+func TestNewHandlerResolvesAMachineFromTheStore(t *testing.T) {
 	r := newServerRig(t)
-	r.users.users["sub-alice"] = store.User{Sub: "sub-alice", Handle: "alice"}
-	cfg := r.cfg
-	cfg.MachineClients = map[string]string{"abc": "alice"}
-	h := NewHandler(cfg, Deps{IdP: r.client, Verifier: r.client, Users: r.users, Shares: r.shares, Frps: r.frps, Log: slog.New(slog.DiscardHandler)})
+	r.machines.machines["abc"] = store.Machine{Handle: "nas", ClientID: "abc"}
+	token := r.idp.Issue("client-abc", mockidp.IssueOpts{}) // a client_credentials subject
 
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/me", nil)
-	req.Header = bearer(r.idp.Issue("client-abc", mockidp.IssueOpts{})) // a client_credentials subject
-	h.ServeHTTP(w, req)
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `"handle":"alice"`) {
-		t.Errorf("= %d %q, want 200 with the configured handle", w.Code, w.Body)
+	w := r.do("GET", "/api/me", bearer(token), "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"handle":"nas"`) {
+		t.Errorf("= %d %q, want 200 with the machine's own handle", w.Code, w.Body)
 	}
 }
 

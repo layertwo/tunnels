@@ -192,27 +192,52 @@ func TestResolveExistingUserKeepsHandle(t *testing.T) {
 	}
 }
 
-// A machine client is pre-authorised by config: its id maps to a handle, and it acts as that person.
-// No userinfo and no creators-group check, because a client_credentials token has neither username
-// nor groups.
-func TestResolveMachineClient(t *testing.T) {
-	users := newUsers(store.User{Sub: "sub-alice", Handle: "alice"})
-	r, i := resolver(identity("", "", creators), users)
-	r.MachineClients = map[string]string{"abc": "alice"}
+// fakeMachines is an in-memory MachineStore that behaves like store.Store, and records every call.
+type fakeMachines struct {
+	machines map[string]store.Machine // by client id
+	err      error
+	calls    []string
+}
+
+func newMachines(existing ...store.Machine) *fakeMachines {
+	f := &fakeMachines{machines: map[string]store.Machine{}}
+	for _, m := range existing {
+		f.machines[m.ClientID] = m
+	}
+	return f
+}
+
+func (f *fakeMachines) MachineByClientID(_ context.Context, clientID string) (store.Machine, error) {
+	f.calls = append(f.calls, "MachineByClientID "+clientID)
+	if f.err != nil {
+		return store.Machine{}, f.err
+	}
+	if m, ok := f.machines[clientID]; ok {
+		return m, nil
+	}
+	return store.Machine{}, store.ErrNotFound
+}
+
+// A machine is its own principal: its Pocket ID client id (client-<id>) resolves through the machines
+// table to its own handle, and never through a person's row or the identity provider.
+func TestResolveMachine(t *testing.T) {
+	machines := newMachines(store.Machine{Handle: "nas", ClientID: "abc"})
+	r, i := resolver(identity("", "", creators), newUsers())
+	r.Machines = machines
 	verifierOf(r).sub = "client-abc"
 
 	got, err := r.Resolve(t.Context(), "tok-machine")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := (Account{Sub: "sub-alice", Handle: "alice"}); got != want {
+	if want := (Account{Handle: "nas"}); got != want {
 		t.Errorf("account = %+v, want %+v", got, want)
 	}
 	if i.calls != 0 {
 		t.Errorf("userinfo called %d times for a machine token", i.calls)
 	}
-	if len(users.created()) != 0 {
-		t.Errorf("created %q for a machine token", users.created())
+	if len(machines.calls) != 1 || machines.calls[0] != "MachineByClientID abc" {
+		t.Errorf("machine store calls = %q, want one lookup of abc", machines.calls)
 	}
 
 	// A normal subject still goes through userinfo; only "client-" is a machine.
@@ -223,54 +248,41 @@ func TestResolveMachineClient(t *testing.T) {
 }
 
 func TestResolveMachineUnknownClient(t *testing.T) {
-	users := newUsers(store.User{Sub: "sub-alice", Handle: "alice"})
-	r, i := resolver(identity("", ""), users)
-	r.MachineClients = map[string]string{"abc": "alice"}
+	machines := newMachines()
+	r, i := resolver(identity("", ""), newUsers())
+	r.Machines = machines
 	verifierOf(r).sub = "client-zzz"
 
 	got, err := r.Resolve(t.Context(), "tok")
 	if !errors.Is(err, ErrUnknownMachine) || got != (Account{}) {
 		t.Fatalf("Resolve = %+v, %v, want the zero value and ErrUnknownMachine", got, err)
 	}
-	if i.calls != 0 || len(users.calls) != 0 {
-		t.Errorf("userinfo calls %d, store calls %q after an unknown machine client", i.calls, users.calls)
-	}
-}
-
-func TestResolveMachineUnknownHandle(t *testing.T) {
-	users := newUsers() // configured to "box", who has never logged in
-	r, _ := resolver(identity("", ""), users)
-	r.MachineClients = map[string]string{"abc": "box"}
-	verifierOf(r).sub = "client-abc"
-
-	got, err := r.Resolve(t.Context(), "tok")
-	if !errors.Is(err, store.ErrNotFound) || got != (Account{}) {
-		t.Fatalf("Resolve = %+v, %v, want the zero value and store.ErrNotFound", got, err)
-	}
-	if _, ok := refusalOf(err); !ok {
-		t.Errorf("err = %v, want a refusal", err)
+	if i.calls != 0 {
+		t.Errorf("userinfo calls %d after an unknown machine client", i.calls)
 	}
 }
 
 func TestResolveMachineDisabled(t *testing.T) {
-	users := newUsers(store.User{Sub: "sub-alice", Handle: "alice", Disabled: true})
-	r, _ := resolver(identity("", ""), users)
-	r.MachineClients = map[string]string{"abc": "alice"}
+	r, i := resolver(identity("", ""), newUsers())
+	r.Machines = newMachines(store.Machine{Handle: "nas", ClientID: "abc", Disabled: true})
 	verifierOf(r).sub = "client-abc"
 
 	got, err := r.Resolve(t.Context(), "tok")
 	if !errors.Is(err, ErrDisabled) || got != (Account{}) {
 		t.Fatalf("Resolve = %+v, %v, want the zero value and ErrDisabled", got, err)
 	}
+	if i.calls != 0 {
+		t.Errorf("userinfo calls %d after a disabled machine", i.calls)
+	}
 }
 
-// A store that cannot answer the handle lookup is infrastructure, not the machine's fault.
+// A store that cannot answer the machine lookup is infrastructure, not the machine's fault.
 func TestResolveMachineLookupFails(t *testing.T) {
 	boom := errors.New("dial tcp: connection refused")
-	users := newUsers()
-	users.byHandleErr = boom
-	r, _ := resolver(identity("", ""), users)
-	r.MachineClients = map[string]string{"abc": "alice"}
+	machines := newMachines()
+	machines.err = boom
+	r, _ := resolver(identity("", ""), newUsers())
+	r.Machines = machines
 	verifierOf(r).sub = "client-abc"
 
 	got, err := r.Resolve(t.Context(), "tok")
@@ -279,6 +291,35 @@ func TestResolveMachineLookupFails(t *testing.T) {
 	}
 	if !errors.Is(err, boom) {
 		t.Errorf("err = %v, want it to wrap the lookup failure", err)
+	}
+}
+
+// AccountBySubject resolves a verified subject: a client_credentials subject is a machine's handle
+// from the machines table and nowhere else (invariant 5), anything else is a person's stored row.
+func TestAccountBySubject(t *testing.T) {
+	tests := []struct {
+		name     string
+		sub      string
+		users    []store.User
+		machines []store.Machine
+		want     Account
+		wantErr  error
+	}{
+		{"machine", "client-abc", nil, []store.Machine{{Handle: "nas", ClientID: "abc"}}, Account{Handle: "nas"}, nil},
+		{"machine, unknown", "client-zzz", nil, nil, Account{}, ErrUnknownMachine},
+		{"machine, disabled", "client-abc", nil, []store.Machine{{Handle: "nas", ClientID: "abc", Disabled: true}}, Account{}, ErrDisabled},
+		{"user", "sub-1", []store.User{{Sub: "sub-1", Handle: "alice"}}, nil, Account{Sub: "sub-1", Handle: "alice"}, nil},
+		{"user, unknown", "sub-9", nil, nil, Account{}, store.ErrNotFound},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, _ := resolver(identity("", ""), newUsers(tt.users...))
+			r.Machines = newMachines(tt.machines...)
+			got, err := r.AccountBySubject(t.Context(), tt.sub)
+			if !errors.Is(err, tt.wantErr) || got != tt.want {
+				t.Fatalf("AccountBySubject(%q) = %+v, %v; want %+v, %v", tt.sub, got, err, tt.want, tt.wantErr)
+			}
+		})
 	}
 }
 
