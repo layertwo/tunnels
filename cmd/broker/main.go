@@ -15,7 +15,9 @@ import (
 
 	"github.com/layertwo/tunnels/internal/broker"
 	"github.com/layertwo/tunnels/internal/frpsapi"
+	"github.com/layertwo/tunnels/internal/httpx"
 	"github.com/layertwo/tunnels/internal/idp"
+	"github.com/layertwo/tunnels/internal/pocketid"
 	"github.com/layertwo/tunnels/internal/store"
 )
 
@@ -57,10 +59,11 @@ func run() error {
 		return err
 	}
 	frps := frpsapi.New(cfg.FrpsDashboardURL, cfg.FrpsDashboardUser, cfg.FrpsDashboardPassword, userAgent)
+	pocket := pocketid.New(cfg.PocketIDURL, cfg.PocketIDAPIKey, httpx.Client(userAgent, 10*time.Second))
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           broker.NewHandler(cfg, broker.Deps{IdP: provider, Verifier: provider, Users: users, Machines: users, Shares: users, Frps: frps, Log: log}),
+		Handler:           broker.NewHandler(cfg, broker.Deps{IdP: provider, Verifier: provider, Users: users, Machines: users, PocketID: pocket, Shares: users, Frps: frps, Log: log}),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second, // a plugin body or a bearer token is small
 		WriteTimeout:      30 * time.Second, // longer than the 8 s a decision may take

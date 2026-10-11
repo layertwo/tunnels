@@ -28,6 +28,10 @@ type Config struct {
 
 	DatabaseURL string
 
+	PocketIDURL    string // the Pocket ID instance whose admin API mints a machine's client
+	PocketIDAPIKey string // the admin API key; never logged
+	PocketIDAPIID  string // the Tunnels API a machine's client is granted access to
+
 	FrpsDashboardURL      string
 	FrpsDashboardUser     string
 	FrpsDashboardPassword string
@@ -48,6 +52,13 @@ var (
 	// secretRE is a path element that needs no escaping: the secret is part of the plugin URL.
 	secretRE = regexp.MustCompile(`^[A-Za-z0-9_-]{32,}$`)
 )
+
+// badDashboardURL reports whether raw is set but is not a bare http(s) URL: a scheme, a host and
+// nothing else, so no credentials, query or fragment could end up in an error or a log.
+func badDashboardURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return raw != "" && (err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery)
+}
 
 // LoadConfig reads the settings through getenv. It reports every problem at once, by variable name and
 // never with a secret in the text.
@@ -87,6 +98,10 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 
 		DatabaseURL: required("DATABASE_URL"),
 
+		PocketIDURL:    required("POCKET_ID_URL"),
+		PocketIDAPIKey: required("POCKET_ID_API_KEY"),
+		PocketIDAPIID:  required("POCKET_ID_API_ID"),
+
 		FrpsDashboardURL:      required("FRPS_DASHBOARD_URL"),
 		FrpsDashboardUser:     required("FRPS_DASHBOARD_USER"),
 		FrpsDashboardPassword: required("FRPS_DASHBOARD_PASSWORD"),
@@ -97,9 +112,11 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	}
 
 	// The credentials are separate variables; none in the URL, which would also end up in errors and logs.
-	if u, err := url.Parse(c.FrpsDashboardURL); c.FrpsDashboardURL != "" &&
-		(err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery) {
+	if badDashboardURL(c.FrpsDashboardURL) {
 		bad("FRPS_DASHBOARD_URL", "must be an http or https URL with a host and nothing else: no credentials, query or fragment") // not repeated: it may hold a password
+	}
+	if badDashboardURL(c.PocketIDURL) {
+		bad("POCKET_ID_URL", "must be an http or https URL with a host and nothing else: no credentials, query or fragment")
 	}
 	if c.PluginSecret != "" && !secretRE.MatchString(c.PluginSecret) {
 		bad("PLUGIN_SECRET", `must be at least 32 characters from A-Z, a-z, 0-9, "-" and "_"`)

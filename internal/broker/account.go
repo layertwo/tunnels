@@ -37,6 +37,9 @@ type Users interface {
 type MachineStore interface {
 	MachineByClientID(ctx context.Context, clientID string) (store.Machine, error)
 	MachineByHandle(ctx context.Context, handle string) (store.Machine, error)
+	CreateMachine(ctx context.Context, m store.Machine) error
+	MachinesByOwner(ctx context.Context, ownerRef string) ([]store.Machine, error)
+	DeleteMachine(ctx context.Context, clientID string) error
 }
 
 // Account is a principal who may publish tunnels: a person or a machine. Handle is the stored one and

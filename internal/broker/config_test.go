@@ -22,6 +22,9 @@ func allVars() map[string]string {
 		"CLI_CLIENT_ID":           "tunnels-cli",
 		"MIN_CLI_VERSION":         "0.2.0",
 		"DATABASE_URL":            "postgres://broker:pw@db:5432/tunnels",
+		"POCKET_ID_URL":           "https://idp.layertwo.dev",
+		"POCKET_ID_API_KEY":       "pocket-admin-key",
+		"POCKET_ID_API_ID":        "api-tunnels",
 		"FRPS_DASHBOARD_URL":      "http://frps.tunnels.svc:7500",
 		"FRPS_DASHBOARD_USER":     "broker",
 		"FRPS_DASHBOARD_PASSWORD": "dash-pw",
@@ -40,7 +43,8 @@ func load(vars map[string]string) (Config, error) {
 
 var required = []string{
 	"SERVICE_HOST", "SITES_DOMAIN", "ISSUER", "API_RESOURCE", "CREATORS_GROUP", "CLI_CLIENT_ID",
-	"DATABASE_URL", "FRPS_DASHBOARD_URL", "FRPS_DASHBOARD_USER", "FRPS_DASHBOARD_PASSWORD", "PLUGIN_SECRET",
+	"DATABASE_URL", "POCKET_ID_URL", "POCKET_ID_API_KEY", "POCKET_ID_API_ID",
+	"FRPS_DASHBOARD_URL", "FRPS_DASHBOARD_USER", "FRPS_DASHBOARD_PASSWORD", "PLUGIN_SECRET",
 }
 
 func TestLoadConfig(t *testing.T) {
@@ -53,7 +57,8 @@ func TestLoadConfig(t *testing.T) {
 		Issuer: "https://idp.layertwo.dev", APIResource: "https://tunnels.layertwo.dev",
 		CreatorsGroup: "tunnels-creators", UsernameClaim: "nickname", GroupsClaim: "roles",
 		CLIClientID: "tunnels-cli", MinCLIVersion: "0.2.0",
-		DatabaseURL:      "postgres://broker:pw@db:5432/tunnels",
+		DatabaseURL: "postgres://broker:pw@db:5432/tunnels",
+		PocketIDURL: "https://idp.layertwo.dev", PocketIDAPIKey: "pocket-admin-key", PocketIDAPIID: "api-tunnels",
 		FrpsDashboardURL: "http://frps.tunnels.svc:7500", FrpsDashboardUser: "broker", FrpsDashboardPassword: "dash-pw",
 		PluginSecret: goodSecret, MaxTunnelsPerUser: 3, BandwidthLimit: "2MB",
 		Reserved: []string{"admin", "root", "ops"}, ListenAddr: "127.0.0.1:9000", LogLevel: slog.LevelDebug,
@@ -174,6 +179,11 @@ func TestLoadConfigRejects(t *testing.T) {
 		{"FRPS_DASHBOARD_URL", "http://frps:7500?x=1"},
 		{"FRPS_DASHBOARD_URL", "http://frps:7500/#x"},
 		{"FRPS_DASHBOARD_URL", "http://frps:7500?"},
+		{"POCKET_ID_URL", "idp:8080"},
+		{"POCKET_ID_URL", "ftp://idp.example.com"},
+		{"POCKET_ID_URL", "http://"},
+		{"POCKET_ID_URL", "http://pocket:hunter2@idp.example.com"},
+		{"POCKET_ID_URL", "https://idp.example.com?x=1"},
 		{"PLUGIN_SECRET", "short"},
 		{"PLUGIN_SECRET", goodSecret[:31]},
 		{"PLUGIN_SECRET", goodSecret + "/x"},
@@ -191,7 +201,7 @@ func TestLoadConfigRejects(t *testing.T) {
 				t.Fatalf("err = %v, want one naming %s", err, tt.name)
 			}
 			// What is wrong with a secret must not end up in a log with the secret in it.
-			if (tt.name == "PLUGIN_SECRET" || tt.name == "FRPS_DASHBOARD_URL") && strings.Contains(err.Error(), tt.value) {
+			if (tt.name == "PLUGIN_SECRET" || tt.name == "FRPS_DASHBOARD_URL" || tt.name == "POCKET_ID_URL") && strings.Contains(err.Error(), tt.value) {
 				t.Errorf("the error repeats the value, which may hold a secret: %v", err)
 			}
 			if strings.Contains(err.Error(), "hunter2") {
@@ -235,12 +245,13 @@ func TestLoadConfigErrorsHideSecrets(t *testing.T) {
 	vars["MAX_TUNNELS_PER_USER"] = "x"
 	vars["PLUGIN_SECRET"] = "short-secret-value"
 	vars["FRPS_DASHBOARD_PASSWORD"] = "dash-pw-value"
+	vars["POCKET_ID_API_KEY"] = "pocket-key-value"
 	vars["DATABASE_URL"] = ""
 	_, err := load(vars)
 	if err == nil {
 		t.Fatal("no error")
 	}
-	for _, secret := range []string{"short-secret-value", "dash-pw-value", "broker:pw"} {
+	for _, secret := range []string{"short-secret-value", "dash-pw-value", "pocket-key-value", "broker:pw"} {
 		if strings.Contains(err.Error(), secret) {
 			t.Errorf("the error contains %q: %v", secret, err)
 		}

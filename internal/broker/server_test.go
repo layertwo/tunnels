@@ -25,6 +25,7 @@ func testConfig(issuer string) Config {
 		Issuer: issuer, APIResource: mockidp.APIResource, CreatorsGroup: creators,
 		UsernameClaim: "preferred_username", GroupsClaim: "groups",
 		CLIClientID: "tunnels-cli", MinCLIVersion: "0.2.0",
+		PocketIDURL: "https://idp.example.com", PocketIDAPIKey: "pocket-key", PocketIDAPIID: "api-1",
 		PluginSecret: pluginSecret, MaxTunnelsPerUser: 5, BandwidthLimit: "10MB",
 		Reserved: []string{"admin"},
 	}
@@ -37,6 +38,7 @@ type serverRig struct {
 	client   *idp.Client
 	users    *fakeUsers
 	machines *fakeMachines
+	pocket   *fakePocketID
 	shares   *fakeShares
 	frps     *fakeFrps
 	cfg      Config
@@ -52,9 +54,9 @@ func newServerRig(t *testing.T) *serverRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &serverRig{idp: m, client: client, users: newUsers(), machines: newMachines(), shares: &fakeShares{}, frps: &fakeFrps{online: map[string]string{}}, cfg: testConfig(m.URL), logs: &bytes.Buffer{}}
+	r := &serverRig{idp: m, client: client, users: newUsers(), machines: newMachines(), pocket: &fakePocketID{clientID: "client-123"}, shares: &fakeShares{}, frps: &fakeFrps{online: map[string]string{}}, cfg: testConfig(m.URL), logs: &bytes.Buffer{}}
 	r.h = NewHandler(r.cfg, Deps{
-		IdP: client, Verifier: client, Users: r.users, Machines: r.machines, Shares: r.shares, Frps: r.frps,
+		IdP: client, Verifier: client, Users: r.users, Machines: r.machines, PocketID: r.pocket, Shares: r.shares, Frps: r.frps,
 		Log: slog.New(slog.NewJSONHandler(r.logs, nil)),
 	})
 	return r

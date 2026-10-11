@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -194,9 +195,14 @@ func TestResolveExistingUserKeepsHandle(t *testing.T) {
 
 // fakeMachines is an in-memory MachineStore that behaves like store.Store, and records every call.
 type fakeMachines struct {
-	machines map[string]store.Machine // by client id
-	err      error
-	calls    []string
+	machines  map[string]store.Machine // by client id
+	err       error
+	createErr error
+	deleteErr error
+	created   []store.Machine
+	deleted   []string
+	steps     *[]string // when set, the order of create/delete calls, shared with the Pocket ID fake
+	calls     []string
 }
 
 func newMachines(existing ...store.Machine) *fakeMachines {
@@ -205,6 +211,12 @@ func newMachines(existing ...store.Machine) *fakeMachines {
 		f.machines[m.ClientID] = m
 	}
 	return f
+}
+
+func (f *fakeMachines) note(step string) {
+	if f.steps != nil {
+		*f.steps = append(*f.steps, step)
+	}
 }
 
 func (f *fakeMachines) MachineByClientID(_ context.Context, clientID string) (store.Machine, error) {
@@ -229,6 +241,48 @@ func (f *fakeMachines) MachineByHandle(_ context.Context, handle string) (store.
 		}
 	}
 	return store.Machine{}, store.ErrNotFound
+}
+
+func (f *fakeMachines) CreateMachine(_ context.Context, m store.Machine) error {
+	f.calls = append(f.calls, "CreateMachine "+m.Handle)
+	f.note("CreateMachine")
+	if f.createErr != nil {
+		return f.createErr
+	}
+	for _, x := range f.machines {
+		if x.Handle == m.Handle {
+			return store.ErrHandleTaken
+		}
+	}
+	f.created = append(f.created, m)
+	f.machines[m.ClientID] = m
+	return nil
+}
+
+func (f *fakeMachines) MachinesByOwner(_ context.Context, ownerRef string) ([]store.Machine, error) {
+	f.calls = append(f.calls, "MachinesByOwner "+ownerRef)
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := []store.Machine{}
+	for _, m := range f.machines {
+		if m.OwnerRef == ownerRef {
+			out = append(out, m)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Handle < out[j].Handle })
+	return out, nil
+}
+
+func (f *fakeMachines) DeleteMachine(_ context.Context, clientID string) error {
+	f.calls = append(f.calls, "DeleteMachine "+clientID)
+	f.note("DeleteMachine")
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	f.deleted = append(f.deleted, clientID)
+	delete(f.machines, clientID)
+	return nil
 }
 
 // A machine is its own principal: its Pocket ID client id (client-<id>) resolves through the machines
