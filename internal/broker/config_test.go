@@ -79,6 +79,51 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadConfigMachineClients(t *testing.T) {
+	t.Run("parses, trims and lowercases the handle", func(t *testing.T) {
+		vars := allVars()
+		vars["MACHINE_CLIENTS"] = " id1 = Alice , id2=BOX ,"
+		got, err := load(vars)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]string{"id1": "alice", "id2": "box"}
+		if !reflect.DeepEqual(got.MachineClients, want) {
+			t.Errorf("MachineClients = %v, want %v", got.MachineClients, want)
+		}
+	})
+	for _, value := range []string{"id1=", "=alice", "id1=a", "id1=Al ice"} {
+		t.Run("rejects "+value, func(t *testing.T) {
+			vars := allVars()
+			vars["MACHINE_CLIENTS"] = value
+			if _, err := load(vars); err == nil || !strings.Contains(err.Error(), "MACHINE_CLIENTS") {
+				t.Fatalf("err = %v, want one naming MACHINE_CLIENTS", err)
+			}
+		})
+	}
+	t.Run("absent is nil", func(t *testing.T) {
+		got, err := load(allVars())
+		if err != nil || got.MachineClients != nil {
+			t.Errorf("MachineClients = %v, %v, want nil", got.MachineClients, err)
+		}
+	})
+	t.Run("empty is nil", func(t *testing.T) {
+		vars := allVars()
+		vars["MACHINE_CLIENTS"] = ""
+		got, err := load(vars)
+		if err != nil || got.MachineClients != nil {
+			t.Errorf("MachineClients = %v, %v, want nil", got.MachineClients, err)
+		}
+	})
+	t.Run("a pair without an equals sign", func(t *testing.T) {
+		vars := allVars()
+		vars["MACHINE_CLIENTS"] = "id1=alice,junk"
+		if _, err := load(vars); err == nil || !strings.Contains(err.Error(), "MACHINE_CLIENTS") {
+			t.Fatalf("err = %v, want one naming MACHINE_CLIENTS", err)
+		}
+	})
+}
+
 func TestLoadConfigRequired(t *testing.T) {
 	for _, name := range required {
 		t.Run(name, func(t *testing.T) {

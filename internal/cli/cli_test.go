@@ -751,6 +751,70 @@ func TestLoginCannotSave(t *testing.T) {
 	}
 }
 
+// A machine logs in with client_credentials: no browser, no refresh token, and the credentials are
+// kept so up can ask for a new access token later.
+func TestLoginMachine(t *testing.T) {
+	t.Setenv("TUNNELS_CLIENT_SECRET", "s3cret")
+	w := newWorld(t)
+	w.me = func(rw http.ResponseWriter, _ *http.Request) {
+		io.WriteString(rw, `{"sub":"client-machine-1","handle":"bot"}`)
+	}
+	if c := w.main("login", "--machine", "machine-1", "--server", w.svc.URL); c != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
+	}
+	if !strings.Contains(w.out.String(), "bot") {
+		t.Errorf("stdout lacks the handle:\n%s", w.out)
+	}
+	tok, err := (auth.Store{Dir: w.dir}).Load()
+	if err != nil || tok.Handle != "bot" || tok.Server != w.svc.URL || tok.AccessToken == "" {
+		t.Errorf("stored %+v, %v", tok, err)
+	}
+	if tok.ClientID != "machine-1" || tok.ClientSecret != "s3cret" {
+		t.Errorf("the machine credentials were not stored: %+v", tok)
+	}
+	if tok.RefreshToken != "" {
+		t.Errorf("a machine login stored a refresh token: %+v", tok)
+	}
+	if runtime.GOOS != "windows" {
+		if fi, err := os.Stat(filepath.Join(w.dir, "tokens.json")); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Errorf("tokens.json: %v %v", fi, err)
+		}
+	}
+}
+
+// The secret is not a flag: without TUNNELS_CLIENT_SECRET a machine login says so and keeps nothing.
+func TestLoginMachineNeedsASecret(t *testing.T) {
+	t.Setenv("TUNNELS_CLIENT_SECRET", "")
+	w := newWorld(t)
+	if c := w.main("login", "--machine", "machine-1", "--server", w.svc.URL); c != 1 {
+		t.Errorf("exit %d, want 1", c)
+	}
+	if !strings.Contains(w.err.String(), "TUNNELS_CLIENT_SECRET") {
+		t.Errorf("stderr does not name the variable to set:\n%s", w.err)
+	}
+	if _, err := (auth.Store{Dir: w.dir}).Load(); !errors.Is(err, auth.ErrNotLoggedIn) {
+		t.Errorf("tokens were kept after a login without a secret: %v", err)
+	}
+}
+
+// The client secret never reaches stdout or stderr.
+func TestMachineLoginNeverPrintsTheSecret(t *testing.T) {
+	const secret = "s3cret-do-not-print"
+	t.Setenv("TUNNELS_CLIENT_SECRET", secret)
+	w := newWorld(t)
+	w.me = func(rw http.ResponseWriter, _ *http.Request) {
+		io.WriteString(rw, `{"sub":"client-machine-1","handle":"bot"}`)
+	}
+	if c := w.main("login", "--machine", "machine-1", "--server", w.svc.URL); c != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
+	}
+	for _, out := range []*syncBuffer{w.out, w.err} {
+		if strings.Contains(out.String(), secret) {
+			t.Errorf("the output contains the client secret:\n%s", out)
+		}
+	}
+}
+
 // A stored login whose service is gone stops up before it starts anything.
 func TestUpDiscoveryFails(t *testing.T) {
 	w := newWorld(t)
