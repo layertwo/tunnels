@@ -2,8 +2,8 @@
 
 > Companion to `docs/design.md`, which ships machine clients as one Pocket ID client per machine plus
 > a `MACHINE_CLIENTS` map in the broker's environment. This document replaces that with
-> **broker-owned machine principals** and a broker-minted per-machine credential. It is the working
-> design; an implementation plan follows once it is approved.
+> **broker-owned machine principals**, each holding a **private key** the broker never sees. It is the
+> working design; an implementation plan follows once it is approved.
 
 ## Intent and why
 
@@ -20,6 +20,8 @@ service is going:
 - **A machine is an alias for a person.** It publishes *as* that human, so revoking one machine means
   editing the shared list, a person's several machines are indistinguishable, and it is
   impersonation — which is why the creators-group check had to be skipped for it.
+- **The credential is a copyable string.** A client secret is a value anyone who reads the machine's
+  disk can copy and then use from anywhere.
 - **It cannot grow into what SSH and the web terminal need.** "Who owns this machine" and "who may
   reach or shell into it" are authorization questions the broker has nowhere to keep.
 
@@ -60,6 +62,11 @@ answer, and the identity provider never learns about them.
   per-client claim into an access token (custom claims are per user or group and never in the access
   token; `#781`/`#1827` deliberately exclude M2M). So per-machine identity can only come from a
   per-machine client.
+- Pocket ID's `token_endpoint_auth_methods_supported` is `client_secret_basic`, `client_secret_post`,
+  `none` — **no `private_key_jwt`** (its client-metadata path rejects it). What it does support is
+  **federated client credentials**: a `client_assertion` JWT verified against a JWKS URL or a
+  **pasted public key**, with replay protection per `jti`. That is how a machine authenticates with a
+  key instead of a secret.
 - frp's plugin `LoginContent` carries `privilege_key` and `metas`; `NewProxy`/`Ping`/`NewWorkConn`
   carry the control's `User{user, metas, run_id}`; `msg.NewWorkConn` carries **no** `metas`. frps's
   OIDC check on a post-login token only asks that its subject was seen at a login
@@ -72,15 +79,16 @@ answer, and the identity provider never learns about them.
 ## Architecture
 
 ```
-   machine (owner's box)                     cluster (homelab)
-   tunnel CLI  ──wss(+platform token, metas.tunnels_token)──▶ frps :7000
-                                                              │ plugin Login
-                                                              ▼
-                                                          broker ── verify platform token (JWKS)
-                                                                 ├─ resolve metas.tunnels_token → machines row → handle
-                                                                 └─ set the control's user = machine handle
-                                                              │
-                                                          Postgres (machines)
+   machine (owner's box)                          cluster (homelab)
+   private key ─┐
+                └─ signs a client_assertion ─▶ Pocket ID ─▶ access token (sub = client-<id>)
+   tunnel CLI  ──wss(+access token)──▶ frps :7000
+                                        │ plugin Login
+                                        ▼
+                                    broker ── verify token (JWKS), resolve client-<id> → machines row → handle
+                                        └─ set the control's user = machine handle
+                                        │
+                                    Postgres (machines)
 ```
 
 Visitors are unchanged: they reach a site through the gate and the broker's `/authz`.
@@ -91,10 +99,10 @@ Visitors are unchanged: they reach a site through the gate and the broker's `/au
 |---|----------|-----|
 | 1 | A machine is a **broker-owned principal** (`machines` row): its own handle, an owner, later a group. | Ownership, groups, ACLs and revocation are the broker's to answer; the seam SSH/web-terminal needs. |
 | 2 | Its credential is a **per-machine Pocket ID client, minted by the broker** at bootstrap. | Per-machine identity is only obtainable from a per-machine client (Constraints), and the **work-connection binding needs a per-machine subject** (Security). The broker minting it keeps bootstrap self-service. |
-| 3 | frpc sends the machine's OIDC token as the frp token and the **machine token in `metas`**; the Login hook resolves it. | The frps door needs a valid OIDC token; the broker is the identity authority and `LoginContent` already exposes `metas` (it reads `tunnel_version` today). |
+| 3 | The machine authenticates to Pocket ID with a **key pair** (a signed `client_assertion`, registered as a federated client credential), not a secret. | Its identity becomes proof of possession of a private key — not a copyable string — and the key can live in the system keystore. Per-machine clients keep the subject distinct (Decision 4). |
 | 4 | The machine's OIDC **subject is its client id** (`client-<id>`); that subject, not a config map, is what every hook resolves. | It is the only per-machine identifier frps and the broker both see (Constraints). |
 | 5 | **Extend the identity resolution to machines in Login, Ping and NewWorkConn** — the hook today is user-only. | Otherwise machines are unbound: a work connection with a machine subject is accepted for any control's run ID (verified; see Security). |
-| 6 | The platform/client secret is **handed out at bootstrap, never baked into the CLI**. | It is not the credential; keeping it off a public binary raises the bar from "download the CLI" to "compromise a machine". |
+| 6 | **No secret is handed out.** The machine generates a key pair and sends only its **public key** at bootstrap; the private key never leaves the machine (ideally hardware-backed). | There is nothing to leak, copy or bake into a binary. Rotating is swapping the public key (Pocket ID allows several federated credentials per client). |
 | 7 | A machine's handle shares **one namespace** with people; the reserved list applies; uniqueness is enforced across both. | One FQDN namespace; no land grab. |
 | 8 | `owner_kind`/`owner_ref` columns now (user today, group later). | Two columns that save a migration when groups land. |
 | 9 | Revocation is **a row** (disable/delete the machine, or delete its client). | The broker is the gate; revocation is instant at Login and within one heartbeat at Ping. |
@@ -107,21 +115,22 @@ Visitors are unchanged: they reach a site through the gate and the broker's `/au
 ### Bootstrap (`tunnel machine create NAME`, owner authenticated)
 
 1. The CLI calls the broker as the owner (the existing user login).
-2. The broker validates the handle (rules, reserved, unique across people and machines), creates the
+2. The machine generates a **key pair** — in the system keystore where one exists (Secure Enclave,
+   TPM 2.0, PKCS#11); the CLI sends only the **public key**.
+3. The broker validates the handle (rules, reserved, unique across people and machines), creates the
    `machines` row with `owner = the caller's sub`, then **mints a Pocket ID client** through Pocket
-   ID's REST API (`POST /api/oidc/clients`, `client access` to the API; `POST .../secrets`).
-3. It returns, once: the handle, the client id and secret. The CLI stores them 0600 and leaves the
-   config dir ready for `up` (no separate `login --machine`).
+   ID's REST API (`POST /api/oidc/clients`, `client access` to the API) and registers the **public key
+   as a federated client credential** (issuer / audience / subject, with the pasted key).
+4. It returns the handle and the client id — **never a secret**. The config dir is ready for `up`.
 
-The command runs **on the target machine** in the common case — a one-time device approval, performed
-in any browser, is the only human step — or on a laptop with the credential copied over. Either way
-the secret is written locally, never fetched from a public binary.
+The command runs **on the target machine**: the key is generated there, so it never travels, and a
+one-time device approval performed in any browser is the only human step.
 
 ### Publish (`tunnel up …` on the machine)
 
-1. The CLI mints an access token with `client_credentials` (the machine's client id and secret) and
-   writes it to the token file; frpc sends it as the frp token and carries its own identity
-   implicitly in the client id.
+1. The CLI signs a short-lived JWT assertion with the machine's private key and exchanges it at Pocket
+   ID's token endpoint (`client_credentials` + `client_assertion`) for an access token, then writes it
+   to the token file; frpc sends it as the frp token. The token's subject is `client-<id>`.
 2. The broker's `Login` verifies the token, resolves `client-<id>` to its `machines` row, checks the
    owner is not disabled, and sets `user = the machine's handle`. The tunnel is the machine's.
 3. `KeepFresh` re-mints the token before it expires.
@@ -137,16 +146,17 @@ to the **subject** as well, and for a machine the subject is the machine's clien
 - **Revoke** a machine by disabling or deleting its **row** — that is the prompt control: Login
   refuses immediately and a live control ends on the next Ping. Deleting its Pocket ID client is
   cleanup (a still-valid token keeps verifying until it expires), **not** the revocation lever.
-- **Rotate** its secret by adding a new Pocket ID client secret and removing the old (Pocket ID keeps
-  a list of secrets per client), so the identity — and the FQDN — does not change. Rotation is a
-  manual Pocket ID action in this change; the broker exposes create/list/remove only.
+- **Rotate** by registering a **new public key** as an additional federated credential and removing the
+  old one (Pocket ID keeps several per client), so the identity — and the FQDN — does not change.
+  Rotation is a manual Pocket ID action in this change; the broker exposes create/list/remove only.
 
 ## Credentials and lifetimes
 
 | Credential | Obtained by | Lifetime | Verified by |
 |------------|-------------|----------|-------------|
-| machine access token | `client_credentials` (its client) | 1 h, re-minted by `KeepFresh` | frps (JWKS) + broker |
-| machine client secret | handed out once at bootstrap | until rotated | Pocket ID |
+| machine access token | `client_credentials` + a signed `client_assertion` | 1 h, re-minted by `KeepFresh` | frps (JWKS) + broker |
+| client assertion | signed per token request with the machine's private key | minutes, single use (`jti`) | Pocket ID (federated credential) |
+| machine private key | generated on the machine (keystore where available) | until rotated | never leaves the machine; its **public key** is the credential |
 | Pocket ID API key (broker) | once, by an admin | rotate on schedule | Pocket ID |
 
 The broker's one new grant is the Pocket ID API key that lets it create a client per machine. Keys
@@ -167,11 +177,11 @@ removing.
 | Area | Change |
 |------|--------|
 | `internal/store` | a `machines` table (`handle`, `owner_kind`, `owner_ref`, `client_id`, `disabled`, `created_at`, `created_by`) and methods |
-| `internal/broker` | `Resolver` resolves `client-<id>` to a machine in Login **and** NewWorkConn; `/api/machines` (create/list/delete); a Pocket ID admin client for minting; the API refuses a machine subject for share management |
+| `internal/broker` | `Resolver` resolves `client-<id>` to a machine in Login **and** NewWorkConn; `/api/machines` (create/list/delete); a Pocket ID admin client that registers the machine's **public key** as a federated credential; the API refuses a machine subject for share management |
 | `internal/broker` `/authz` | resolves a site's owner across `users` and `machines`; v1 admits only the machine's owner |
 | `internal/broker` config | `MACHINE_CLIENTS` and `Deps.MachineClients` removed; a Pocket ID admin key, its URL, and the Tunnels API's id (for the client-access grant) added |
-| `internal/cli` | `machine create/list/remove`; `login --machine` keeps working but against the new credential |
-| `internal/auth` | unchanged (client-credentials path already exists) |
+| `internal/cli` | `machine create/list/remove`; generate and store the key pair (system keystore where possible); sign the `client_assertion` |
+| `internal/auth` | the client-credentials path gains a key-assertion mode (`client_assertion` in place of a secret) |
 
 ## Infra changes (homelab repo)
 
@@ -195,12 +205,13 @@ load-bearing** and the model is wrong if any fails.
 |---|-----------|------------------|
 | 1 | frps defers to the broker: a valid token the broker does not authorise yields no tunnel, no user. | e2e (`TestUnknownMachineClientGetsNoTunnel`, present) |
 | 2 | **The work-connection binding holds for a machine**: a work connection whose token subject is not the control's machine is refused. | e2e (verified for users now; must hold for machines after Decision 5) |
-| 3 | The broker is the only capability boundary; the client secret is not a credential (it only opens frps). | e2e (rogue with a valid token but no machine → refused) |
+| 3 | **A machine's identity is possession of its private key**: minting a token (and so reaching frps) requires the key; the client id and subject alone are not a credential. | unit + e2e (a token cannot be minted without a valid assertion) |
 | 4 | A machine resolves to exactly one handle; it cannot claim another; disabled/deleted → refused. | unit + e2e (revocation at Login and within one heartbeat at Ping) |
 | 5 | The machine subject never resolves through the `users` table; the handle comes only from the `machines` row. | unit |
 | 6 | Handle validation, reserved list and cross-namespace uniqueness hold. | unit |
 | 7 | The credential is never logged; the hook rejects before setting a user. | unit + e2e (token absent from logs) |
 | 8 | Token verification refuses algorithm confusion and wrong issuer/audience/expiry. | unit (`TestVerifyAccessTokenRejectsAlgorithmConfusion`, present) |
+| 9 | A client assertion is short-lived and **single-use** (Pocket ID's `jti` replay protection); a captured assertion cannot be replayed. | unit (the CLI never reuses a `jti`; a second exchange with the same assertion is refused) |
 
 Today's code fails invariant 2 for machines: `newWorkConn` resolves the subject through `users`, so a
 machine subject is not bound. NewWorkConn is dormant in production (not in `ops`), so this must be
@@ -211,7 +222,7 @@ fixed **in the same change that enables it**, not after.
 | Threat | Control |
 |--------|---------|
 | Rogue takes the CLI and connects | frps admits on the OIDC token; the broker refuses without a machine row (invariant 1/3) |
-| Rogue steals a machine secret | publish as that machine only, until revoked; rotate the client secret |
+| Rogue copies a machine's disk or config | a hardware-backed private key does not copy, so no token can be minted; a copied software key is revoked by swapping the public key |
 | Run-ID thief injects a work connection | the NewWorkConn hook binds the work connection's subject to the control (invariant 2) — the reason for a per-machine subject |
 | Handle land grab | validation, reserved list, uniqueness across people and machines (invariant 6) |
 | Machine credential over-reaches | the machine's authority is a design item: it should not carry its owner's share API (see Deferred) |
@@ -234,14 +245,16 @@ fixed **in the same change that enables it**, not after.
 - e2e (real frps): a machine publishes as its own handle; **a machine work connection with another
   control's run ID is refused** (invariant 2); a disabled machine loses its tunnel within a
   heartbeat; a rogue with a valid token but no machine gets nothing.
+- Auth: the assertion is signed with the machine's key and exchanged for a token; a token cannot be
+  minted without the key; a reused `jti` is refused.
 - The two present tests (`TestUnknownMachineClientGetsNoTunnel`, `TestVerifyAccessTokenRejectsAlgorithmConfusion`)
   carry over.
 
 ## Migration from the merged machine-client code
 
 - `MACHINE_CLIENTS` and `Deps.MachineClients` are removed; the mapping moves to the `machines` table.
-- `tunnel login --machine CLIENT_ID` becomes the credential the bootstrap mints; existing behaviour
-  (client-credentials, `TUNNELS_CLIENT_SECRET`) is otherwise unchanged.
+- `tunnel login --machine` is replaced by the key-based credential the bootstrap installs (a machine
+  that still holds a client secret is migrated by registering a key and dropping the secret).
 - No production machine clients exist yet (v0.3.0 is unreleased), so there is nothing to migrate.
 
 ## Deferred
@@ -258,6 +271,11 @@ fixed **in the same change that enables it**, not after.
 - The `machines` schema and whether `client_id` is the primary key or a separate column.
 - The shape of cross-namespace handle uniqueness (a shared claim table, machine rows in `users`, or a
   spanning unique index) — the property is fixed (Decision 11), the mechanism is not.
+- The key storage backends and their fallback order (Secure Enclave / TPM 2.0 / PKCS#11 / a 0600 key
+  file), the key type and curve, and the migration path when a backend appears later.
+- The assertion's `iss` / `aud` / `sub`, lifetime and clock skew, and the signing library (reuse the
+  module graph).
+- Whether the CLI or the broker performs the federated-credential registration call.
 - The Pocket ID admin client's error handling when minting fails mid-bootstrap (rollback).
 - The `Ping` path for a machine: re-check the row by the bound handle, or re-resolve the token.
 - Whether a machine counts toward `MAX_TUNNELS_PER_USER` and the bandwidth limit (it should).
