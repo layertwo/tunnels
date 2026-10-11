@@ -59,8 +59,9 @@ func run() error {
 	frps := frpsapi.New(cfg.FrpsDashboardURL, cfg.FrpsDashboardUser, cfg.FrpsDashboardPassword, userAgent)
 
 	srv := &http.Server{
-		Addr:              cfg.ListenAddr,
-		Handler:           broker.NewHandler(cfg, broker.Deps{IdP: provider, Verifier: provider, Users: users, Shares: users, Frps: frps, Log: log}),
+		Addr: cfg.ListenAddr,
+		Handler: broker.NewHandler(cfg, broker.Deps{IdP: provider, Verifier: provider, Users: users, Shares: users, Frps: frps, Log: log,
+			MachineClients: cfg.MachineClients}),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second, // a plugin body or a bearer token is small
 		WriteTimeout:      30 * time.Second, // longer than the 8 s a decision may take
