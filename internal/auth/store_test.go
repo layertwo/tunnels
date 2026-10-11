@@ -92,11 +92,11 @@ func TestStoreFiles(t *testing.T) {
 	}
 }
 
-// A machine login has no refresh token: its client id and secret are what lets it ask for a new
-// access token, so they round-trip through the same 0600 files.
-func TestSaveLoadClientCredentials(t *testing.T) {
+// A machine login has no refresh token: its client id and the path to its private key are what let
+// it ask for a new access token, so they round-trip through the same 0600 files.
+func TestSaveLoadMachineLogin(t *testing.T) {
 	s := Store{Dir: t.TempDir()}
-	want := Tokens{AccessToken: "at", ClientID: "machine-1", ClientSecret: "s3cret", Handle: "bot", Server: "https://tunnels.example"}
+	want := Tokens{AccessToken: "at", ClientID: "machine-1", MachineKey: "/home/bot/machine-key.json", Handle: "bot", Server: "https://tunnels.example"}
 	if err := s.Save(want); err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestSaveLoadClientCredentials(t *testing.T) {
 		t.Errorf("Load = %+v, %v, want %+v", got, err, want)
 	}
 	raw, _ := os.ReadFile(filepath.Join(s.Dir, "tokens.json"))
-	for _, field := range []string{`"client_id":"machine-1"`, `"client_secret":"s3cret"`} {
+	for _, field := range []string{`"client_id":"machine-1"`, `"machine_key":"/home/bot/machine-key.json"`} {
 		if !strings.Contains(string(raw), field) {
 			t.Errorf("tokens.json = %s, want it to hold %s", raw, field)
 		}

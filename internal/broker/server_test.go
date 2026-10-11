@@ -25,6 +25,7 @@ func testConfig(issuer string) Config {
 		Issuer: issuer, APIResource: mockidp.APIResource, CreatorsGroup: creators,
 		UsernameClaim: "preferred_username", GroupsClaim: "groups",
 		CLIClientID: "tunnels-cli", MinCLIVersion: "0.2.0",
+		PocketIDURL: "https://idp.example.com", PocketIDAPIKey: "pocket-key", PocketIDAPIID: "api-1",
 		PluginSecret: pluginSecret, MaxTunnelsPerUser: 5, BandwidthLimit: "10MB",
 		Reserved: []string{"admin"},
 	}
@@ -32,14 +33,16 @@ func testConfig(issuer string) Config {
 
 // serverRig is the whole handler over a real idp.Client talking to the mock identity provider.
 type serverRig struct {
-	h      http.Handler
-	idp    *mockidp.Server
-	client *idp.Client
-	users  *fakeUsers
-	shares *fakeShares
-	frps   *fakeFrps
-	cfg    Config
-	logs   *bytes.Buffer
+	h        http.Handler
+	idp      *mockidp.Server
+	client   *idp.Client
+	users    *fakeUsers
+	machines *fakeMachines
+	pocket   *fakePocketID
+	shares   *fakeShares
+	frps     *fakeFrps
+	cfg      Config
+	logs     *bytes.Buffer
 }
 
 func newServerRig(t *testing.T) *serverRig {
@@ -51,9 +54,9 @@ func newServerRig(t *testing.T) *serverRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &serverRig{idp: m, client: client, users: newUsers(), shares: &fakeShares{}, frps: &fakeFrps{online: map[string]string{}}, cfg: testConfig(m.URL), logs: &bytes.Buffer{}}
+	r := &serverRig{idp: m, client: client, users: newUsers(), machines: newMachines(), pocket: &fakePocketID{clientID: "client-123"}, shares: &fakeShares{}, frps: &fakeFrps{online: map[string]string{}}, cfg: testConfig(m.URL), logs: &bytes.Buffer{}}
 	r.h = NewHandler(r.cfg, Deps{
-		IdP: client, Verifier: client, Users: r.users, Shares: r.shares, Frps: r.frps,
+		IdP: client, Verifier: client, Users: r.users, Machines: r.machines, PocketID: r.pocket, Shares: r.shares, Frps: r.frps,
 		Log: slog.New(slog.NewJSONHandler(r.logs, nil)),
 	})
 	return r
@@ -191,21 +194,16 @@ func TestAPIMeKeepsTheStoredHandle(t *testing.T) {
 	}
 }
 
-// NewHandler takes the machine-client map from the Configuration, not from Deps: there is exactly
-// one place to set it, so a handler built from cfg alone still resolves a machine client.
-func TestNewHandlerMachineClientsComeFromConfig(t *testing.T) {
+// A machine comes from the store the handler was given: /api/me resolves a client_credentials subject
+// to its machine's own handle, never to a person's.
+func TestNewHandlerResolvesAMachineFromTheStore(t *testing.T) {
 	r := newServerRig(t)
-	r.users.users["sub-alice"] = store.User{Sub: "sub-alice", Handle: "alice"}
-	cfg := r.cfg
-	cfg.MachineClients = map[string]string{"abc": "alice"}
-	h := NewHandler(cfg, Deps{IdP: r.client, Verifier: r.client, Users: r.users, Shares: r.shares, Frps: r.frps, Log: slog.New(slog.DiscardHandler)})
+	r.machines.machines["abc"] = store.Machine{Handle: "nas", ClientID: "abc"}
+	token := r.idp.Issue("client-abc", mockidp.IssueOpts{}) // a client_credentials subject
 
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/me", nil)
-	req.Header = bearer(r.idp.Issue("client-abc", mockidp.IssueOpts{})) // a client_credentials subject
-	h.ServeHTTP(w, req)
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `"handle":"alice"`) {
-		t.Errorf("= %d %q, want 200 with the configured handle", w.Code, w.Body)
+	w := r.do("GET", "/api/me", bearer(token), "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"handle":"nas"`) {
+		t.Errorf("= %d %q, want 200 with the machine's own handle", w.Code, w.Body)
 	}
 }
 
@@ -339,14 +337,14 @@ func postLogin(t *testing.T, r *serverRig, token string) reply {
 func TestSharesGet(t *testing.T) {
 	r := newServerRig(t)
 	r.shares.rows = []store.Share{
-		{Tunnel: "", Kind: "user", Grantee: "bob"},
-		{Tunnel: "blog", Kind: "group", Grantee: "family"},
+		{Handle: "alice", Tunnel: "", Kind: "user", Grantee: "bob"},
+		{Handle: "nas", Tunnel: "blog", Kind: "group", Grantee: "family"},
 	}
 	w := r.do("GET", "/api/shares", bearer(r.idp.Issue("sub-alice", mockidp.IssueOpts{})), "")
 	if w.Code != 200 {
 		t.Fatalf("= %d %q, want 200", w.Code, w.Body)
 	}
-	want := `{"shares":[{"tunnel":"","kind":"user","grantee":"bob"},{"tunnel":"blog","kind":"group","grantee":"family"}]}`
+	want := `{"shares":[{"handle":"alice","tunnel":"","kind":"user","grantee":"bob"},{"handle":"nas","tunnel":"blog","kind":"group","grantee":"family"}]}`
 	if strings.TrimSpace(w.Body.String()) != want {
 		t.Errorf("= %s, want %s", w.Body, want)
 	}
@@ -366,7 +364,9 @@ func TestSharesPutValidates(t *testing.T) {
 		{"empty grantee", `{"tunnel":"blog","kind":"user","grantee":""}`, 400},
 		{"group grantee with a comma", `{"tunnel":"blog","kind":"group","grantee":"a,b"}`, 400},
 		{"expires_at not a time", `{"tunnel":"blog","kind":"user","grantee":"bob","expires_at":"soon"}`, 400},
+		{"handle with a dash", `{"handle":"al-ice","tunnel":"blog","kind":"user","grantee":"bob"}`, 400},
 		{"good", `{"tunnel":"blog","kind":"user","grantee":"bob"}`, 204},
+		{"good with an explicit handle", `{"handle":"alice","tunnel":"blog","kind":"user","grantee":"bob"}`, 204},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -376,7 +376,7 @@ func TestSharesPutValidates(t *testing.T) {
 				t.Errorf("= %d %q, want %d", w.Code, w.Body, tt.code)
 			}
 			if tt.code == 204 {
-				want := []shareWrite{{"sub-alice", store.Share{Tunnel: "blog", Kind: "user", Grantee: "bob"}}}
+				want := []shareWrite{{"sub-alice", store.Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob"}}}
 				if !reflect.DeepEqual(r.shares.puts, want) {
 					t.Errorf("recorded %+v, want %+v", r.shares.puts, want)
 				}
@@ -386,6 +386,21 @@ func TestSharesPutValidates(t *testing.T) {
 				t.Errorf("the store was called for bad input: %+v", r.shares.puts)
 			}
 		})
+	}
+}
+
+// A pre-machines CLI sends only the tunnel. Every such share was the caller's own site, so a missing
+// handle defaults to the caller's: the stored share is keyed by (owner_sub, caller's handle, tunnel),
+// which is exactly what ShareMatches looks up.
+func TestSharesPutDefaultsHandleToCaller(t *testing.T) {
+	r := newServerRig(t)
+	w := r.do("PUT", "/api/shares", bearer(r.idp.Issue("sub-alice", mockidp.IssueOpts{})), `{"tunnel":"blog","kind":"user","grantee":"bob"}`)
+	if w.Code != 204 {
+		t.Fatalf("= %d %q, want 204", w.Code, w.Body)
+	}
+	want := []shareWrite{{"sub-alice", store.Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob"}}}
+	if !reflect.DeepEqual(r.shares.puts, want) {
+		t.Errorf("recorded %+v, want the caller's handle %+v", r.shares.puts, want)
 	}
 }
 
@@ -435,7 +450,7 @@ func TestSharesDelete(t *testing.T) {
 	if w.Code != 204 {
 		t.Fatalf("= %d %q, want 204", w.Code, w.Body)
 	}
-	want := []shareWrite{{"sub-alice", store.Share{Tunnel: "blog", Kind: "group", Grantee: "family"}}}
+	want := []shareWrite{{"sub-alice", store.Share{Handle: "alice", Tunnel: "blog", Kind: "group", Grantee: "family"}}}
 	if !reflect.DeepEqual(r.shares.deletes, want) {
 		t.Errorf("recorded %+v, want %+v", r.shares.deletes, want)
 	}
@@ -449,7 +464,7 @@ func TestSharesDeleteIgnoresExpiry(t *testing.T) {
 	if w.Code != 204 {
 		t.Fatalf("= %d %q, want 204 for a delete with a past expires_at", w.Code, w.Body)
 	}
-	want := []shareWrite{{"sub-alice", store.Share{Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)}}}
+	want := []shareWrite{{"sub-alice", store.Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)}}}
 	if !reflect.DeepEqual(r.shares.deletes, want) {
 		t.Errorf("recorded %+v, want %+v", r.shares.deletes, want)
 	}

@@ -226,8 +226,9 @@ func (h *Hooks) ping(ctx context.Context, raw json.RawMessage) (plugin.Response,
 // a work connection to a control connection by run ID alone; this binds it to the control's user too,
 // so a creator who learned another's run ID cannot queue visitors into that session.
 //
-// As with ping, only a mismatch is refused. A token this broker cannot verify, or a store that is
-// down, is left to frps, which re-verifies the work connection's token itself before it acts.
+// Only a mismatch, or a refusal this broker can make definitively (a disabled or deleted machine), is
+// rejected. A token this broker cannot verify, or a store that is down, is left to frps, which
+// re-verifies the work connection's token itself before it acts.
 func (h *Hooks) newWorkConn(ctx context.Context, raw json.RawMessage) (plugin.Response, error) {
 	var c plugin.NewWorkConnContent
 	if err := json.Unmarshal(raw, &c); err != nil {
@@ -241,12 +242,17 @@ func (h *Hooks) newWorkConn(ctx context.Context, raw json.RawMessage) (plugin.Re
 		h.Log.DebugContext(ctx, "new work conn: could not verify the session, allowed", "err", err)
 		return plugin.Response{Unchange: true}, nil
 	}
-	u, err := h.Resolver.Users.UserBySub(ctx, sub)
+	acct, err := h.Resolver.AccountBySubject(ctx, sub)
 	if err != nil {
+		// A refusal is final: a machine disabled or deleted after login keeps frps's subject until the
+		// next Ping, so a still-valid token must not fall open onto another control (invariant 2).
+		if _, ok := refusalOf(err); ok {
+			return h.reject(ctx, plugin.OpNewWorkConn, "token does not belong to this session", nil), nil
+		}
 		h.Log.DebugContext(ctx, "new work conn: could not look up the account, allowed", "err", err)
 		return plugin.Response{Unchange: true}, nil
 	}
-	if u.Handle != c.User.User {
+	if acct.Handle != c.User.User {
 		return h.reject(ctx, plugin.OpNewWorkConn, "token does not belong to this session", nil), nil
 	}
 	return plugin.Response{Unchange: true}, nil

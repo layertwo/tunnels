@@ -162,10 +162,12 @@ revocation endpoint (its discovery document lists none), so a copied refresh tok
 until it expires: ending a session for certain is done in Pocket ID (remove the person from
 `tunnels-creators`, or disable the account), as above.
 
-A machine client is the exception. Its token has no groups, so the broker skips the creators-group
-check and only tests whether the account it publishes as is disabled. Revoke a machine client by
-removing its `MACHINE_CLIENTS` entry or disabling that account; removing the person from
-`tunnels-creators` does not stop it.
+A machine is not a person with an exception: it is a **broker-owned principal** with its own handle,
+owner and Pocket ID client, authenticated with a **key pair** rather than a secret. Its identity and
+authorization are the broker's rows, and its subject never resolves through `users`. The machine
+design in [`docs/plans/2026-10-11-tunnels-machines-design.md`](plans/2026-10-11-tunnels-machines-design.md)
+replaces the earlier `MACHINE_CLIENTS` map; revocation is disabling or removing the machine's row,
+which the Ping hook enforces on the next heartbeat.
 
 ### The control channel must verify the server certificate
 
@@ -339,7 +341,7 @@ linux/arm64), signed with cosign.
 |------|--------|---------|
 | `/plugin/<secret>` | frps only | Login, NewProxy, CloseProxy, Ping, NewWorkConn hooks |
 | `/authz` | Traefik `forwardAuth` | allow or deny one visitor request |
-| `/api/me`; `/api/shares` in phase 2 | CLI, bearer token | ensure user, manage shares |
+| `/api/me`; `/api/machines`; `/api/shares` in phase 2 | CLI, bearer token | ensure user, manage machines and shares |
 | `/.well-known/tunnels.json` | anyone | bootstrap: issuer, CLI client id, API resource, service host, sites domain, minimum CLI version |
 | `GET /metrics` | Prometheus | request, in-flight and `/authz` lookup metrics; bounded, secret-free labels |
 | `/install.sh` (later), `/healthz` | anyone | installer, probe |
@@ -352,9 +354,8 @@ invalid tokens fail here and frps then verifies signature, audience and expiry. 
 disabled or unsuitable. If the Login carries a run ID, ask frps whether that run ID is online
 under a different user and reject if so. Return the content with `user` set to the handle. The hook never modifies `privilege_key`: frps
 verifies that same token right after, which is what makes any claim the broker reads from it
-safe. (A machine token is recognised by its `client-` subject, skips userinfo, and its client id
-maps through `MACHINE_CLIENTS` to a handle whose account must already exist: implemented; enabling
-it is the Pocket ID machine client and that setting.)
+safe. (A machine token is recognised by its `client-` subject, skips userinfo, and resolves through the
+`machines` table to its own handle: implemented — see the [machines design](plans/2026-10-11-tunnels-machines-design.md).)
 
 **NewProxy hook.** The type must be http with no custom domains or locations. `proxy_name` must
 be `<handle>.<n>` and `subdomain` must be `<handle>` (n = `default`) or `<handle>-<n>` (n a valid
@@ -370,22 +371,37 @@ sees. A group name containing a comma is unsupported (groups travel comma-separa
 
 **API.** Bearer access token verified locally against Pocket ID's JWKS (issuer, audience,
 expiry). `GET /api/me` repeats the Login hook's userinfo and handle logic, so the CLI learns its
-handle at `tunnel login`. `GET`, `PUT` and `DELETE /api/shares` take `{tunnel, kind, grantee}`;
+handle at `tunnel login`; a machine's token is accepted there and reports the machine's handle. The
+principal-aware endpoints refuse a machine subject: `GET /api/machines`, `POST /api/machines` and
+`DELETE /api/machines/{handle}` are the owner's (the broker mints the machine's Pocket ID client and
+registers its public key; see the [machines design](plans/2026-10-11-tunnels-machines-design.md)),
+and `GET`, `PUT` and `DELETE /api/shares` take `{handle, tunnel, kind, grantee}`;
 PUT also takes an optional absolute RFC3339 `expires_at`, which must be in the future or the
-request is a 400. PUT and DELETE are idempotent.
+request is a 400. PUT and DELETE are idempotent. The apex IngressRoute routes `/api/machines` beside
+`/api/me`.
 
 **Data model.**
 
 ```sql
 users  (sub text primary key, handle text unique not null, disabled bool not null default false,
         created_at timestamptz not null default now())
+machines (id uuid primary key default gen_random_uuid(),
+        handle text unique not null, owner_kind text not null, owner_ref text not null,
+        client_id text unique not null, disabled bool not null default false,
+        created_at timestamptz not null default now(), created_by text not null)
 shares (owner_sub text references users(sub) on delete cascade,
+        handle text not null,                                  -- the site's handle
         tunnel text not null default '',                       -- '' = default tunnel
         kind text check (kind in ('user','group')), grantee text not null,
         created_at timestamptz not null default now(),
         expires_at timestamptz,                                -- null = never
-        primary key (owner_sub, tunnel, kind, grantee))
+        primary key (owner_sub, handle, tunnel, kind, grantee))
 ```
+
+A share is keyed by the **site** (owner sub + the site's handle + tunnel), not the tunnel name alone,
+so a share on one of an owner's sites never admits another; the migration (005) backfills every
+existing share's handle from its owner's `users.handle`. A machine's site is owned by the machine's
+`owner_ref` (a user), not by the machine's own handle.
 
 Sharing with the group `tunnels-viewers` means every viewer.
 
@@ -393,7 +409,8 @@ Sharing with the group `tunnels-viewers` means every viewer.
 `CREATORS_GROUP`, `DATABASE_URL`, `FRPS_DASHBOARD_URL`, `FRPS_DASHBOARD_USER`,
 `FRPS_DASHBOARD_PASSWORD`, `PLUGIN_SECRET`, `MAX_TUNNELS_PER_USER` (5),
 `DEFAULT_BANDWIDTH_LIMIT` (10MB per second, frp's format), `RESERVED_HANDLES`,
-`MACHINE_CLIENTS` (optional, `client_id=handle` pairs), `LOG_LEVEL`. Logs are structured JSON for
+`POCKET_ID_URL`, `POCKET_ID_API_KEY` (the Pocket ID admin API the broker mints a machine's client
+with), `POCKET_ID_API_ID` (the Tunnels API id the minted client is granted access to), `LOG_LEVEL`. Logs are structured JSON for
 logins, proxy registrations, denials and share changes, and never contain tokens. Outbound
 requests carry an explicit User-Agent. `DATABASE_URL` comes from the CNPG-generated secret
 `cnpg-tunnels-app` (key `uri`); the rest come from `secrets-broker.sops.yml` and the
@@ -406,20 +423,22 @@ at build time (`-ldflags`), so users type no URL.
 
 ```
 tunnel login                       device flow against Pocket ID; tokens stored 0600
-tunnel login --machine CLIENT_ID   client_credentials; secret from TUNNELS_CLIENT_SECRET
 tunnel up 3000 [--name blog]       prints https://alice-blog.w.tunnels.layertwo.dev and stays up
-tunnel share --name blog bob       --group family shares with a Pocket ID group
-tunnel unshare --name blog bob
+tunnel share <label> <grantee>     --group shares with a Pocket ID group instead
+tunnel unshare <label> <grantee>
 tunnel list                        your shares
+tunnel machine create NAME         generate a key here, register the machine (run on the machine)
+tunnel machine list                your machines
+tunnel machine remove NAME         revoke a machine
 tunnel logout
 tunnel version
 ```
 
 - **login:** reads `/.well-known/tunnels.json`, runs the device flow with the public client
   `tunnels-cli` (scopes `openid profile groups offline_access`, `resource` = the API), then
-  calls `/api/me` for the handle. `--machine CLIENT_ID` instead runs the client-credentials grant
-  with the secret from `TUNNELS_CLIENT_SECRET`; the stored token has no refresh token, so the
-  refresh path re-runs client credentials with the stored client id and secret.
+  calls `/api/me` for the handle. A machine holds a key pair instead: `machine create` writes the
+  private key to `machine-key.json` (0600), and `up` signs a short-lived assertion with it and
+  exchanges that at the token endpoint (no secret, no refresh token); `KeepFresh` re-signs.
 - **up:** builds the frp client config in memory and loads it in strict mode, as frpc does: wss
   to `tunnels.layertwo.dev:443`, `user = <handle>`, `auth.method = "oidc"` with a file token
   source, `auth.additionalScopes = ["HeartBeats", "NewWorkConns"]`, `transport.heartbeatInterval = 30`,
@@ -449,12 +468,11 @@ Manual in the UI, as the rest of the repo does today.
 - **Client `tunnels-gate`:** confidential, authorization code with PKCE, allowed groups
   `tunnels-viewers` and `tunnels-creators`, callback `https://*.w.tunnels.layertwo.dev/oidc/callback`.
   Used only by the Traefik plugin. Its id and secret go into `secrets-oidc.sops.yml`.
-- **Machine clients** (headless servers): confidential, client access to the API; the broker maps
-  the client id to a handle through `MACHINE_CLIENTS`, and that handle must already have logged in
-  (implemented; creating the client and setting `MACHINE_CLIENTS` is the homelab step). A machine
-  token has no groups, so the creators-group check does not apply to it: revoke a machine client by
-  removing its `MACHINE_CLIENTS` entry or disabling the account it publishes as. Removing the person
-  from `tunnels-creators` does not stop it.
+- **Machine clients** (headless servers): the broker mints one per machine, at `machine create`, and
+  registers the machine's public key as a federated client credential; the client id is the machine's
+  subject (`client-<id>`). There is no shared `MACHINE_CLIENTS` map and no secret — see the
+  [machines design](plans/2026-10-11-tunnels-machines-design.md). The broker's one new admin-grade
+  grant is the Pocket ID API key that lets it create clients; rotate it.
 
 ## Networking and TLS
 
@@ -586,7 +604,7 @@ All of them fail closed.
 
 ## Phasing
 
-- **Phase 0 (optional, no custom code):** a machine client, stock `frpc`, and the existing OIDC
+- **Phase 0 (optional, no custom code):** a machine publishing with stock `frpc`, and the existing OIDC
   plugin as a global gate. It proves the cluster-side unknowns in Verification before any Go.
   Names are trust-based at this stage.
 - **Phase 1:** the plugin hooks, owner-only `/authz`, `tunnel login` and `tunnel up`, releases.
@@ -597,8 +615,9 @@ All of them fail closed.
   shares admit no one. User shares work today.
 - **Phase 3:** hardening: heartbeat revocation proven end to end, the Ping-hook kill switch
   (implemented and enabled — `"Ping"` in `ops` since v0.2.0), tuned limits, Gatus, docs, broker
-  metrics and machine clients (both implemented; enabling machine clients is the Pocket ID client
-  plus `MACHINE_CLIENTS`, and metrics a scrape plus NetworkPolicy).
+  metrics and machines (both implemented; machines are broker-owned principals with their own key
+  and row, see the [machines design](plans/2026-10-11-tunnels-machines-design.md), and metrics a
+  scrape plus NetworkPolicy).
 - **Later:** SSH, a web UI, live tunnel status, frps HA by client fan-out.
 
 ## Verification
@@ -746,4 +765,4 @@ Also checked without a cluster: the production frps ConfigMap under the producti
   - `/authz` trusts `X-Forwarded-Host`, `X-Tunnels-Sub` and `X-Tunnels-User` completely. The forwardAuth middleware must list `X-Tunnels-Sub` and `X-Tunnels-User` in `authResponseHeaders` (Traefik then deletes any copy the visitor sent before it copies the gate's), must leave `trustForwardHeader` at `false` (with `true` a creator could send `Host: alice.<sites>` with `X-Forwarded-Host: bob.<sites>`, be authorised against their own label and be served alice's site), and `/authz` must be reachable by Traefik only. Leaving `authRequestHeaders` unset is fine; listing only the two identity headers also works, because Traefik sets `X-Forwarded-Host` afterwards.
   - Rate limit `/api/` and the frps route in Traefik. Every Login reaches the broker before frps checks anything, and a token with a key id nobody has seen makes the broker fetch the provider's key set (go-oidc has no limit on that).
   - Cap the proxy count in frps as well if the broker's limit must hold: the dashboard lags the plugin's answer, so many clients started at once can overshoot it.
-- Revocation: machine-client access tokens last one hour; the CLI renews them with client credentials while the client secret is valid, so deleting the client ends its tunnel within an hour plus one ping (about 30 s); the broker's Ping hook (and the disabled-account check) is what makes it immediate.
+- Revocation: a machine's access token lasts one hour; the CLI re-signs an assertion with the machine's key and exchanges it for a fresh token while the machine's row is enabled, so disabling or removing the row ends its tunnel within one heartbeat (the Ping hook rejects) and the token expires within the hour regardless.

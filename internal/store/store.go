@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -23,8 +22,22 @@ type User struct {
 	Disabled bool
 }
 
-// Share grants one user or group access to one tunnel. The empty Tunnel is the default tunnel.
+// Machine is a broker-owned principal with a handle of its own, owned by a user (later a group).
+type Machine struct {
+	ID        string
+	Handle    string
+	OwnerKind string
+	OwnerRef  string
+	ClientID  string
+	Disabled  bool
+	CreatedAt time.Time
+	CreatedBy string
+}
+
+// Share grants one user or group access to one site: the owner's handle and tunnel together. The empty
+// Tunnel is the handle's default site.
 type Share struct {
+	Handle    string    `json:"handle"` // the site's handle: the owner for a person's own site, the machine for a machine's
 	Tunnel    string    `json:"tunnel"` // "" is the default tunnel
 	Kind      string    `json:"kind"`   // "user" or "group"
 	Grantee   string    `json:"grantee"`
@@ -37,9 +50,6 @@ var (
 	// ErrHandleTaken means another sub owns the handle.
 	ErrHandleTaken = errors.New("store: handle is taken")
 )
-
-// uniqueViolation is the SQLSTATE of a duplicate key.
-const uniqueViolation = "23505"
 
 // migrationLock is the advisory lock key ("tunnels" in ASCII) that makes concurrent Opens take turns.
 const migrationLock int64 = 0x74756e6e656c73
@@ -185,8 +195,13 @@ func (s *Store) UserByHandle(ctx context.Context, handle string) (User, error) {
 }
 
 func (s *Store) queryUser(ctx context.Context, query, arg string) (User, error) {
+	return scanUser(s.pool.QueryRow(ctx, query, arg))
+}
+
+// scanUser reads one user row, turning no rows into ErrNotFound.
+func scanUser(row pgx.Row) (User, error) {
 	var u User
-	err := s.pool.QueryRow(ctx, query, arg).Scan(&u.Sub, &u.Handle, &u.Disabled)
+	err := row.Scan(&u.Sub, &u.Handle, &u.Disabled)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, ErrNotFound
 	}
@@ -197,36 +212,140 @@ func (s *Store) queryUser(ctx context.Context, query, arg string) (User, error) 
 }
 
 // CreateUser adds the user, or returns the row this sub already has (its handle stays as it was).
-// It returns ErrHandleTaken when another sub owns the handle.
+// It returns ErrHandleTaken when a user or a machine already owns the handle.
 func (s *Store) CreateUser(ctx context.Context, sub, handle string) (User, error) {
-	_, err := s.pool.Exec(ctx, "insert into users (sub, handle) values ($1, $2) on conflict (sub) do nothing", sub, handle)
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
-		// Only the handle index can raise this, but it also fires when a concurrent insert of this very
-		// sub committed between the sub check and the handle check. That insert is not a conflict, so
-		// the row for the sub decides.
-		u, err := s.UserBySub(ctx, sub)
-		if errors.Is(err, ErrNotFound) {
-			err = ErrHandleTaken
+	var u User
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if err := claimHandle(ctx, tx, handle); err != nil {
+			// A repeat login for a sub that already has a row keeps that row, whatever its handle.
+			if errors.Is(err, ErrHandleTaken) {
+				if existing, uerr := scanUser(tx.QueryRow(ctx, userBySub, sub)); uerr == nil {
+					u = existing
+					return nil
+				}
+			}
+			return err
 		}
-		return u, err
-	}
-	if err != nil {
-		return User{}, fmt.Errorf("store: create user: %w", err)
-	}
-	return s.UserBySub(ctx, sub)
+		if _, err := tx.Exec(ctx, "insert into users (sub, handle) values ($1, $2) on conflict (sub) do nothing", sub, handle); err != nil {
+			return fmt.Errorf("store: create user: %w", err)
+		}
+		existing, err := scanUser(tx.QueryRow(ctx, userBySub, sub))
+		u = existing
+		return err
+	})
+	return u, err
 }
 
 const (
-	shareInsert = "insert into shares (owner_sub, tunnel, kind, grantee, expires_at) values ($1, $2, $3, $4, $5) on conflict (owner_sub, tunnel, kind, grantee) do update set expires_at = excluded.expires_at"
-	shareDelete = "delete from shares where owner_sub = $1 and tunnel = $2 and kind = $3 and grantee = $4"
-	shareList   = "select tunnel, kind, grantee, expires_at from shares where owner_sub = $1 order by tunnel, kind, grantee"
+	handleInUse = `select exists (select 1 from users where handle = $1)
+    or exists (select 1 from machines where handle = $1)`
+	machineInsert = `insert into machines (handle, owner_kind, owner_ref, client_id, created_by)
+    values ($1, $2, $3, $4, $5)`
+	machineCols = "id, handle, owner_kind, owner_ref, client_id, disabled, created_at, created_by"
+)
+
+// claimHandle takes the per-handle advisory lock, then refuses the handle when a user or a machine
+// already owns it. The lock is transaction-scoped, so a user's first login and a machine's create
+// running at the same time take turns and cannot both claim one handle.
+func claimHandle(ctx context.Context, tx pgx.Tx, handle string) error {
+	if _, err := tx.Exec(ctx, "select pg_advisory_xact_lock(hashtext($1))", handle); err != nil {
+		return fmt.Errorf("store: lock handle: %w", err)
+	}
+	var taken bool
+	if err := tx.QueryRow(ctx, handleInUse, handle).Scan(&taken); err != nil {
+		return fmt.Errorf("store: check handle: %w", err)
+	}
+	if taken {
+		return ErrHandleTaken
+	}
+	return nil
+}
+
+// CreateMachine adds a machine row. The database fills in id and created_at. It returns
+// ErrHandleTaken when a user or another machine already owns the handle.
+func (s *Store) CreateMachine(ctx context.Context, m Machine) error {
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if err := claimHandle(ctx, tx, m.Handle); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, machineInsert, m.Handle, m.OwnerKind, m.OwnerRef, m.ClientID, m.CreatedBy); err != nil {
+			return fmt.Errorf("store: create machine: %w", err)
+		}
+		return nil
+	})
+}
+
+// MachineByHandle returns the machine with this handle, or ErrNotFound.
+func (s *Store) MachineByHandle(ctx context.Context, handle string) (Machine, error) {
+	return scanMachine(s.pool.QueryRow(ctx, "select "+machineCols+" from machines where handle = $1", handle))
+}
+
+// MachineByClientID returns the machine with this Pocket ID client id, or ErrNotFound.
+func (s *Store) MachineByClientID(ctx context.Context, clientID string) (Machine, error) {
+	return scanMachine(s.pool.QueryRow(ctx, "select "+machineCols+" from machines where client_id = $1", clientID))
+}
+
+// scanMachine reads one machine row, turning no rows into ErrNotFound.
+func scanMachine(row pgx.Row) (Machine, error) {
+	var m Machine
+	err := row.Scan(&m.ID, &m.Handle, &m.OwnerKind, &m.OwnerRef, &m.ClientID, &m.Disabled, &m.CreatedAt, &m.CreatedBy)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Machine{}, ErrNotFound
+	}
+	if err != nil {
+		return Machine{}, fmt.Errorf("store: query machine: %w", err)
+	}
+	return m, nil
+}
+
+// MachinesByOwner returns the owner's machines, ordered by handle.
+func (s *Store) MachinesByOwner(ctx context.Context, ownerRef string) ([]Machine, error) {
+	rows, err := s.pool.Query(ctx, "select "+machineCols+" from machines where owner_ref = $1 order by handle", ownerRef)
+	if err != nil {
+		return nil, fmt.Errorf("store: list machines: %w", err)
+	}
+	defer rows.Close()
+
+	machines := []Machine{}
+	for rows.Next() {
+		m, err := scanMachine(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: list machines: %w", err)
+		}
+		machines = append(machines, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list machines: %w", err)
+	}
+	return machines, nil
+}
+
+// SetMachineDisabled flips a machine's disabled flag. Updating a machine that is not there does nothing.
+func (s *Store) SetMachineDisabled(ctx context.Context, clientID string, disabled bool) error {
+	if _, err := s.pool.Exec(ctx, "update machines set disabled = $2 where client_id = $1", clientID, disabled); err != nil {
+		return fmt.Errorf("store: disable machine: %w", err)
+	}
+	return nil
+}
+
+// DeleteMachine removes the machine with this client id. Deleting a machine that is not there does nothing.
+func (s *Store) DeleteMachine(ctx context.Context, clientID string) error {
+	if _, err := s.pool.Exec(ctx, "delete from machines where client_id = $1", clientID); err != nil {
+		return fmt.Errorf("store: delete machine: %w", err)
+	}
+	return nil
+}
+
+const (
+	shareInsert = "insert into shares (owner_sub, handle, tunnel, kind, grantee, expires_at) values ($1, $2, $3, $4, $5, $6) on conflict (owner_sub, handle, tunnel, kind, grantee) do update set expires_at = excluded.expires_at"
+	shareDelete = "delete from shares where owner_sub = $1 and handle = $2 and tunnel = $3 and kind = $4 and grantee = $5"
+	shareList   = "select handle, tunnel, kind, grantee, expires_at from shares where owner_sub = $1 order by handle, tunnel, kind, grantee"
 	shareMatch  = `select exists (
     select 1 from shares
-    where owner_sub = $1 and tunnel = $2
+    where owner_sub = $1 and handle = $2 and tunnel = $3
       and (expires_at is null or expires_at > now())
-      and ((kind = 'user' and lower(grantee) = lower($3))
-        or (kind = 'group' and grantee = any($4)))
+      and ((kind = 'user' and lower(grantee) = lower($4))
+        or (kind = 'group' and grantee = any($5)))
 )`
 )
 
@@ -236,7 +355,7 @@ func (s *Store) PutShare(ctx context.Context, ownerSub string, sh Share) error {
 	if !sh.ExpiresAt.IsZero() {
 		expires = &sh.ExpiresAt
 	}
-	if _, err := s.pool.Exec(ctx, shareInsert, ownerSub, sh.Tunnel, sh.Kind, sh.Grantee, expires); err != nil {
+	if _, err := s.pool.Exec(ctx, shareInsert, ownerSub, sh.Handle, sh.Tunnel, sh.Kind, sh.Grantee, expires); err != nil {
 		return fmt.Errorf("store: put share: %w", err)
 	}
 	return nil
@@ -244,13 +363,13 @@ func (s *Store) PutShare(ctx context.Context, ownerSub string, sh Share) error {
 
 // DeleteShare removes the share. Deleting a share that is not there does nothing.
 func (s *Store) DeleteShare(ctx context.Context, ownerSub string, sh Share) error {
-	if _, err := s.pool.Exec(ctx, shareDelete, ownerSub, sh.Tunnel, sh.Kind, sh.Grantee); err != nil {
+	if _, err := s.pool.Exec(ctx, shareDelete, ownerSub, sh.Handle, sh.Tunnel, sh.Kind, sh.Grantee); err != nil {
 		return fmt.Errorf("store: delete share: %w", err)
 	}
 	return nil
 }
 
-// SharesByOwner returns the owner's shares, ordered by tunnel, kind, grantee.
+// SharesByOwner returns the owner's shares, ordered by handle, tunnel, kind, grantee.
 func (s *Store) SharesByOwner(ctx context.Context, ownerSub string) ([]Share, error) {
 	rows, err := s.pool.Query(ctx, shareList, ownerSub)
 	if err != nil {
@@ -262,7 +381,7 @@ func (s *Store) SharesByOwner(ctx context.Context, ownerSub string) ([]Share, er
 	for rows.Next() {
 		var sh Share
 		var expires *time.Time
-		if err := rows.Scan(&sh.Tunnel, &sh.Kind, &sh.Grantee, &expires); err != nil {
+		if err := rows.Scan(&sh.Handle, &sh.Tunnel, &sh.Kind, &sh.Grantee, &expires); err != nil {
 			return nil, fmt.Errorf("store: list shares: %w", err)
 		}
 		if expires != nil {
@@ -276,11 +395,11 @@ func (s *Store) SharesByOwner(ctx context.Context, ownerSub string) ([]Share, er
 	return shares, nil
 }
 
-// ShareMatches reports whether the owner shared the tunnel with this username, case-insensitively, or
-// with one of these groups. A failed query is an error, never false.
-func (s *Store) ShareMatches(ctx context.Context, ownerSub, tunnel, username string, groups []string) (bool, error) {
+// ShareMatches reports whether the owner shared the site (handle + tunnel) with this username,
+// case-insensitively, or with one of these groups. A failed query is an error, never false.
+func (s *Store) ShareMatches(ctx context.Context, ownerSub, handle, tunnel, username string, groups []string) (bool, error) {
 	var ok bool
-	if err := s.pool.QueryRow(ctx, shareMatch, ownerSub, tunnel, username, groups).Scan(&ok); err != nil {
+	if err := s.pool.QueryRow(ctx, shareMatch, ownerSub, handle, tunnel, username, groups).Scan(&ok); err != nil {
 		return false, fmt.Errorf("store: match share: %w", err)
 	}
 	return ok, nil

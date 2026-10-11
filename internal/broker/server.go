@@ -21,6 +21,8 @@ type Deps struct {
 	IdP      IdP
 	Verifier TokenVerifier
 	Users    Users
+	Machines MachineStore
+	PocketID PocketID
 	Shares   Shares
 	Frps     Frps
 	Log      *slog.Logger
@@ -29,7 +31,7 @@ type Deps struct {
 // NewHandler serves everything the broker answers: the frps plugin, /authz for Traefik, the API the
 // CLI uses and the document that tells it where to log in.
 func NewHandler(cfg Config, d Deps) http.Handler {
-	resolver := Resolver{IdP: d.IdP, Verifier: d.Verifier, Users: d.Users, CreatorsGroup: cfg.CreatorsGroup, Reserved: cfg.Reserved, MachineClients: cfg.MachineClients}
+	resolver := Resolver{IdP: d.IdP, Verifier: d.Verifier, Users: d.Users, Machines: d.Machines, CreatorsGroup: cfg.CreatorsGroup, Reserved: cfg.Reserved}
 	s := &server{cfg: cfg, d: d, resolver: resolver}
 	m := NewMetrics()
 
@@ -39,8 +41,11 @@ func NewHandler(cfg Config, d Deps) http.Handler {
 		Resolver: resolver, Frps: d.Frps, Secret: cfg.PluginSecret,
 		MaxTunnelsPerUser: cfg.MaxTunnelsPerUser, BandwidthLimit: cfg.BandwidthLimit, Log: d.Log,
 	})
-	mux.Handle("/authz", Authz{Users: d.Users, Shares: d.Shares, SitesDomain: cfg.SitesDomain, Log: d.Log, Metrics: m})
+	mux.Handle("/authz", Authz{Users: d.Users, Machines: d.Machines, Shares: d.Shares, SitesDomain: cfg.SitesDomain, Log: d.Log, Metrics: m})
 	mux.HandleFunc("GET /api/me", s.me)
+	mux.HandleFunc("POST /api/machines", s.machinesCreate)
+	mux.HandleFunc("GET /api/machines", s.machinesList)
+	mux.HandleFunc("DELETE /api/machines/{handle}", s.machinesDelete)
 	mux.HandleFunc("GET /api/shares", s.sharesGet)
 	mux.HandleFunc("PUT /api/shares", s.sharesPut)
 	mux.HandleFunc("DELETE /api/shares", s.sharesDelete)
@@ -98,7 +103,7 @@ const noSharesStore = "sharing is unavailable, try again"
 
 // sharesGet lists the caller's own shares.
 func (s *server) sharesGet(w http.ResponseWriter, r *http.Request) {
-	acct, ok := s.account(w, r)
+	acct, ok := s.ownerOnly(w, r)
 	if !ok {
 		return
 	}
@@ -126,7 +131,7 @@ func (s *server) sharesPut(w http.ResponseWriter, r *http.Request)    { s.change
 func (s *server) sharesDelete(w http.ResponseWriter, r *http.Request) { s.changeShare(w, r, false) }
 
 func (s *server) changeShare(w http.ResponseWriter, r *http.Request, put bool) {
-	acct, ok := s.account(w, r)
+	acct, ok := s.ownerOnly(w, r)
 	if !ok {
 		return
 	}
@@ -137,7 +142,16 @@ func (s *server) changeShare(w http.ResponseWriter, r *http.Request, put bool) {
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody))
 	var sh store.Share
-	if err := dec.Decode(&sh); err != nil || !validShare(sh, put) {
+	if err := dec.Decode(&sh); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid share"))
+		return
+	}
+	// An older CLI sends only the tunnel: every share before machines was the caller's own site, so
+	// a missing handle defaults to the caller's.
+	if sh.Handle == "" {
+		sh.Handle = acct.Handle
+	}
+	if !validShare(sh, put) {
 		writeJSON(w, http.StatusBadRequest, errorBody("invalid share"))
 		return
 	}
@@ -166,6 +180,9 @@ func (s *server) changeShare(w http.ResponseWriter, r *http.Request, put bool) {
 // be in the future: a share that has already expired grants nothing. A DELETE ignores the end, so
 // that removing a grant always works.
 func validShare(sh store.Share, put bool) bool {
+	if !names.ValidHandle(sh.Handle) {
+		return false
+	}
 	if sh.Tunnel != "" && !names.ValidTunnelName(sh.Tunnel) {
 		return false
 	}

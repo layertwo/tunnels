@@ -52,28 +52,30 @@ func (f *fakeFrps) OnlineProxyCount(_ context.Context, user string) (int, error)
 
 // rig is a Hooks wired to fakes, with alice (sub-alice) already registered.
 type rig struct {
-	hooks *Hooks
-	idp   *fakeIdP
-	users *fakeUsers
-	frps  *fakeFrps
-	logs  *bytes.Buffer
+	hooks    *Hooks
+	idp      *fakeIdP
+	users    *fakeUsers
+	machines *fakeMachines
+	frps     *fakeFrps
+	logs     *bytes.Buffer
 }
 
 func newRig() *rig {
 	users := newUsers(store.User{Sub: "sub-alice", Handle: "alice"})
+	machines := newMachines()
 	i := &fakeIdP{id: identity("sub-alice", "Alice", creators)}
 	f := &fakeFrps{online: map[string]string{}}
 	logs := &bytes.Buffer{}
 	return &rig{
 		hooks: &Hooks{
-			Resolver:          Resolver{IdP: i, Verifier: &fakeVerifier{idp: i}, Users: users, CreatorsGroup: creators, Reserved: []string{"admin"}},
+			Resolver:          Resolver{IdP: i, Verifier: &fakeVerifier{idp: i}, Users: users, Machines: machines, CreatorsGroup: creators, Reserved: []string{"admin"}},
 			Frps:              f,
 			Secret:            pluginSecret,
 			MaxTunnelsPerUser: 5,
 			BandwidthLimit:    "10MB",
 			Log:               slog.New(slog.NewJSONHandler(logs, nil)),
 		},
-		idp: i, users: users, frps: f, logs: logs,
+		idp: i, users: users, machines: machines, frps: f, logs: logs,
 	}
 }
 
@@ -835,6 +837,43 @@ func TestNewWorkConnRejectsAnotherUser(t *testing.T) {
 	const want = "token does not belong to this session"
 	if !rep.Reject || rep.RejectReason != want {
 		t.Errorf("reply = %+v, want reject with %q", rep, want)
+	}
+}
+
+// The work-connection binding holds for machines too: a machine's client_credentials token resolves
+// to its own handle, and a work connection for another control's session is refused (invariant 2).
+func TestNewWorkConnBindsAMachineToItsOwnHandle(t *testing.T) {
+	r := newRig()
+	r.machines.machines["abc"] = store.Machine{Handle: "nas", ClientID: "abc"}
+	verifierOf(r.hooks.Resolver).sub = "client-abc"
+
+	// This machine's own control connection: the work connection may ride it.
+	if rep := r.call(t, plugin.OpNewWorkConn, workConnContent(secretToken, "nas")); rep.Reject {
+		t.Errorf("reply = %+v, want allowed for the machine's own control", rep)
+	}
+	// A control connection belonging to somebody else: refused.
+	const want = "token does not belong to this session"
+	if rep := r.call(t, plugin.OpNewWorkConn, workConnContent(secretToken, "alice")); !rep.Reject || rep.RejectReason != want {
+		t.Errorf("reply = %+v, want reject with %q", rep, want)
+	}
+
+	// A disabled machine is a definitive refusal: frps may still trust its token until the next Ping,
+	// so the work connection must not fall open onto another control (invariant 2).
+	r.machines.machines["abc"] = store.Machine{Handle: "nas", ClientID: "abc", Disabled: true}
+	if rep := r.call(t, plugin.OpNewWorkConn, workConnContent(secretToken, "alice")); !rep.Reject || rep.RejectReason != want {
+		t.Errorf("disabled machine: reply = %+v, want reject with %q", rep, want)
+	}
+
+	// A deleted machine's subject is unknown: a refusal too, not a fail-open.
+	delete(r.machines.machines, "abc")
+	if rep := r.call(t, plugin.OpNewWorkConn, workConnContent(secretToken, "alice")); !rep.Reject || rep.RejectReason != want {
+		t.Errorf("unknown machine: reply = %+v, want reject with %q", rep, want)
+	}
+
+	// A store that cannot answer is infrastructure, not a refusal: left to frps, as before.
+	r.machines.err = errors.New("dial tcp 10.0.0.5:5432: connect: connection refused")
+	if rep := r.call(t, plugin.OpNewWorkConn, workConnContent(secretToken, "alice")); rep.Reject {
+		t.Errorf("store down: reply = %+v, want allowed", rep)
 	}
 }
 

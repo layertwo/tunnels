@@ -14,7 +14,6 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/clientcredentials"
 )
 
 // maxBody bounds what is read from the service.
@@ -210,46 +209,65 @@ func (o OIDC) Refresh(ctx context.Context, refreshToken string) (Tokens, error) 
 	return Tokens{AccessToken: tok.AccessToken, RefreshToken: tok.RefreshToken}, nil
 }
 
-// ClientCredentials gets an access token for a machine client from the discovered token endpoint.
-// A machine login has no refresh token: it asks for a token like this again when it needs one. The
-// secret is only ever sent to the provider's token endpoint, never logged.
-func (o OIDC) ClientCredentials(ctx context.Context, clientID, clientSecret string) (Tokens, error) {
-	ctx, cfg, err := o.config(ctx)
+// ExchangeAssertion gets an access token for a machine by presenting a signed client assertion at the
+// token endpoint (client_credentials + client_assertion). The assertion is the credential; there is
+// no secret, and a machine login has no refresh token because it asks again like this instead.
+func (o OIDC) ExchangeAssertion(ctx context.Context, clientID, assertion string) (Tokens, error) {
+	_, cfg, err := o.config(ctx)
 	if err != nil {
 		return Tokens{}, err
 	}
-	// A confidential client: leave AuthStyle at its zero value so the library probes the token
-	// endpoint (client id and secret in the Authorization header first, then the body) instead of
-	// forcing one form.
-	cc := clientcredentials.Config{
-		ClientID:       clientID,
-		ClientSecret:   clientSecret,
-		TokenURL:       cfg.Endpoint.TokenURL,
-		EndpointParams: url.Values{"resource": {o.Resource}},
-	}
-	tok, err := cc.Token(ctx)
+	token, err := o.postToken(ctx, cfg.Endpoint.TokenURL, url.Values{
+		"grant_type":            {"client_credentials"},
+		"client_id":             {clientID},
+		"client_assertion_type": {assertionType},
+		"client_assertion":      {assertion},
+		"resource":              {o.Resource},
+	})
 	if err != nil {
-		return Tokens{}, clientCredentialsError(err)
+		return Tokens{}, err
 	}
-	return Tokens{AccessToken: tok.AccessToken, ClientID: clientID, ClientSecret: clientSecret}, nil
+	return Tokens{AccessToken: token, ClientID: clientID}, nil
 }
 
-// clientCredentialsError names why the token endpoint refused, without the response body: a broken or
-// proxied endpoint that echoes the request could otherwise reprint client_secret on stderr.
-func clientCredentialsError(err error) error {
-	var re *oauth2.RetrieveError
-	if errors.As(err, &re) {
-		switch {
-		case re.ErrorCode != "" && re.ErrorDescription != "":
-			return fmt.Errorf("auth: client credentials: the provider refused: %s: %s", re.ErrorCode, re.ErrorDescription)
-		case re.ErrorCode != "":
-			return fmt.Errorf("auth: client credentials: the provider refused: %s", re.ErrorCode)
-		case re.Response != nil:
-			return fmt.Errorf("auth: client credentials: the provider answered %s", re.Response.Status)
-		}
-		return errors.New("auth: client credentials: the provider refused the request")
+// postToken posts one form to the token endpoint and returns the access token. The answer body is
+// kept out of every error, because a proxied endpoint could otherwise echo the assertion back.
+func (o OIDC) postToken(ctx context.Context, tokenURL string, form url.Values) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("auth: %w", err)
 	}
-	return fmt.Errorf("auth: client credentials: %w", err)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := o.HTTP.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("auth: exchange the assertion: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	if err != nil {
+		return "", fmt.Errorf("auth: read the token answer: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", assertionError(resp.StatusCode, body)
+	}
+	var tok struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.Unmarshal(body, &tok); err != nil || tok.AccessToken == "" {
+		return "", errors.New("auth: the provider did not issue an access token")
+	}
+	return tok.AccessToken, nil
+}
+
+// assertionError names why the token endpoint refused an assertion, without the answer body.
+func assertionError(status int, body []byte) error {
+	var e struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(body, &e) == nil && e.Error != "" {
+		return fmt.Errorf("auth: the provider refused the machine: %s", e.Error)
+	}
+	return fmt.Errorf("auth: the provider answered %d", status)
 }
 
 // RefreshStored refreshes the stored login. It reads the files first, so a token that another running
@@ -264,11 +282,11 @@ func RefreshStored(ctx context.Context, s Store, o OIDC) (Tokens, error) {
 	if err != nil {
 		return Tokens{}, err
 	}
-	// A machine login has no refresh token, so it asks for a new access token with its credentials;
-	// everything else refreshes a person's login.
+	// A machine login has no refresh token: it signs an assertion with its key. Everything else
+	// refreshes a person's login.
 	var fresh Tokens
-	if t.RefreshToken == "" && t.ClientID != "" {
-		fresh, err = o.ClientCredentials(ctx, t.ClientID, t.ClientSecret)
+	if t.MachineKey != "" {
+		fresh, err = o.refreshMachine(ctx, t)
 	} else {
 		fresh, err = o.Refresh(ctx, t.RefreshToken)
 	}
@@ -280,6 +298,20 @@ func RefreshStored(ctx context.Context, s Store, o OIDC) (Tokens, error) {
 		return Tokens{}, err
 	}
 	return t, nil
+}
+
+// refreshMachine mints an assertion from the machine's stored key and exchanges it for an access
+// token. The jti is fresh each call, so a running machine keeps signing in without a passkey.
+func (o OIDC) refreshMachine(ctx context.Context, t Tokens) (Tokens, error) {
+	key, err := LoadMachineKey(t.MachineKey)
+	if err != nil {
+		return Tokens{}, err
+	}
+	assertion, err := ClientAssertion(key, t.ClientID, o.Issuer, o.Resource, time.Now())
+	if err != nil {
+		return Tokens{}, err
+	}
+	return o.ExchangeAssertion(ctx, t.ClientID, assertion)
 }
 
 // KeepFresh refreshes the stored login every `every` until ctx ends. A failed refresh is reported to

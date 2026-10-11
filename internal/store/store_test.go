@@ -124,6 +124,19 @@ func migrationFiles(t *testing.T) []string {
 	return files
 }
 
+// runMigration applies one migration file by name, so a test can build the schema in stages: the
+// up-only migrations run in name order, and a test that needs a row before a later one applies it.
+func runMigration(t *testing.T, dbURL, name string) {
+	t.Helper()
+	sql, err := os.ReadFile(filepath.Join("migrations", name))
+	if err != nil {
+		t.Fatalf("read migration %s: %v", name, err)
+	}
+	if err := run(dbURL, string(sql)); err != nil {
+		t.Fatalf("apply migration %s: %v", name, err)
+	}
+}
+
 func TestOpenIsIdempotent(t *testing.T) {
 	dbURL := schemaURL(t)
 	s := openStore(t, dbURL)
@@ -368,6 +381,30 @@ func TestMigrationFilesAscend(t *testing.T) {
 	}
 }
 
+// The share-key migration runs against a live table: it adds the site's handle, backfills it from the
+// owner's users row (every share ever stored was a person's own site), and refuses a later row with no
+// handle.
+func TestShareHandleMigrationBackfills(t *testing.T) {
+	dbURL := schemaURL(t)
+	for _, name := range []string{"001_users.sql", "002_shares.sql", "003_share_expiry.sql", "004_machines.sql"} {
+		runMigration(t, dbURL, name)
+	}
+	if err := run(dbURL, "insert into users (sub, handle) values ('sub-alice', 'alice')"); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	if err := run(dbURL, "insert into shares (owner_sub, tunnel, kind, grantee) values ('sub-alice', 'blog', 'user', 'bob'), ('sub-alice', '', 'user', 'carol')"); err != nil {
+		t.Fatalf("seed shares: %v", err)
+	}
+	runMigration(t, dbURL, "005_share_site.sql")
+
+	if got := count(t, dbURL, "select count(*) from shares where handle = 'alice'"); got != 2 {
+		t.Errorf("%d shares backfilled with the owner's handle, want 2", got)
+	}
+	if err := run(dbURL, "insert into shares (owner_sub, tunnel, kind, grantee) values ('sub-alice', 'x', 'user', 'dave')"); err == nil {
+		t.Error("a share without a handle was inserted, want the NOT NULL constraint to refuse it")
+	}
+}
+
 // An admin disables an account in the table; both lookups must report it, or the broker would never
 // refuse a disabled account.
 func TestDisabledIsRead(t *testing.T) {
@@ -412,7 +449,7 @@ func TestPutShareIsIdempotent(t *testing.T) {
 	createUser(t, s, ctx, "sub-1", "alice")
 
 	expires := time.Now().Add(time.Hour).UTC().Truncate(time.Microsecond)
-	sh := Share{Tunnel: "blog", Kind: "user", Grantee: "Bob", ExpiresAt: expires}
+	sh := Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "Bob", ExpiresAt: expires}
 	putShare(t, s, ctx, "sub-1", sh)
 	putShare(t, s, ctx, "sub-1", sh)
 
@@ -420,8 +457,8 @@ func TestPutShareIsIdempotent(t *testing.T) {
 		t.Errorf("shares has %d rows, want 1", got)
 	}
 	got, err := s.SharesByOwner(ctx, "sub-1")
-	if err != nil || len(got) != 1 || !got[0].ExpiresAt.Equal(expires) {
-		t.Errorf("SharesByOwner = %+v, %v; want one row ending %v", got, err, expires)
+	if err != nil || len(got) != 1 || got[0].Handle != "alice" || !got[0].ExpiresAt.Equal(expires) {
+		t.Errorf("SharesByOwner = %+v, %v; want one row for alice ending %v", got, err, expires)
 	}
 }
 
@@ -432,13 +469,13 @@ func TestPutShareUpdatesExpiry(t *testing.T) {
 	ctx := testCtx(t)
 	createUser(t, s, ctx, "sub-1", "alice")
 
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob"}) // permanent first
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: time.Now().Add(-time.Hour)})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob"}) // permanent first
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: time.Now().Add(-time.Hour)})
 
 	if got := count(t, dbURL, "select count(*) from shares"); got != 1 {
 		t.Errorf("shares has %d rows, want 1", got)
 	}
-	got, err := s.ShareMatches(ctx, "sub-1", "blog", "bob", nil)
+	got, err := s.ShareMatches(ctx, "sub-1", "alice", "blog", "bob", nil)
 	if err != nil {
 		t.Fatalf("ShareMatches: %v", err)
 	}
@@ -453,7 +490,7 @@ func TestDeleteShareIsIdempotent(t *testing.T) {
 	ctx := testCtx(t)
 	createUser(t, s, ctx, "sub-1", "alice")
 
-	sh := Share{Tunnel: "blog", Kind: "user", Grantee: "Bob"}
+	sh := Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "Bob"}
 	putShare(t, s, ctx, "sub-1", sh)
 	for i := range 2 { // the second delete removes a row that is not there
 		if err := s.DeleteShare(ctx, "sub-1", sh); err != nil {
@@ -471,16 +508,16 @@ func TestSharesByOwnerOrders(t *testing.T) {
 	createUser(t, s, ctx, "sub-1", "alice")
 	createUser(t, s, ctx, "sub-2", "carol")
 
-	// Stored out of order: the read sorts by tunnel, kind, grantee.
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "alice"})
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "", Kind: "user", Grantee: "bob"})
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "group", Grantee: "family"})
-	putShare(t, s, ctx, "sub-2", Share{Tunnel: "blog", Kind: "user", Grantee: "alice"}) // another owner
+	// Stored out of order: the read sorts by handle, tunnel, kind, grantee.
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "alice"})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "", Kind: "user", Grantee: "bob"})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "zoe", Tunnel: "blog", Kind: "group", Grantee: "family"})
+	putShare(t, s, ctx, "sub-2", Share{Handle: "carol", Tunnel: "blog", Kind: "user", Grantee: "alice"}) // another owner
 
 	want := []Share{
-		{Tunnel: "", Kind: "user", Grantee: "bob"},
-		{Tunnel: "blog", Kind: "group", Grantee: "family"},
-		{Tunnel: "blog", Kind: "user", Grantee: "alice"},
+		{Handle: "alice", Tunnel: "", Kind: "user", Grantee: "bob"},
+		{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "alice"},
+		{Handle: "zoe", Tunnel: "blog", Kind: "group", Grantee: "family"},
 	}
 	got, err := s.SharesByOwner(ctx, "sub-1")
 	if err != nil {
@@ -498,8 +535,8 @@ func TestPutAndListShareWithExpiry(t *testing.T) {
 	createUser(t, s, ctx, "sub-1", "alice")
 
 	expires := time.Now().Add(7 * 24 * time.Hour).UTC().Truncate(time.Microsecond)
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: expires})
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "carol"}) // no end, ever
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: expires})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "carol"}) // no end, ever
 
 	got, err := s.SharesByOwner(ctx, "sub-1")
 	if err != nil {
@@ -521,9 +558,9 @@ func TestShareMatchesIgnoresExpired(t *testing.T) {
 	s := newStore(t)
 	ctx := testCtx(t)
 	createUser(t, s, ctx, "sub-1", "alice")
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: time.Now().Add(-time.Hour)})
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "carol"})
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "dave", ExpiresAt: time.Now().Add(time.Hour)})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: time.Now().Add(-time.Hour)})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "carol"})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "dave", ExpiresAt: time.Now().Add(time.Hour)})
 
 	tests := []struct {
 		username string
@@ -534,7 +571,7 @@ func TestShareMatchesIgnoresExpired(t *testing.T) {
 		{"dave", true},  // still in the future
 	}
 	for _, tt := range tests {
-		got, err := s.ShareMatches(ctx, "sub-1", "blog", tt.username, nil)
+		got, err := s.ShareMatches(ctx, "sub-1", "alice", "blog", tt.username, nil)
 		if err != nil {
 			t.Fatalf("ShareMatches(%q): %v", tt.username, err)
 		}
@@ -548,10 +585,10 @@ func TestShareMatchesUserIsCaseInsensitive(t *testing.T) {
 	s := newStore(t)
 	ctx := testCtx(t)
 	createUser(t, s, ctx, "sub-1", "alice")
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "Bob"})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "Bob"})
 
 	for _, username := range []string{"bob", "BOB", "bOb"} {
-		got, err := s.ShareMatches(ctx, "sub-1", "blog", username, nil)
+		got, err := s.ShareMatches(ctx, "sub-1", "alice", "blog", username, nil)
 		if err != nil {
 			t.Fatalf("ShareMatches(%q): %v", username, err)
 		}
@@ -565,7 +602,7 @@ func TestShareMatchesIsExact(t *testing.T) {
 	s := newStore(t)
 	ctx := testCtx(t)
 	createUser(t, s, ctx, "sub-1", "alice")
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob"})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob"})
 
 	tests := []struct {
 		username string
@@ -576,7 +613,7 @@ func TestShareMatchesIsExact(t *testing.T) {
 		{"bo", false},
 	}
 	for _, tt := range tests {
-		got, err := s.ShareMatches(ctx, "sub-1", "blog", tt.username, nil)
+		got, err := s.ShareMatches(ctx, "sub-1", "alice", "blog", tt.username, nil)
 		if err != nil {
 			t.Fatalf("ShareMatches(%q): %v", tt.username, err)
 		}
@@ -590,7 +627,7 @@ func TestShareMatchesGroupIsExact(t *testing.T) {
 	s := newStore(t)
 	ctx := testCtx(t)
 	createUser(t, s, ctx, "sub-1", "alice")
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "group", Grantee: "family"})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "group", Grantee: "family"})
 
 	tests := []struct {
 		name   string
@@ -604,7 +641,7 @@ func TestShareMatchesGroupIsExact(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := s.ShareMatches(ctx, "sub-1", "blog", "alice", tt.groups)
+			got, err := s.ShareMatches(ctx, "sub-1", "alice", "blog", "alice", tt.groups)
 			if err != nil {
 				t.Fatalf("ShareMatches(%v): %v", tt.groups, err)
 			}
@@ -619,7 +656,7 @@ func TestShareMatchesWrongTunnel(t *testing.T) {
 	s := newStore(t)
 	ctx := testCtx(t)
 	createUser(t, s, ctx, "sub-1", "alice")
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob"})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob"})
 
 	tests := []struct {
 		tunnel string
@@ -630,7 +667,7 @@ func TestShareMatchesWrongTunnel(t *testing.T) {
 		{"other", false},
 	}
 	for _, tt := range tests {
-		got, err := s.ShareMatches(ctx, "sub-1", tt.tunnel, "bob", nil)
+		got, err := s.ShareMatches(ctx, "sub-1", "alice", tt.tunnel, "bob", nil)
 		if err != nil {
 			t.Fatalf("ShareMatches(%q): %v", tt.tunnel, err)
 		}
@@ -640,14 +677,41 @@ func TestShareMatchesWrongTunnel(t *testing.T) {
 	}
 }
 
+// A share is keyed by the site, not the tunnel name alone: a share on one of an owner's sites must
+// never admit another with the same tunnel name (invariant 10).
+func TestShareMatchesBySite(t *testing.T) {
+	s := newStore(t)
+	ctx := testCtx(t)
+	createUser(t, s, ctx, "sub-1", "alice")
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob"})
+
+	tests := []struct {
+		handle string
+		want   bool
+	}{
+		{"alice", true},  // the site the share names
+		{"nas", false},   // another of the owner's sites, same tunnel name
+		{"carol", false}, // an unrelated handle
+	}
+	for _, tt := range tests {
+		got, err := s.ShareMatches(ctx, "sub-1", tt.handle, "blog", "bob", nil)
+		if err != nil {
+			t.Fatalf("ShareMatches(%q): %v", tt.handle, err)
+		}
+		if got != tt.want {
+			t.Errorf("ShareMatches(handle %q) = %v, want %v", tt.handle, got, tt.want)
+		}
+	}
+}
+
 func TestShareMatchesError(t *testing.T) {
 	s := newStore(t)
 	ctx := testCtx(t)
 	createUser(t, s, ctx, "sub-1", "alice")
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob"})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob"})
 	s.Close()
 
-	got, err := s.ShareMatches(ctx, "sub-1", "blog", "bob", nil)
+	got, err := s.ShareMatches(ctx, "sub-1", "alice", "blog", "bob", nil)
 	if err == nil {
 		t.Fatalf("ShareMatches on a closed store = %v, nil; want an error", got)
 	}
@@ -821,6 +885,24 @@ func TestStoreClosedPoolErrors(t *testing.T) {
 	if shares, err := s.SharesByOwner(ctx, "sub-1"); err == nil || shares != nil {
 		t.Errorf("SharesByOwner on a closed store = %v, %v; want nil, error", shares, err)
 	}
+	if err := s.CreateMachine(ctx, Machine{Handle: "nas", OwnerKind: "user", OwnerRef: "sub-1", ClientID: "client-1", CreatedBy: "sub-1"}); err == nil {
+		t.Error("CreateMachine on a closed store succeeded, want an error")
+	}
+	if _, err := s.MachineByHandle(ctx, "nas"); err == nil {
+		t.Error("MachineByHandle on a closed store succeeded, want an error")
+	}
+	if _, err := s.MachineByClientID(ctx, "client-1"); err == nil {
+		t.Error("MachineByClientID on a closed store succeeded, want an error")
+	}
+	if machines, err := s.MachinesByOwner(ctx, "sub-1"); err == nil || machines != nil {
+		t.Errorf("MachinesByOwner on a closed store = %v, %v; want nil, error", machines, err)
+	}
+	if err := s.SetMachineDisabled(ctx, "client-1", true); err == nil {
+		t.Error("SetMachineDisabled on a closed store succeeded, want an error")
+	}
+	if err := s.DeleteMachine(ctx, "client-1"); err == nil {
+		t.Error("DeleteMachine on a closed store succeeded, want an error")
+	}
 	if got := count(t, dbURL, "select count(*) from users"); got != 1 {
 		t.Errorf("users has %d rows after the failed writes, want 1", got)
 	}
@@ -835,7 +917,7 @@ func TestSharesByOwnerScanFails(t *testing.T) {
 	s := openStore(t, dbURL)
 	ctx := testCtx(t)
 	createUser(t, s, ctx, "sub-1", "alice")
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob"})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob"})
 	if err := run(dbURL, "alter table shares alter column grantee type bytea using convert_to(grantee, 'UTF8')"); err != nil {
 		t.Fatalf("alter shares.grantee: %v", err)
 	}
@@ -890,19 +972,324 @@ func TestSharesByOwnerRowsError(t *testing.T) {
 	s := openStore(t, dbURL)
 	ctx := testCtx(t)
 	createUser(t, s, ctx, "sub-1", "alice")
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob"})
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "boom"})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob"})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "boom"})
 	if err := run(dbURL, "alter table shares rename to shares_base"); err != nil {
 		t.Fatalf("rename shares: %v", err)
 	}
 	if err := run(dbURL, `create function boom() returns text language plpgsql volatile as $$ begin raise exception 'boom'; end $$`); err != nil {
 		t.Fatalf("create boom: %v", err)
 	}
-	if err := run(dbURL, `create view shares as select owner_sub, tunnel, case when grantee = 'boom' then boom() else kind end as kind, grantee, expires_at from shares_base`); err != nil {
+	if err := run(dbURL, `create view shares as select owner_sub, handle, tunnel, case when grantee = 'boom' then boom() else kind end as kind, grantee, expires_at from shares_base`); err != nil {
 		t.Fatalf("create failing view: %v", err)
 	}
 	shares, err := s.SharesByOwner(ctx, "sub-1")
 	if err == nil || shares != nil {
 		t.Errorf("SharesByOwner with a failing row = %v, %v; want nil, error", shares, err)
+	}
+}
+
+// createMachine adds a machine owned by a user and returns the stored row.
+func createMachine(t *testing.T, s *Store, ctx context.Context, handle, ownerRef, clientID string) Machine {
+	t.Helper()
+	if err := s.CreateMachine(ctx, Machine{Handle: handle, OwnerKind: "user", OwnerRef: ownerRef, ClientID: clientID, CreatedBy: ownerRef}); err != nil {
+		t.Fatalf("CreateMachine(%q): %v", handle, err)
+	}
+	m, err := s.MachineByHandle(ctx, handle)
+	if err != nil {
+		t.Fatalf("MachineByHandle(%q): %v", handle, err)
+	}
+	return m
+}
+
+// A machine round-trips through both lookups, with the columns the database fills in defaulted.
+func TestCreateMachineAndLookups(t *testing.T) {
+	s := newStore(t)
+	ctx := testCtx(t)
+	m := Machine{Handle: "nas", OwnerKind: "user", OwnerRef: "sub-1", ClientID: "client-123", CreatedBy: "sub-1"}
+	if err := s.CreateMachine(ctx, m); err != nil {
+		t.Fatalf("CreateMachine: %v", err)
+	}
+	byHandle, err := s.MachineByHandle(ctx, "nas")
+	if err != nil {
+		t.Fatalf("MachineByHandle: %v", err)
+	}
+	byClient, err := s.MachineByClientID(ctx, "client-123")
+	if err != nil {
+		t.Fatalf("MachineByClientID: %v", err)
+	}
+	if byHandle != byClient {
+		t.Errorf("MachineByHandle = %+v, MachineByClientID = %+v, want the same row", byHandle, byClient)
+	}
+	if byHandle.ID == "" || byHandle.Handle != "nas" || byHandle.OwnerKind != "user" ||
+		byHandle.OwnerRef != "sub-1" || byHandle.ClientID != "client-123" ||
+		byHandle.Disabled || byHandle.CreatedAt.IsZero() || byHandle.CreatedBy != "sub-1" {
+		t.Errorf("machine = %+v, want the fields it was created with and a generated id and created_at", byHandle)
+	}
+}
+
+// One handle is owned once, whether the earlier claim is another machine or a user.
+func TestCreateMachineHandleTaken(t *testing.T) {
+	dbURL := schemaURL(t)
+	s := openStore(t, dbURL)
+	ctx := testCtx(t)
+	createUser(t, s, ctx, "sub-1", "alice")
+	createMachine(t, s, ctx, "nas", "sub-1", "client-1")
+
+	tests := []struct {
+		name    string
+		machine Machine
+	}{
+		{"another machine's handle", Machine{Handle: "nas", OwnerKind: "user", OwnerRef: "sub-1", ClientID: "client-2", CreatedBy: "sub-1"}},
+		{"a user's handle", Machine{Handle: "alice", OwnerKind: "user", OwnerRef: "sub-1", ClientID: "client-3", CreatedBy: "sub-1"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := s.CreateMachine(ctx, tt.machine); !errors.Is(err, ErrHandleTaken) {
+				t.Errorf("CreateMachine(%q) error = %v, want ErrHandleTaken", tt.machine.Handle, err)
+			}
+		})
+	}
+	if got := count(t, dbURL, "select count(*) from machines"); got != 1 {
+		t.Errorf("machines has %d rows, want 1", got)
+	}
+}
+
+// A machine's handle is refused to a brand-new user, and the user is not created.
+func TestCreateUserHandleTakenByMachine(t *testing.T) {
+	dbURL := schemaURL(t)
+	s := openStore(t, dbURL)
+	ctx := testCtx(t)
+	createMachine(t, s, ctx, "nas", "sub-1", "client-1")
+	if _, err := s.CreateUser(ctx, "sub-2", "nas"); !errors.Is(err, ErrHandleTaken) {
+		t.Fatalf("CreateUser(sub-2, nas) error = %v, want ErrHandleTaken", err)
+	}
+	if _, err := s.UserBySub(ctx, "sub-2"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("UserBySub(sub-2) error = %v, want ErrNotFound", err)
+	}
+	if got := count(t, dbURL, "select count(*) from users"); got != 0 {
+		t.Errorf("users has %d rows, want 0", got)
+	}
+}
+
+// A user's first login and a machine's create racing for one handle leave exactly one owner: the
+// advisory lock serialises them, and the loser reads the winner's row.
+func TestConcurrentMachineAndUserHandle(t *testing.T) {
+	dbURL := schemaURL(t)
+	s := openStore(t, dbURL)
+	ctx := testCtx(t)
+	const rounds = 30
+	for r := range rounds {
+		handle := fmt.Sprintf("shared-%d", r)
+		sub := fmt.Sprintf("sub-%d", r)
+		client := fmt.Sprintf("client-%d", r)
+		var userErr, machineErr error
+		parallel(2, func(i int) {
+			if i == 0 {
+				_, userErr = s.CreateUser(ctx, sub, handle)
+				return
+			}
+			machineErr = s.CreateMachine(ctx, Machine{Handle: handle, OwnerKind: "user", OwnerRef: sub, ClientID: client, CreatedBy: sub})
+		})
+		won := 0
+		if userErr == nil {
+			won++
+		} else if !errors.Is(userErr, ErrHandleTaken) {
+			t.Errorf("round %d: CreateUser error = %v, want nil or ErrHandleTaken", r, userErr)
+		}
+		if machineErr == nil {
+			won++
+		} else if !errors.Is(machineErr, ErrHandleTaken) {
+			t.Errorf("round %d: CreateMachine error = %v, want nil or ErrHandleTaken", r, machineErr)
+		}
+		if won != 1 {
+			t.Errorf("round %d: %d owners of %q, want exactly 1", r, won, handle)
+		}
+	}
+	if got := count(t, dbURL, "select (select count(*) from users) + (select count(*) from machines)"); got != rounds {
+		t.Errorf("owners = %d, want one per round (%d)", got, rounds)
+	}
+}
+
+// The flag flips both ways, list returns only the owner's machines in handle order, and delete
+// removes one and is idempotent.
+func TestMachineDisabledDeleteAndOwnerList(t *testing.T) {
+	dbURL := schemaURL(t)
+	s := openStore(t, dbURL)
+	ctx := testCtx(t)
+	createUser(t, s, ctx, "sub-1", "alice")
+	createUser(t, s, ctx, "sub-2", "carol")
+	createMachine(t, s, ctx, "pi", "sub-1", "client-1")
+	createMachine(t, s, ctx, "nas", "sub-1", "client-2")
+	createMachine(t, s, ctx, "edge", "sub-2", "client-3")
+
+	if err := s.SetMachineDisabled(ctx, "client-1", true); err != nil {
+		t.Fatalf("SetMachineDisabled: %v", err)
+	}
+	if m, err := s.MachineByClientID(ctx, "client-1"); err != nil || !m.Disabled {
+		t.Errorf("MachineByClientID = %+v, %v; want disabled", m, err)
+	}
+	if err := s.SetMachineDisabled(ctx, "client-1", false); err != nil {
+		t.Fatalf("SetMachineDisabled: %v", err)
+	}
+	if m, err := s.MachineByClientID(ctx, "client-1"); err != nil || m.Disabled {
+		t.Errorf("MachineByClientID = %+v, %v; want enabled", m, err)
+	}
+
+	got, err := s.MachinesByOwner(ctx, "sub-1")
+	if err != nil {
+		t.Fatalf("MachinesByOwner: %v", err)
+	}
+	if len(got) != 2 || got[0].Handle != "nas" || got[1].Handle != "pi" {
+		t.Errorf("MachinesByOwner = %+v, want nas then pi", got)
+	}
+
+	if err := s.DeleteMachine(ctx, "client-1"); err != nil {
+		t.Fatalf("DeleteMachine: %v", err)
+	}
+	if _, err := s.MachineByClientID(ctx, "client-1"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("MachineByClientID after delete error = %v, want ErrNotFound", err)
+	}
+	if err := s.DeleteMachine(ctx, "client-1"); err != nil { // deleting what is gone does nothing
+		t.Errorf("second DeleteMachine: %v", err)
+	}
+	if got := count(t, dbURL, "select count(*) from machines"); got != 2 {
+		t.Errorf("machines has %d rows, want 2", got)
+	}
+}
+
+func TestMachineNotFound(t *testing.T) {
+	s := newStore(t)
+	ctx := testCtx(t)
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	tests := []struct {
+		name string
+		call func(context.Context, string) (Machine, error)
+	}{
+		{"MachineByHandle", s.MachineByHandle},
+		{"MachineByClientID", s.MachineByClientID},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name+"/missing", func(t *testing.T) {
+			if _, err := tt.call(ctx, "nobody"); !errors.Is(err, ErrNotFound) {
+				t.Errorf("error = %v, want ErrNotFound", err)
+			}
+		})
+		t.Run(tt.name+"/failure is not a miss", func(t *testing.T) {
+			if _, err := tt.call(cancelled, "nobody"); err == nil || errors.Is(err, ErrNotFound) {
+				t.Errorf("error = %v, want a failure that is not ErrNotFound", err)
+			}
+		})
+	}
+}
+
+// An unreadable users table must fail the handle check, not silently let the handle through.
+func TestMachineHandleCheckFails(t *testing.T) {
+	dbURL := schemaURL(t)
+	s := openStore(t, dbURL)
+	ctx := testCtx(t)
+	if err := run(dbURL, "alter table users rename to users_base"); err != nil {
+		t.Fatalf("rename users: %v", err)
+	}
+	m := Machine{Handle: "nas", OwnerKind: "user", OwnerRef: "sub-1", ClientID: "client-1", CreatedBy: "sub-1"}
+	if err := s.CreateMachine(ctx, m); err == nil {
+		t.Error("CreateMachine with an unreadable users table succeeded, want an error")
+	}
+	if _, err := s.CreateUser(ctx, "sub-1", "alice"); err == nil {
+		t.Error("CreateUser with an unreadable users table succeeded, want an error")
+	}
+}
+
+// While another session holds a handle's advisory lock, a create must fail rather than wait forever.
+func TestMachineHandleLockAborts(t *testing.T) {
+	base := os.Getenv("TEST_DATABASE_URL")
+	if base == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	dbURL := schemaURL(t)
+	s := openStore(t, dbURL)
+	ctx := testCtx(t)
+	holder, err := pgx.Connect(ctx, base)
+	if err != nil {
+		t.Fatalf("connect lock holder: %v", err)
+	}
+	t.Cleanup(func() { holder.Close(context.Background()) })
+	tx, err := holder.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin lock holder: %v", err)
+	}
+	t.Cleanup(func() { tx.Rollback(context.Background()) })
+	if _, err := tx.Exec(ctx, "select pg_advisory_xact_lock(hashtext($1))", "nas"); err != nil {
+		t.Fatalf("hold the handle lock: %v", err)
+	}
+	short, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	m := Machine{Handle: "nas", OwnerKind: "user", OwnerRef: "sub-1", ClientID: "client-1", CreatedBy: "sub-1"}
+	if err := s.CreateMachine(short, m); err == nil {
+		t.Error("CreateMachine while the handle lock is held succeeded, want an error")
+	}
+}
+
+// A failed insert is reported, not swallowed, once the handle checks have passed.
+func TestMachineInsertFails(t *testing.T) {
+	dbURL := schemaURL(t)
+	s := openStore(t, dbURL)
+	ctx := testCtx(t)
+	if err := run(dbURL, "alter table machines add constraint no_nas check (handle <> 'nas')"); err != nil {
+		t.Fatalf("add machines constraint: %v", err)
+	}
+	m := Machine{Handle: "nas", OwnerKind: "user", OwnerRef: "sub-1", ClientID: "client-1", CreatedBy: "sub-1"}
+	if err := s.CreateMachine(ctx, m); err == nil {
+		t.Error("CreateMachine that violates a constraint succeeded, want an error")
+	}
+}
+
+func TestCreateUserInsertFails(t *testing.T) {
+	dbURL := schemaURL(t)
+	s := openStore(t, dbURL)
+	ctx := testCtx(t)
+	if err := run(dbURL, "alter table users add constraint no_bob check (handle <> 'bob')"); err != nil {
+		t.Fatalf("add users constraint: %v", err)
+	}
+	if _, err := s.CreateUser(ctx, "sub-1", "bob"); err == nil {
+		t.Error("CreateUser that violates a constraint succeeded, want an error")
+	}
+}
+
+// An unreadable column makes the query succeed but the row scan fail.
+func TestMachinesByOwnerScanFails(t *testing.T) {
+	dbURL := schemaURL(t)
+	s := openStore(t, dbURL)
+	ctx := testCtx(t)
+	createMachine(t, s, ctx, "nas", "sub-1", "client-1")
+	if err := run(dbURL, "alter table machines alter column client_id type bytea using convert_to(client_id, 'UTF8')"); err != nil {
+		t.Fatalf("alter machines.client_id: %v", err)
+	}
+	machines, err := s.MachinesByOwner(ctx, "sub-1")
+	if err == nil || machines != nil {
+		t.Errorf("MachinesByOwner with an unreadable column = %v, %v; want nil, error", machines, err)
+	}
+}
+
+// A row whose expression raises ends the stream with an error instead of a partial list.
+func TestMachinesByOwnerRowsError(t *testing.T) {
+	dbURL := schemaURL(t)
+	s := openStore(t, dbURL)
+	ctx := testCtx(t)
+	createMachine(t, s, ctx, "nas", "sub-1", "client-1")
+	createMachine(t, s, ctx, "boom", "sub-1", "client-2")
+	if err := run(dbURL, "alter table machines rename to machines_base"); err != nil {
+		t.Fatalf("rename machines: %v", err)
+	}
+	if err := run(dbURL, `create function boom() returns text language plpgsql volatile as $$ begin raise exception 'boom'; end $$`); err != nil {
+		t.Fatalf("create boom: %v", err)
+	}
+	if err := run(dbURL, `create view machines as select id, handle, case when handle = 'boom' then boom() else owner_kind end as owner_kind, owner_ref, client_id, disabled, created_at, created_by from machines_base`); err != nil {
+		t.Fatalf("create failing view: %v", err)
+	}
+	machines, err := s.MachinesByOwner(ctx, "sub-1")
+	if err == nil || machines != nil {
+		t.Errorf("MachinesByOwner with a failing row = %v, %v; want nil, error", machines, err)
 	}
 }

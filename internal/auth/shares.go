@@ -9,8 +9,10 @@ import (
 	"time"
 )
 
-// Share grants one user or group access to one tunnel. The empty Tunnel is the default tunnel.
+// Share grants one user or group access to one site: the site's handle and tunnel. The empty Tunnel is
+// the handle's default site.
 type Share struct {
+	Handle    string    `json:"handle"`
 	Tunnel    string    `json:"tunnel"`
 	Kind      string    `json:"kind"`
 	Grantee   string    `json:"grantee"`

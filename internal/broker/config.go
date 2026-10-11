@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/fatedier/frp/pkg/config/types"
-	"github.com/layertwo/tunnels/internal/names"
 )
 
 // Config is the broker's settings, one field per environment variable.
@@ -29,6 +28,10 @@ type Config struct {
 
 	DatabaseURL string
 
+	PocketIDURL    string // the Pocket ID instance whose admin API mints a machine's client
+	PocketIDAPIKey string // the admin API key; never logged
+	PocketIDAPIID  string // the Tunnels API a machine's client is granted access to
+
 	FrpsDashboardURL      string
 	FrpsDashboardUser     string
 	FrpsDashboardPassword string
@@ -37,10 +40,6 @@ type Config struct {
 	MaxTunnelsPerUser int
 	BandwidthLimit    string
 	Reserved          []string
-
-	// MachineClients maps a Pocket ID client id to the handle its client_credentials token may
-	// publish as. A machine token has no username or groups, so this config is its authorisation.
-	MachineClients map[string]string
 
 	ListenAddr string
 	LogLevel   slog.Level
@@ -53,6 +52,13 @@ var (
 	// secretRE is a path element that needs no escaping: the secret is part of the plugin URL.
 	secretRE = regexp.MustCompile(`^[A-Za-z0-9_-]{32,}$`)
 )
+
+// badDashboardURL reports whether raw is set but is not a bare http(s) URL: a scheme, a host and
+// nothing else, so no credentials, query or fragment could end up in an error or a log.
+func badDashboardURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return raw != "" && (err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery)
+}
 
 // LoadConfig reads the settings through getenv. It reports every problem at once, by variable name and
 // never with a secret in the text.
@@ -92,6 +98,10 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 
 		DatabaseURL: required("DATABASE_URL"),
 
+		PocketIDURL:    required("POCKET_ID_URL"),
+		PocketIDAPIKey: required("POCKET_ID_API_KEY"),
+		PocketIDAPIID:  required("POCKET_ID_API_ID"),
+
 		FrpsDashboardURL:      required("FRPS_DASHBOARD_URL"),
 		FrpsDashboardUser:     required("FRPS_DASHBOARD_USER"),
 		FrpsDashboardPassword: required("FRPS_DASHBOARD_PASSWORD"),
@@ -102,9 +112,11 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	}
 
 	// The credentials are separate variables; none in the URL, which would also end up in errors and logs.
-	if u, err := url.Parse(c.FrpsDashboardURL); c.FrpsDashboardURL != "" &&
-		(err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery) {
+	if badDashboardURL(c.FrpsDashboardURL) {
 		bad("FRPS_DASHBOARD_URL", "must be an http or https URL with a host and nothing else: no credentials, query or fragment") // not repeated: it may hold a password
+	}
+	if badDashboardURL(c.PocketIDURL) {
+		bad("POCKET_ID_URL", "must be an http or https URL with a host and nothing else: no credentials, query or fragment")
 	}
 	if c.PluginSecret != "" && !secretRE.MatchString(c.PluginSecret) {
 		bad("PLUGIN_SECRET", `must be at least 32 characters from A-Z, a-z, 0-9, "-" and "_"`)
@@ -124,27 +136,6 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	for _, h := range strings.Split(optional("RESERVED_HANDLES", "admin,root,support,security"), ",") {
 		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
 			c.Reserved = append(c.Reserved, h)
-		}
-	}
-
-	if v := getenv("MACHINE_CLIENTS"); v != "" {
-		c.MachineClients = map[string]string{}
-		for _, pair := range strings.Split(v, ",") {
-			pair = strings.TrimSpace(pair)
-			if pair == "" {
-				continue
-			}
-			id, handle, ok := strings.Cut(pair, "=")
-			id, handle = strings.TrimSpace(id), strings.ToLower(strings.TrimSpace(handle))
-			if !ok {
-				bad("MACHINE_CLIENTS", "must be a comma-separated list of client-id=handle pairs")
-				continue
-			}
-			if id == "" || !names.ValidHandle(handle) {
-				bad("MACHINE_CLIENTS", "must map each client id to a 2 to 20 letter and digit handle, such as client-id=alice")
-				continue
-			}
-			c.MachineClients[id] = handle
 		}
 	}
 

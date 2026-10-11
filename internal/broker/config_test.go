@@ -22,6 +22,9 @@ func allVars() map[string]string {
 		"CLI_CLIENT_ID":           "tunnels-cli",
 		"MIN_CLI_VERSION":         "0.2.0",
 		"DATABASE_URL":            "postgres://broker:pw@db:5432/tunnels",
+		"POCKET_ID_URL":           "https://idp.layertwo.dev",
+		"POCKET_ID_API_KEY":       "pocket-admin-key",
+		"POCKET_ID_API_ID":        "api-tunnels",
 		"FRPS_DASHBOARD_URL":      "http://frps.tunnels.svc:7500",
 		"FRPS_DASHBOARD_USER":     "broker",
 		"FRPS_DASHBOARD_PASSWORD": "dash-pw",
@@ -40,7 +43,8 @@ func load(vars map[string]string) (Config, error) {
 
 var required = []string{
 	"SERVICE_HOST", "SITES_DOMAIN", "ISSUER", "API_RESOURCE", "CREATORS_GROUP", "CLI_CLIENT_ID",
-	"DATABASE_URL", "FRPS_DASHBOARD_URL", "FRPS_DASHBOARD_USER", "FRPS_DASHBOARD_PASSWORD", "PLUGIN_SECRET",
+	"DATABASE_URL", "POCKET_ID_URL", "POCKET_ID_API_KEY", "POCKET_ID_API_ID",
+	"FRPS_DASHBOARD_URL", "FRPS_DASHBOARD_USER", "FRPS_DASHBOARD_PASSWORD", "PLUGIN_SECRET",
 }
 
 func TestLoadConfig(t *testing.T) {
@@ -53,7 +57,8 @@ func TestLoadConfig(t *testing.T) {
 		Issuer: "https://idp.layertwo.dev", APIResource: "https://tunnels.layertwo.dev",
 		CreatorsGroup: "tunnels-creators", UsernameClaim: "nickname", GroupsClaim: "roles",
 		CLIClientID: "tunnels-cli", MinCLIVersion: "0.2.0",
-		DatabaseURL:      "postgres://broker:pw@db:5432/tunnels",
+		DatabaseURL: "postgres://broker:pw@db:5432/tunnels",
+		PocketIDURL: "https://idp.layertwo.dev", PocketIDAPIKey: "pocket-admin-key", PocketIDAPIID: "api-tunnels",
 		FrpsDashboardURL: "http://frps.tunnels.svc:7500", FrpsDashboardUser: "broker", FrpsDashboardPassword: "dash-pw",
 		PluginSecret: goodSecret, MaxTunnelsPerUser: 3, BandwidthLimit: "2MB",
 		Reserved: []string{"admin", "root", "ops"}, ListenAddr: "127.0.0.1:9000", LogLevel: slog.LevelDebug,
@@ -79,49 +84,22 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadConfigMachineClients(t *testing.T) {
-	t.Run("parses, trims and lowercases the handle", func(t *testing.T) {
-		vars := allVars()
-		vars["MACHINE_CLIENTS"] = " id1 = Alice , id2=BOX ,"
-		got, err := load(vars)
-		if err != nil {
-			t.Fatal(err)
-		}
-		want := map[string]string{"id1": "alice", "id2": "box"}
-		if !reflect.DeepEqual(got.MachineClients, want) {
-			t.Errorf("MachineClients = %v, want %v", got.MachineClients, want)
-		}
-	})
-	for _, value := range []string{"id1=", "=alice", "id1=a", "id1=Al ice"} {
-		t.Run("rejects "+value, func(t *testing.T) {
-			vars := allVars()
-			vars["MACHINE_CLIENTS"] = value
-			if _, err := load(vars); err == nil || !strings.Contains(err.Error(), "MACHINE_CLIENTS") {
-				t.Fatalf("err = %v, want one naming MACHINE_CLIENTS", err)
-			}
-		})
+// MACHINE_CLIENTS is gone: a machine's mapping lives in the machines table, so an environment that
+// still sets the variable must load unchanged and must not fail.
+func TestLoadConfigIgnoresMachineClients(t *testing.T) {
+	want, err := load(allVars())
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Run("absent is nil", func(t *testing.T) {
-		got, err := load(allVars())
-		if err != nil || got.MachineClients != nil {
-			t.Errorf("MachineClients = %v, %v, want nil", got.MachineClients, err)
-		}
-	})
-	t.Run("empty is nil", func(t *testing.T) {
-		vars := allVars()
-		vars["MACHINE_CLIENTS"] = ""
-		got, err := load(vars)
-		if err != nil || got.MachineClients != nil {
-			t.Errorf("MachineClients = %v, %v, want nil", got.MachineClients, err)
-		}
-	})
-	t.Run("a pair without an equals sign", func(t *testing.T) {
-		vars := allVars()
-		vars["MACHINE_CLIENTS"] = "id1=alice,junk"
-		if _, err := load(vars); err == nil || !strings.Contains(err.Error(), "MACHINE_CLIENTS") {
-			t.Fatalf("err = %v, want one naming MACHINE_CLIENTS", err)
-		}
-	})
+	vars := allVars()
+	vars["MACHINE_CLIENTS"] = "id1=Alice,id2=BOX,junk"
+	got, err := load(vars)
+	if err != nil {
+		t.Fatalf("a stale MACHINE_CLIENTS failed the load: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("config with MACHINE_CLIENTS =\n%+v\nwant\n%+v", got, want)
+	}
 }
 
 func TestLoadConfigRequired(t *testing.T) {
@@ -201,6 +179,11 @@ func TestLoadConfigRejects(t *testing.T) {
 		{"FRPS_DASHBOARD_URL", "http://frps:7500?x=1"},
 		{"FRPS_DASHBOARD_URL", "http://frps:7500/#x"},
 		{"FRPS_DASHBOARD_URL", "http://frps:7500?"},
+		{"POCKET_ID_URL", "idp:8080"},
+		{"POCKET_ID_URL", "ftp://idp.example.com"},
+		{"POCKET_ID_URL", "http://"},
+		{"POCKET_ID_URL", "http://pocket:hunter2@idp.example.com"},
+		{"POCKET_ID_URL", "https://idp.example.com?x=1"},
 		{"PLUGIN_SECRET", "short"},
 		{"PLUGIN_SECRET", goodSecret[:31]},
 		{"PLUGIN_SECRET", goodSecret + "/x"},
@@ -218,7 +201,7 @@ func TestLoadConfigRejects(t *testing.T) {
 				t.Fatalf("err = %v, want one naming %s", err, tt.name)
 			}
 			// What is wrong with a secret must not end up in a log with the secret in it.
-			if (tt.name == "PLUGIN_SECRET" || tt.name == "FRPS_DASHBOARD_URL") && strings.Contains(err.Error(), tt.value) {
+			if (tt.name == "PLUGIN_SECRET" || tt.name == "FRPS_DASHBOARD_URL" || tt.name == "POCKET_ID_URL") && strings.Contains(err.Error(), tt.value) {
 				t.Errorf("the error repeats the value, which may hold a secret: %v", err)
 			}
 			if strings.Contains(err.Error(), "hunter2") {
@@ -262,12 +245,13 @@ func TestLoadConfigErrorsHideSecrets(t *testing.T) {
 	vars["MAX_TUNNELS_PER_USER"] = "x"
 	vars["PLUGIN_SECRET"] = "short-secret-value"
 	vars["FRPS_DASHBOARD_PASSWORD"] = "dash-pw-value"
+	vars["POCKET_ID_API_KEY"] = "pocket-key-value"
 	vars["DATABASE_URL"] = ""
 	_, err := load(vars)
 	if err == nil {
 		t.Fatal("no error")
 	}
-	for _, secret := range []string{"short-secret-value", "dash-pw-value", "broker:pw"} {
+	for _, secret := range []string{"short-secret-value", "dash-pw-value", "pocket-key-value", "broker:pw"} {
 		if strings.Contains(err.Error(), secret) {
 			t.Errorf("the error contains %q: %v", secret, err)
 		}

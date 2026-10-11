@@ -35,16 +35,20 @@ type Env struct {
 
 const usage = `Usage:
   tunnel login [--server HOST]                    log in with your browser
-  tunnel login --machine CLIENT_ID [--server HOST]  log in as a machine client (secret from TUNNELS_CLIENT_SECRET)
   tunnel up PORT [--name NAME]                    publish http://127.0.0.1:PORT until you stop it
-  tunnel share [--name NAME] [--group] [--for DURATION] GRANTEE  let someone else reach a tunnel (group shares need the gate to forward groups)
-  tunnel unshare [--name NAME] [--group] GRANTEE  stop sharing a tunnel
+  tunnel share [--group] [--for DURATION] LABEL GRANTEE  let someone else reach a site (group shares need the gate to forward groups)
+  tunnel unshare [--group] LABEL GRANTEE  stop sharing a site
   tunnel list                                     show what you share
+  tunnel machine create NAME                      make a machine publish as itself, no passkey (run it on the machine)
+  tunnel machine list                             show your machines
+  tunnel machine remove NAME                      revoke a machine
   tunnel logout                                   forget the login on this computer
   tunnel version
 `
 
 const usageUp = "Usage: tunnel up PORT [--name NAME]"
+
+const usageMachine = "Usage: tunnel machine create NAME | list | remove NAME"
 
 // Main runs the command in args and returns the exit code: 0 done, 1 failed, 2 used wrongly.
 func Main(args []string, env Env) int {
@@ -72,6 +76,8 @@ func Main(args []string, env Env) int {
 		return share(ctx, env, rest, true)
 	case "list":
 		return list(ctx, env, rest)
+	case "machine":
+		return machine(ctx, env, rest)
 	case "logout", "version":
 		if len(rest) > 0 {
 			fmt.Fprint(env.Stderr, usage)
@@ -122,7 +128,6 @@ func login(ctx context.Context, env Env, args []string) int {
 	fs := pflag.NewFlagSet("login", pflag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	server := fs.String("server", env.DefaultServer, "the tunnel service")
-	machine := fs.String("machine", "", "log in as a machine client id; the secret comes from TUNNELS_CLIENT_SECRET")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
 		if err != nil {
 			fmt.Fprintln(env.Stderr, err)
@@ -142,19 +147,7 @@ func login(ctx context.Context, env Env, args []string) int {
 		return 1
 	}
 	o := oidcFor(b, env.HTTP)
-	var tok auth.Tokens
-	if *machine != "" {
-		// The secret is never a flag: it would land in the shell history. The environment is not
-		// printed and the token file is 0600, so it stays off the screen and off disk for others.
-		secret := os.Getenv("TUNNELS_CLIENT_SECRET")
-		if secret == "" {
-			fmt.Fprintln(env.Stderr, "set TUNNELS_CLIENT_SECRET to the secret of the machine client")
-			return 1
-		}
-		tok, err = o.ClientCredentials(ctx, *machine, secret)
-	} else {
-		tok, err = o.DeviceLogin(ctx, env.Stdout)
-	}
+	tok, err := o.DeviceLogin(ctx, env.Stdout)
 	if err != nil {
 		fmt.Fprintln(env.Stderr, err)
 		return 1
@@ -169,11 +162,7 @@ func login(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintln(env.Stderr, err)
 		return 1
 	}
-	if *machine != "" {
-		fmt.Fprintf(env.Stdout, "Logged in as the machine client %s (%s)\n", *machine, me.Handle)
-	} else {
-		fmt.Fprintf(env.Stdout, "Logged in as %s (%s)\n", me.Username, me.Handle)
-	}
+	fmt.Fprintf(env.Stdout, "Logged in as %s (%s)\n", me.Username, me.Handle)
 	return 0
 }
 
@@ -294,15 +283,8 @@ func session(ctx context.Context, env Env) (auth.Tokens, bool) {
 	return tok, true
 }
 
-// tunnelLabel is a share's tunnel as a person reads it: the default tunnel has no name.
-func tunnelLabel(tunnel string) string {
-	if tunnel == "" {
-		return "(default)"
-	}
-	return tunnel
-}
-
-// share grants or, when remove is set, removes access to a tunnel.
+// share grants or, when remove is set, removes access to one of the owner's sites, named by its label
+// (<handle> for the default site, <handle>-<name> for a named one).
 func share(ctx context.Context, env Env, args []string, remove bool) int {
 	verb := "share"
 	if remove {
@@ -310,12 +292,11 @@ func share(ctx context.Context, env Env, args []string, remove bool) int {
 	}
 	fs := pflag.NewFlagSet(verb, pflag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	name := fs.String("name", "", "the tunnel's name; none means the default tunnel")
 	group := fs.Bool("group", false, "share with a Pocket ID group instead of a username")
 	lifetime := fs.String("for", "", "how long the share lasts, e.g. 24h or 7d")
-	shape := "[--name NAME] [--group] GRANTEE"
+	shape := "[--group] LABEL GRANTEE"
 	if !remove {
-		shape = "[--name NAME] [--group] [--for DURATION] GRANTEE"
+		shape = "[--group] [--for DURATION] LABEL GRANTEE"
 	}
 	bad := func(format string, a ...any) int {
 		fmt.Fprintf(env.Stderr, format+"\nUsage: tunnel "+verb+" "+shape+"\n", a...)
@@ -327,11 +308,12 @@ func share(ctx context.Context, env Env, args []string, remove bool) int {
 	if remove && fs.Changed("for") {
 		return bad("--for is only for share, not unshare")
 	}
-	if fs.NArg() != 1 {
-		return bad("give the username or group to share with")
+	if fs.NArg() != 2 {
+		return bad("give the site's label and the username or group to share with")
 	}
-	if *name != "" && !names.ValidTunnelName(*name) {
-		return bad("%q is not a tunnel name: use 1 to 42 lowercase letters, digits and inner dashes, other than %q", *name, names.Default)
+	handle, tunnel, ok := names.ParseLabel(fs.Arg(0))
+	if !ok {
+		return bad("%q is not a site label: use <handle> or <handle>-<name>", fs.Arg(0))
 	}
 	var expiresAt time.Time
 	if *lifetime != "" {
@@ -345,7 +327,7 @@ func share(ctx context.Context, env Env, args []string, remove bool) int {
 	if *group {
 		kind = "group"
 	}
-	sh := auth.Share{Tunnel: *name, Kind: kind, Grantee: fs.Arg(0), ExpiresAt: expiresAt}
+	sh := auth.Share{Handle: handle, Tunnel: tunnel, Kind: kind, Grantee: fs.Arg(1), ExpiresAt: expiresAt}
 
 	tok, ok := session(ctx, env)
 	if !ok {
@@ -361,15 +343,16 @@ func share(ctx context.Context, env Env, args []string, remove bool) int {
 		fmt.Fprintln(env.Stderr, err)
 		return 1
 	}
+	label := names.Label(sh.Handle, sh.Tunnel)
 	if remove {
-		fmt.Fprintf(env.Stdout, "Stopped sharing %s with %s\n", tunnelLabel(sh.Tunnel), sh.Grantee)
+		fmt.Fprintf(env.Stdout, "Stopped sharing %s with %s\n", label, sh.Grantee)
 	} else {
-		fmt.Fprintf(env.Stdout, "Shared %s with %s\n", tunnelLabel(sh.Tunnel), sh.Grantee)
+		fmt.Fprintf(env.Stdout, "Shared %s with %s\n", label, sh.Grantee)
 	}
 	return 0
 }
 
-// list prints the shares the owner set on the service.
+// list prints the shares the owner set on the service, each named by its site label.
 func list(ctx context.Context, env Env, args []string) int {
 	if len(args) > 0 {
 		fmt.Fprint(env.Stderr, usage)
@@ -385,8 +368,112 @@ func list(ctx context.Context, env Env, args []string) int {
 		return 1
 	}
 	for _, sh := range shares {
-		fmt.Fprintf(env.Stdout, "%s\t%s\t%s\t%s\n", tunnelLabel(sh.Tunnel), sh.Kind, sh.Grantee, expiryLabel(sh.ExpiresAt))
+		fmt.Fprintf(env.Stdout, "%s\t%s\t%s\t%s\n", names.Label(sh.Handle, sh.Tunnel), sh.Kind, sh.Grantee, expiryLabel(sh.ExpiresAt))
 	}
+	return 0
+}
+
+// machine dispatches the machine subcommands: create, list and remove.
+func machine(ctx context.Context, env Env, args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(env.Stderr, usageMachine)
+		return 2
+	}
+	switch sub, rest := args[0], args[1:]; sub {
+	case "create":
+		return machineCreate(ctx, env, rest)
+	case "list":
+		return machineList(ctx, env, rest)
+	case "remove":
+		return machineRemove(ctx, env, rest)
+	default:
+		fmt.Fprintf(env.Stderr, "unknown machine command %q\n%s\n", sub, usageMachine)
+		return 2
+	}
+}
+
+// machineBad prints the usage line and fails the command as used wrongly.
+func machineBad(env Env, format string, a ...any) int {
+	fmt.Fprintf(env.Stderr, format+"\n"+usageMachine+"\n", a...)
+	return 2
+}
+
+// machineCreate runs on the target machine: it generates a key pair here, asks the broker (as the
+// owner) to register the public half, and leaves the config dir ready for up. The private key never
+// leaves this machine.
+func machineCreate(ctx context.Context, env Env, args []string) int {
+	if len(args) != 1 || !names.ValidHandle(args[0]) {
+		return machineBad(env, "give a machine handle: 2 to 20 lowercase letters and digits")
+	}
+	handle := args[0]
+	s, err := store(env)
+	if err != nil {
+		fmt.Fprintln(env.Stderr, err)
+		return 1
+	}
+	tok, ok := session(ctx, env)
+	if !ok {
+		return 1
+	}
+	key, err := auth.GenerateMachineKey()
+	if err != nil {
+		fmt.Fprintln(env.Stderr, err) // coverage-ignore: ecdsa generation cannot fail; crypto/rand.Reader does not
+		return 1
+	}
+	keyPath := filepath.Join(s.Dir, auth.MachineKeyFile)
+	if err := auth.SaveMachineKey(keyPath, key); err != nil {
+		fmt.Fprintln(env.Stderr, err)
+		return 1
+	}
+	m, err := auth.CreateMachine(ctx, env.HTTP, tok.Server, tok.AccessToken, handle, key.Public())
+	if err != nil {
+		os.Remove(keyPath) // no key without a machine
+		fmt.Fprintln(env.Stderr, err)
+		return 1
+	}
+	login := auth.Tokens{ClientID: m.ClientID, MachineKey: keyPath, Handle: m.Handle, Server: tok.Server}
+	if err := s.Save(login); err != nil {
+		fmt.Fprintln(env.Stderr, err) // coverage-ignore: session just wrote here, so saving the machine login cannot fail
+		return 1
+	}
+	fmt.Fprintf(env.Stdout, "Created machine %s\n", m.Handle)
+	return 0
+}
+
+// machineList prints the owner's machines, each as its handle and client id.
+func machineList(ctx context.Context, env Env, args []string) int {
+	if len(args) != 0 {
+		return machineBad(env, "list takes no arguments")
+	}
+	tok, ok := session(ctx, env)
+	if !ok {
+		return 1
+	}
+	machines, err := auth.ListMachines(ctx, env.HTTP, tok.Server, tok.AccessToken)
+	if err != nil {
+		fmt.Fprintln(env.Stderr, err)
+		return 1
+	}
+	for _, m := range machines {
+		fmt.Fprintf(env.Stdout, "%s\t%s\n", m.Handle, m.ClientID)
+	}
+	return 0
+}
+
+// machineRemove revokes a machine by handle.
+func machineRemove(ctx context.Context, env Env, args []string) int {
+	if len(args) != 1 || !names.ValidHandle(args[0]) {
+		return machineBad(env, "give the machine's handle: 2 to 20 lowercase letters and digits")
+	}
+	tok, ok := session(ctx, env)
+	if !ok {
+		return 1
+	}
+	if err := auth.DeleteMachine(ctx, env.HTTP, tok.Server, tok.AccessToken, args[0]); err != nil {
+		fmt.Fprintln(env.Stderr, err)
+		return 1
+	}
+	fmt.Fprintf(env.Stdout, "Removed machine %s\n", args[0])
 	return 0
 }
 
