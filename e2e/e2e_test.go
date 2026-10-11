@@ -417,6 +417,46 @@ func TestRefusedLogins(t *testing.T) {
 	}
 }
 
+// The machine-client design rests on frps deferring to the broker: a client_credentials token for a
+// client the broker was not told about is a valid OIDC token (signed, right audience, unexpired)
+// that frps admits and the plugin refuses. A rogue client gets no tunnel and no handle, and the
+// token never reaches the log.
+func TestUnknownMachineClientGetsNoTunnel(t *testing.T) {
+	s := newStack(t, 5)
+
+	resp, err := http.PostForm(s.mock.URL+"/token", url.Values{
+		"grant_type": {"client_credentials"},
+		"client_id":  {"rogue"},
+		"resource":   {mockidp.APIResource},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var tok struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tok); err != nil || tok.AccessToken == "" {
+		t.Fatalf("client_credentials answered %v (%+v)", err, tok)
+	}
+
+	// The plugin refuses it before setting a handle, so the connection has no user.
+	reject, reason, user := s.pluginLogin(t, tok.AccessToken, "")
+	if !reject || user != "" || !strings.Contains(reason, "not configured") {
+		t.Errorf("unknown machine login: reject=%v user=%q reason=%q, want a rejection with no user", reject, user, reason)
+	}
+
+	// A whole `tunnel up` with it never serves: the first login is refused.
+	if err := s.up(t, tok.AccessToken, "rogue", "").wait(t); err == nil || !strings.HasPrefix(err.Error(), "login to the server failed: ") {
+		t.Errorf("Run = %v, want the login refused by the broker", err)
+	}
+
+	// The credential is never written to the log.
+	if logs := s.brokerLog.String(); strings.Contains(logs, tok.AccessToken) {
+		t.Errorf("the access token reached the broker log:\n%s", logs)
+	}
+}
+
 // pluginLogin posts a Login to the broker as frps would.
 func (s *stack) pluginLogin(t *testing.T, token, runID string) (reject bool, reason, user string) {
 	t.Helper()
