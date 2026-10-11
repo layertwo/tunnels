@@ -31,6 +31,7 @@ type Deps struct {
 func NewHandler(cfg Config, d Deps) http.Handler {
 	resolver := Resolver{IdP: d.IdP, Verifier: d.Verifier, Users: d.Users, CreatorsGroup: cfg.CreatorsGroup, Reserved: cfg.Reserved}
 	s := &server{cfg: cfg, d: d, resolver: resolver}
+	m := NewMetrics()
 
 	mux := http.NewServeMux()
 	// No method here: Hooks answers a wrong secret with 404 whatever the method, so a probe learns nothing.
@@ -38,14 +39,15 @@ func NewHandler(cfg Config, d Deps) http.Handler {
 		Resolver: resolver, Frps: d.Frps, Secret: cfg.PluginSecret,
 		MaxTunnelsPerUser: cfg.MaxTunnelsPerUser, BandwidthLimit: cfg.BandwidthLimit, Log: d.Log,
 	})
-	mux.Handle("/authz", Authz{Users: d.Users, Shares: d.Shares, SitesDomain: cfg.SitesDomain, Log: d.Log})
+	mux.Handle("/authz", Authz{Users: d.Users, Shares: d.Shares, SitesDomain: cfg.SitesDomain, Log: d.Log, Metrics: m})
 	mux.HandleFunc("GET /api/me", s.me)
 	mux.HandleFunc("GET /api/shares", s.sharesGet)
 	mux.HandleFunc("PUT /api/shares", s.sharesPut)
 	mux.HandleFunc("DELETE /api/shares", s.sharesDelete)
 	mux.HandleFunc("GET /.well-known/tunnels.json", s.wellKnown)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
-	return mux
+	mux.Handle("GET /metrics", m.Handler())
+	return m.Middleware(mux)
 }
 
 type server struct {
