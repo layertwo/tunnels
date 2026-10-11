@@ -35,6 +35,9 @@ func (s Store) tokensPath() string { return filepath.Join(s.Dir, "tokens.json") 
 // AccessTokenPath is the file the frp client reads its token from.
 func (s Store) AccessTokenPath() string { return filepath.Join(s.Dir, "access-token") }
 
+// MachineKeyPath is the file a machine's private key lives in; it is 0600 and never sent.
+func (s Store) MachineKeyPath() string { return filepath.Join(s.Dir, MachineKeyFile) }
+
 // Load returns the stored tokens, or ErrNotLoggedIn.
 func (s Store) Load() (Tokens, error) {
 	raw, err := os.ReadFile(s.tokensPath())
@@ -70,9 +73,9 @@ func (s Store) Save(t Tokens) error {
 	return nil
 }
 
-// Clear removes both files. Nothing to remove is not an error.
+// Clear removes the token files and the machine's private key. Nothing to remove is not an error.
 func (s Store) Clear() error {
-	for _, path := range []string{s.tokensPath(), s.AccessTokenPath()} {
+	for _, path := range []string{s.tokensPath(), s.AccessTokenPath(), s.MachineKeyPath()} {
 		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("auth: %w", err)
 		}

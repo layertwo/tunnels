@@ -198,12 +198,13 @@ func TestAPIMeKeepsTheStoredHandle(t *testing.T) {
 // to its machine's own handle, never to a person's.
 func TestNewHandlerResolvesAMachineFromTheStore(t *testing.T) {
 	r := newServerRig(t)
-	r.machines.machines["abc"] = store.Machine{Handle: "nas", ClientID: "abc"}
+	r.users.users["sub-alice"] = store.User{Sub: "sub-alice", Handle: "alice"} // the machine's owner
+	r.machines.machines["abc"] = store.Machine{Handle: "nas", ClientID: "abc", OwnerRef: "sub-alice"}
 	token := r.idp.Issue("client-abc", mockidp.IssueOpts{}) // a client_credentials subject
 
 	w := r.do("GET", "/api/me", bearer(token), "")
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `"handle":"nas"`) {
-		t.Errorf("= %d %q, want 200 with the machine's own handle", w.Code, w.Body)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"handle":"nas"`) || !strings.Contains(w.Body.String(), `"machine":true`) {
+		t.Errorf("= %d %q, want 200 with the machine's own handle and the machine marker", w.Code, w.Body)
 	}
 }
 

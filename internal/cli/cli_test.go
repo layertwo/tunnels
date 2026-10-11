@@ -475,6 +475,42 @@ func TestLogoutClears(t *testing.T) {
 	}
 }
 
+// A machine's private key is a credential: logout must remove it, not just the token.
+func TestLogoutRemovesTheMachineKey(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	keyPath := filepath.Join(w.dir, auth.MachineKeyFile)
+	key, err := auth.GenerateMachineKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := auth.SaveMachineKey(keyPath, key); err != nil {
+		t.Fatal(err)
+	}
+	if c := w.main("logout"); c != 0 {
+		t.Fatalf("exit %d", c)
+	}
+	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the machine key survived logout: %v", err)
+	}
+}
+
+// A key path that cannot be removed (a non-empty directory) is an error, not a silent success.
+func TestLogoutCannotRemoveTheMachineKey(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	keyDir := filepath.Join(w.dir, auth.MachineKeyFile)
+	if err := os.MkdirAll(keyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(keyDir, "x"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if c := w.main("logout"); c != 1 || !strings.Contains(w.err.String(), "remove") {
+		t.Errorf("exit %d, stderr:\n%s", c, w.err)
+	}
+}
+
 func TestVersion(t *testing.T) {
 	w := newWorld(t)
 	if c := w.main("version"); c != 0 || w.out.String() != "tunnel 1.2.3 (server tunnels.layertwo.dev)\n" {
@@ -1109,6 +1145,37 @@ func TestMachineRemove(t *testing.T) {
 	}
 	if !strings.Contains(w.out.String(), "nas") {
 		t.Errorf("stdout lacks the machine's handle:\n%s", w.out)
+	}
+}
+
+// Removing the machine this box is logged in as clears the local login and its private key too.
+func TestMachineRemoveClearsTheLocalMachineLogin(t *testing.T) {
+	w := newWorld(t)
+	tok := w.loggedIn()
+	tok.Handle = "nas" // this box is logged in as the machine
+	if err := (auth.Store{Dir: w.dir}).Save(tok); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(w.dir, auth.MachineKeyFile)
+	key, err := auth.GenerateMachineKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := auth.SaveMachineKey(keyPath, key); err != nil {
+		t.Fatal(err)
+	}
+	w.mu.Lock()
+	w.machines = []auth.Machine{{Handle: "nas", ClientID: "machine-nas"}}
+	w.mu.Unlock()
+
+	if c := w.main("machine", "remove", "nas"); c != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
+	}
+	if _, err := (auth.Store{Dir: w.dir}).Load(); !errors.Is(err, auth.ErrNotLoggedIn) {
+		t.Errorf("the local login survived: %v", err)
+	}
+	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the machine key survived removal: %v", err)
 	}
 }
 

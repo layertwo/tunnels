@@ -683,6 +683,17 @@ func TestFederatedClientCredentials(t *testing.T) {
 	wantError(t, status, body, "invalid_grant")
 }
 
+// A client registered with a federated key must prove possession: a call with no assertion is refused,
+// so a request that dropped the assertion cannot fall back to an unchecked secret-style call.
+func TestFederatedClientCredentialsRequiresAnAssertion(t *testing.T) {
+	s := New(t)
+	key := machineKey(t)
+	s.AddMachineKey("machine-1", key.Public())
+
+	status, body := federated(t, s, "machine-1", "")
+	wantError(t, status, body, "invalid_client")
+}
+
 func TestFederatedClientCredentialsRefusals(t *testing.T) {
 	s := New(t)
 	key := machineKey(t)

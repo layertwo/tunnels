@@ -436,12 +436,20 @@ func (s *Server) exchangeRefreshToken(token string) (resp map[string]any, errCod
 }
 
 // exchangeClientCredentials answers the client_credentials grant for a machine client: a token whose
-// subject names the client so the broker can map it to a handle, with no refresh token. A request
-// with a client_assertion is verified against the registered federated key; one without is the older
-// secret-style call, which the mock does not check (it has no registry of secrets).
+// subject names the client so the broker can map it to a handle, with no refresh token. A client
+// registered with a federated key must prove possession: a call without a client_assertion is refused,
+// so a request that dropped the assertion cannot fall back to an unchecked secret-style call. An
+// unregistered client is still issued a token, so a rogue-client test can reach the broker.
 func (s *Server) exchangeClientCredentials(form url.Values) (map[string]any, string) {
 	clientID := form.Get("client_id")
-	if assertion := form.Get("client_assertion"); assertion != "" {
+	assertion := form.Get("client_assertion")
+	s.mu.Lock()
+	_, federated := s.machineKeys[clientID]
+	s.mu.Unlock()
+	if federated && assertion == "" {
+		return nil, "invalid_client"
+	}
+	if assertion != "" {
 		if errCode := s.verifyAssertion(clientID, assertion); errCode != "" {
 			return nil, errCode
 		}

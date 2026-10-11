@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -46,6 +45,7 @@ func NewHandler(cfg Config, d Deps) http.Handler {
 	mux.HandleFunc("POST /api/machines", s.machinesCreate)
 	mux.HandleFunc("GET /api/machines", s.machinesList)
 	mux.HandleFunc("DELETE /api/machines/{handle}", s.machinesDelete)
+	mux.HandleFunc("PUT /api/machines/{handle}", s.machinesDisable)
 	mux.HandleFunc("GET /api/shares", s.sharesGet)
 	mux.HandleFunc("PUT /api/shares", s.sharesPut)
 	mux.HandleFunc("DELETE /api/shares", s.sharesDelete)
@@ -140,10 +140,8 @@ func (s *server) changeShare(w http.ResponseWriter, r *http.Request, put bool) {
 		writeJSON(w, http.StatusServiceUnavailable, errorBody(noSharesStore))
 		return
 	}
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody))
 	var sh store.Share
-	if err := dec.Decode(&sh); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid share"))
+	if !decodeStrict(w, r, &sh, "invalid share") {
 		return
 	}
 	// An older CLI sends only the tunnel: every share before machines was the caller's own site, so
@@ -152,11 +150,6 @@ func (s *server) changeShare(w http.ResponseWriter, r *http.Request, put bool) {
 		sh.Handle = acct.Handle
 	}
 	if !validShare(sh, put) {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid share"))
-		return
-	}
-	// Anything after the first JSON value is not the share the caller asked for.
-	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		writeJSON(w, http.StatusBadRequest, errorBody("invalid share"))
 		return
 	}

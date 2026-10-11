@@ -266,8 +266,13 @@ fixed **in the same change that enables it**, not after.
   this design only fixes *who a machine is* and *who owns it*.
 - **Machine credential scope** — whether a machine token may call the share API (it should not, once
   capability is modelled).
-- **Hardware-backed keys** — v1 stores the machine's key in a 0600 file; Secure Enclave / TPM 2.0 /
-  PKCS#11 is a follow-up, the same key with a different store.
+- **Hardware-backed keys** — deferred. v1 stores the machine's key in a 0600 file. The intended future
+  shape is a **pluggable keystore** so a hardware backend slots in, chosen per machine with the file
+  as the fallback (a Pi or many VPS have no TPM, so it can never be the only path). The constraint:
+  the CLI ships `CGO_ENABLED=0` on every target, so the only backend that fits as-is is **Linux TPM
+  2.0** (pure-Go `go-tpm`, `/dev/tpmrm0`); macOS Secure Enclave and Windows NCrypt would force cgo
+  into the release (or a shell-out to `security`/`ncrypt`) — a deliberate release-pipeline decision to
+  make together with the backend, not as a side effect.
 - **`install.sh` / live status / frps HA** — unrelated, tracked in `docs/design.md`.
 
 ## Left to the builder

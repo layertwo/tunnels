@@ -844,7 +844,8 @@ func TestNewWorkConnRejectsAnotherUser(t *testing.T) {
 // to its own handle, and a work connection for another control's session is refused (invariant 2).
 func TestNewWorkConnBindsAMachineToItsOwnHandle(t *testing.T) {
 	r := newRig()
-	r.machines.machines["abc"] = store.Machine{Handle: "nas", ClientID: "abc"}
+	r.users.users["sub-alice"] = store.User{Sub: "sub-alice", Handle: "alice"} // the machine's owner
+	r.machines.machines["abc"] = store.Machine{Handle: "nas", ClientID: "abc", OwnerRef: "sub-alice"}
 	verifierOf(r.hooks.Resolver).sub = "client-abc"
 
 	// This machine's own control connection: the work connection may ride it.

@@ -173,6 +173,10 @@ func (a Authz) siteOwner(ctx context.Context, handle string) (siteOwner, error) 
 	case !errors.Is(err, store.ErrNotFound):
 		return siteOwner{}, err
 	}
+	// A broker built without a machine store (a bare Deps) must deny rather than panic.
+	if a.Machines == nil {
+		return siteOwner{}, store.ErrNotFound
+	}
 	m, err := a.Machines.MachineByHandle(ctx, handle)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -182,6 +186,8 @@ func (a Authz) siteOwner(ctx context.Context, handle string) (siteOwner, error) 
 	case m.Disabled:
 		return siteOwner{ref: m.OwnerRef, disabled: true}, nil
 	}
+	// The machine's owner_ref is a user sub today; a group-owned machine (Decision 8) would miss here
+	// and deny — fail closed, as an unknown owner should.
 	owner, err := a.Users.UserBySub(ctx, m.OwnerRef)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
