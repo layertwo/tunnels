@@ -203,8 +203,8 @@ func TestNewHandlerResolvesAMachineFromTheStore(t *testing.T) {
 	token := r.idp.Issue("client-abc", mockidp.IssueOpts{}) // a client_credentials subject
 
 	w := r.do("GET", "/api/me", bearer(token), "")
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `"handle":"nas"`) {
-		t.Errorf("= %d %q, want 200 with the machine's own handle", w.Code, w.Body)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"handle":"nas"`) || !strings.Contains(w.Body.String(), `"machine":true`) {
+		t.Errorf("= %d %q, want 200 with the machine's own handle and the machine marker", w.Code, w.Body)
 	}
 }
 

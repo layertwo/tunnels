@@ -3,7 +3,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -421,7 +420,7 @@ func machineCreate(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintln(env.Stderr, err) // coverage-ignore: ecdsa generation cannot fail; crypto/rand.Reader does not
 		return 1
 	}
-	keyPath := filepath.Join(s.Dir, auth.MachineKeyFile)
+	keyPath := s.MachineKeyPath()
 	if err := auth.SaveMachineKey(keyPath, key); err != nil {
 		fmt.Fprintln(env.Stderr, err)
 		return 1
@@ -509,14 +508,7 @@ func forgetLocal(env Env) error {
 	if err != nil {
 		return err
 	}
-	if err := s.Clear(); err != nil {
-		return err
-	}
-	// A machine's private key is a credential too; logging out must not leave it behind.
-	if err := os.Remove(filepath.Join(s.Dir, auth.MachineKeyFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
+	return s.Clear()
 }
 
 func logout(env Env) int {

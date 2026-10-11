@@ -58,7 +58,7 @@ var (
 	ErrNotCreator     = errors.New("broker: not in the creators group")
 	ErrDisabled       = errors.New("broker: account is disabled")
 	ErrBadHandle      = errors.New("broker: username cannot be a handle")
-	ErrUnknownMachine = errors.New("broker: machine is not registered")
+	ErrUnknownMachine = errors.New("broker: machine is not usable")
 )
 
 // notValid is what a person is told when their token is refused.
