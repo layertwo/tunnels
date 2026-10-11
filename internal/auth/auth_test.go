@@ -22,6 +22,7 @@ import (
 	"github.com/layertwo/tunnels/internal/httpx"
 	"github.com/layertwo/tunnels/internal/idp"
 	"github.com/layertwo/tunnels/internal/mockidp"
+	"golang.org/x/oauth2"
 )
 
 const ua = "tunnels-test/1"
@@ -361,6 +362,16 @@ func (r *recorder) RoundTrip(req *http.Request) (*http.Response, error) {
 		form, _ := url.ParseQuery(string(body))
 		for k, v := range req.URL.Query() { // a parameter in the URL counts as much as one in the body
 			form[k] = append(form[k], v...)
+		}
+		// Credentials may ride either the body or the Authorization header; record them the same
+		// way, so a test asserts they were carried without forcing one style.
+		if id, secret, ok := req.BasicAuth(); ok {
+			if form.Get("client_id") == "" {
+				form.Set("client_id", id)
+			}
+			if form.Get("client_secret") == "" {
+				form.Set("client_secret", secret)
+			}
 		}
 		r.mu.Lock()
 		r.forms = append(r.forms, form)
@@ -1098,5 +1109,53 @@ func TestClientCredentialsErrors(t *testing.T) {
 	}
 	if err != nil && strings.Contains(err.Error(), "s3cret") {
 		t.Errorf("the error repeats the client secret: %v", err)
+	}
+}
+
+// A token endpoint that fails by echoing the request back must not put the client secret in the
+// error text: the wrapped *oauth2.RetrieveError would otherwise reprint the body.
+func TestClientCredentialsErrorHidesEchoedSecret(t *testing.T) {
+	const secret = "s3cret-echoed"
+	issuer := brokenIDP(t,
+		func(http.ResponseWriter, *http.Request) {},
+		func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `{"client_secret":%q}`, secret)
+		})
+	o := OIDC{Issuer: issuer, ClientID: "c", Resource: "r", HTTP: client()}
+	_, err := o.ClientCredentials(t.Context(), "machine-1", secret)
+	if err == nil {
+		t.Fatal("ClientCredentials against an echoing token endpoint succeeded")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("the error repeats the client secret: %v", err)
+	}
+}
+
+// clientCredentialsError names the provider's refusal in every shape a *oauth2.RetrieveError can
+// take, and never echoes the response body (which may hold the request, secret and all).
+func TestClientCredentialsError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"code and description", &oauth2.RetrieveError{ErrorCode: "invalid_client", ErrorDescription: "bad secret"}, "invalid_client: bad secret"},
+		{"code only", &oauth2.RetrieveError{ErrorCode: "invalid_client"}, "invalid_client"},
+		{"response but no code", &oauth2.RetrieveError{Response: &http.Response{Status: "400 Bad Request"}, Body: []byte(`{"client_secret":"s3cret"}`)}, "400 Bad Request"},
+		{"no detail at all", &oauth2.RetrieveError{}, "refused the request"},
+		{"not a retrieve error", errors.New("dial tcp: refused"), "dial tcp: refused"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := clientCredentialsError(tt.err)
+			if !strings.Contains(got.Error(), tt.want) {
+				t.Errorf("clientCredentialsError(%v) = %q, want it to contain %q", tt.err, got, tt.want)
+			}
+			if strings.Contains(got.Error(), "s3cret") {
+				t.Errorf("clientCredentialsError(%v) = %q, repeats the client secret", tt.err, got)
+			}
+		})
 	}
 }

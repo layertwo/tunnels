@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/fatedier/frp/pkg/config/types"
+	"github.com/layertwo/tunnels/internal/names"
 )
 
 // Config is the broker's settings, one field per environment variable.
@@ -134,11 +135,16 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 				continue
 			}
 			id, handle, ok := strings.Cut(pair, "=")
+			id, handle = strings.TrimSpace(id), strings.ToLower(strings.TrimSpace(handle))
 			if !ok {
 				bad("MACHINE_CLIENTS", "must be a comma-separated list of client-id=handle pairs")
 				continue
 			}
-			c.MachineClients[strings.TrimSpace(id)] = strings.TrimSpace(handle)
+			if id == "" || !names.ValidHandle(handle) {
+				bad("MACHINE_CLIENTS", "must map each client id to a 2 to 20 letter and digit handle, such as client-id=alice")
+				continue
+			}
+			c.MachineClients[id] = handle
 		}
 	}
 

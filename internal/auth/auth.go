@@ -218,18 +218,38 @@ func (o OIDC) ClientCredentials(ctx context.Context, clientID, clientSecret stri
 	if err != nil {
 		return Tokens{}, err
 	}
+	// A confidential client: leave AuthStyle at its zero value so the library probes the token
+	// endpoint (client id and secret in the Authorization header first, then the body) instead of
+	// forcing one form.
 	cc := clientcredentials.Config{
 		ClientID:       clientID,
 		ClientSecret:   clientSecret,
 		TokenURL:       cfg.Endpoint.TokenURL,
 		EndpointParams: url.Values{"resource": {o.Resource}},
-		AuthStyle:      oauth2.AuthStyleInParams, // a public client: the id and secret ride the body, as in the device flow
 	}
 	tok, err := cc.Token(ctx)
 	if err != nil {
-		return Tokens{}, fmt.Errorf("auth: client credentials: %w", err)
+		return Tokens{}, clientCredentialsError(err)
 	}
 	return Tokens{AccessToken: tok.AccessToken, ClientID: clientID, ClientSecret: clientSecret}, nil
+}
+
+// clientCredentialsError names why the token endpoint refused, without the response body: a broken or
+// proxied endpoint that echoes the request could otherwise reprint client_secret on stderr.
+func clientCredentialsError(err error) error {
+	var re *oauth2.RetrieveError
+	if errors.As(err, &re) {
+		switch {
+		case re.ErrorCode != "" && re.ErrorDescription != "":
+			return fmt.Errorf("auth: client credentials: the provider refused: %s: %s", re.ErrorCode, re.ErrorDescription)
+		case re.ErrorCode != "":
+			return fmt.Errorf("auth: client credentials: the provider refused: %s", re.ErrorCode)
+		case re.Response != nil:
+			return fmt.Errorf("auth: client credentials: the provider answered %s", re.Response.Status)
+		}
+		return errors.New("auth: client credentials: the provider refused the request")
+	}
+	return fmt.Errorf("auth: client credentials: %w", err)
 }
 
 // RefreshStored refreshes the stored login. It reads the files first, so a token that another running

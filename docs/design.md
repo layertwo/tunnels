@@ -162,6 +162,11 @@ revocation endpoint (its discovery document lists none), so a copied refresh tok
 until it expires: ending a session for certain is done in Pocket ID (remove the person from
 `tunnels-creators`, or disable the account), as above.
 
+A machine client is the exception. Its token has no groups, so the broker skips the creators-group
+check and only tests whether the account it publishes as is disabled. Revoke a machine client by
+removing its `MACHINE_CLIENTS` entry or disabling that account; removing the person from
+`tunnels-creators` does not stop it.
+
 ### The control channel must verify the server certificate
 
 `pkg/transport/tls.go` (`NewClientTLSConfig`) sets `InsecureSkipVerify = true` whenever no CA file
@@ -446,7 +451,10 @@ Manual in the UI, as the rest of the repo does today.
   Used only by the Traefik plugin. Its id and secret go into `secrets-oidc.sops.yml`.
 - **Machine clients** (headless servers): confidential, client access to the API; the broker maps
   the client id to a handle through `MACHINE_CLIENTS`, and that handle must already have logged in
-  (implemented; creating the client and setting `MACHINE_CLIENTS` is the homelab step).
+  (implemented; creating the client and setting `MACHINE_CLIENTS` is the homelab step). A machine
+  token has no groups, so the creators-group check does not apply to it: revoke a machine client by
+  removing its `MACHINE_CLIENTS` entry or disabling the account it publishes as. Removing the person
+  from `tunnels-creators` does not stop it.
 
 ## Networking and TLS
 

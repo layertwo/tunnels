@@ -352,6 +352,16 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
+	// A confidential client may send its credentials in the Authorization header (Basic), which
+	// ParseForm does not read; oauth2 probes that style first. Take it as the fallback.
+	if id, secret, ok := r.BasicAuth(); ok {
+		if r.Form.Get("client_id") == "" {
+			r.Form.Set("client_id", id)
+		}
+		if r.Form.Get("client_secret") == "" {
+			r.Form.Set("client_secret", secret)
+		}
+	}
 	var resp map[string]any
 	var errCode string // empty on success
 	switch r.Form.Get("grant_type") {

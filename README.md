@@ -33,6 +33,9 @@ user shares work today.
 
 Removing someone from `tunnels-creators`, or disabling their account in Pocket ID, ends their
 tunnel within one heartbeat: the Ping hook (in frps's `ops` since v0.2.0) rejects the next heartbeat.
+A machine client is the exception: its token carries no groups, so the group check never applies to
+it. Revoke a machine client by removing its `MACHINE_CLIENTS` entry or disabling the account it
+publishes as; removing the person from `tunnels-creators` does not stop it.
 
 `tunnel up` runs until you stop it. A name is 1 to 42 lowercase letters, digits and inner dashes,
 and not `default` (that is the tunnel without a name).
