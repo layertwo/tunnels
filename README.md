@@ -13,6 +13,7 @@ case, and it has to be 2 to 20 letters and digits. Download the archive for your
 
 ```sh
 tunnel login                    # shows a URL and a code to approve in your browser
+tunnel login --machine CLIENT_ID # a headless server publishes as a configured handle, no passkey
 tunnel up 3000                  # https://<handle>.w.tunnels.layertwo.dev serves http://127.0.0.1:3000
 tunnel up 3000 --name blog      # https://<handle>-blog.w.tunnels.layertwo.dev
 tunnel share --name blog bob    # lets bob reach the blog tunnel
@@ -24,11 +25,17 @@ tunnel logout                   # forgets the login on this computer
 tunnel version
 ```
 
+`--machine CLIENT_ID` logs in a headless server with no browser: it publishes as the handle an admin
+configured for that client id, and the client secret comes from `TUNNELS_CLIENT_SECRET`.
+
 `--group` shares take effect once the site gate forwards the visitor's groups (a deferred change);
 user shares work today.
 
 Removing someone from `tunnels-creators`, or disabling their account in Pocket ID, ends their
 tunnel within one heartbeat: the Ping hook (in frps's `ops` since v0.2.0) rejects the next heartbeat.
+A machine client is the exception: its token carries no groups, so the group check never applies to
+it. Revoke a machine client by removing its `MACHINE_CLIENTS` entry or disabling the account it
+publishes as; removing the person from `tunnels-creators` does not stop it.
 
 `tunnel up` runs until you stop it. A name is 1 to 42 lowercase letters, digits and inner dashes,
 and not `default` (that is the tunnel without a name).
@@ -74,12 +81,14 @@ one is missing or wrong, refuses to start with an error that names every such va
 | `MAX_TUNNELS_PER_USER` | `5` | tunnels one person may have up at once |
 | `DEFAULT_BANDWIDTH_LIMIT` | `10MB` | per tunnel, enforced by frps |
 | `RESERVED_HANDLES` | `admin,root,support,security` | handles nobody gets |
+| `MACHINE_CLIENTS` | none | comma-separated `client_id=handle` pairs; a machine client publishes as that handle (a person who has logged in) |
 | `MIN_CLI_VERSION` | `0.0.0` | served in `/.well-known/tunnels.json`, not enforced |
 | `LISTEN_ADDR`, `LOG_LEVEL` | `:8080`, `info` | |
 
 It serves `/plugin/<secret>` (frps's HTTP plugin for Login, NewProxy, CloseProxy, Ping and
-NewWorkConn), `/authz` (Traefik's forwardAuth), `GET /api/me`, `GET /.well-known/tunnels.json` and
-`GET /healthz`. frps needs OIDC auth with `additionalScopes = ["HeartBeats", "NewWorkConns"]` and
+NewWorkConn), `/authz` (Traefik's forwardAuth), `GET /api/me`, `GET /.well-known/tunnels.json`,
+`GET /healthz` and `GET /metrics` (Prometheus, with bounded and secret-free labels). frps needs
+OIDC auth with `additionalScopes = ["HeartBeats", "NewWorkConns"]` and
 the broker as its plugin; the [design](docs/design.md#frps) has its configuration and what the
 deployment must set around it.
 

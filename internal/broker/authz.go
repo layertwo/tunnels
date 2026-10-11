@@ -27,6 +27,12 @@ type ShareMatcher interface {
 	ShareMatches(ctx context.Context, ownerSub, tunnel, username string, groups []string) (bool, error)
 }
 
+// LookupObserver records how long one store lookup in the /authz decision took; *Metrics implements
+// it, and tests substitute a recorder.
+type LookupObserver interface {
+	ObserveLookup(phase string, d time.Duration)
+}
+
 // Authz is the decision Traefik's forwardAuth asks for before it lets a request reach a site: allow
 // (200, with X-Tunnel-User set to the visitor's username) or deny (403). The answer is built from
 // the host the visitor asked for (X-Forwarded-Host) and the identity the OIDC gate put on the
@@ -42,9 +48,17 @@ type Authz struct {
 	SitesDomain string        // the domain sites live under, without a port or a trailing dot
 	Timeout     time.Duration // for the store lookup; zero means 5 s
 	Log         *slog.Logger
+	Metrics     LookupObserver // optional; times the store lookups
 }
 
 func (a Authz) timeout() time.Duration { return cmp.Or(a.Timeout, 5*time.Second) }
+
+// observe records one lookup's duration when the broker was built with metrics.
+func (a Authz) observe(phase string, start time.Time) {
+	if a.Metrics != nil {
+		a.Metrics.ObserveLookup(phase, time.Since(start))
+	}
+}
 
 // outcome is one decision and what is logged about it.
 type outcome struct {
@@ -114,7 +128,9 @@ func (a Authz) decide(r *http.Request) outcome {
 
 	ctx, cancel := context.WithTimeout(r.Context(), a.timeout())
 	defer cancel()
+	ownerStart := time.Now()
 	owner, err := a.Users.UserByHandle(ctx, handle)
+	a.observe("owner", ownerStart)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		o.reason = "unknown_owner"
@@ -129,7 +145,9 @@ func (a Authz) decide(r *http.Request) outcome {
 			o.reason, o.err = "store", errors.New("authz: no shares store")
 			return o
 		}
+		sharesStart := time.Now()
 		shared, err := a.Shares.ShareMatches(ctx, owner.Sub, tunnel, users[0], groupsOf(r))
+		a.observe("shares", sharesStart)
 		switch {
 		case err != nil:
 			o.reason, o.err = "store", err

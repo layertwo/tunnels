@@ -192,6 +192,96 @@ func TestResolveExistingUserKeepsHandle(t *testing.T) {
 	}
 }
 
+// A machine client is pre-authorised by config: its id maps to a handle, and it acts as that person.
+// No userinfo and no creators-group check, because a client_credentials token has neither username
+// nor groups.
+func TestResolveMachineClient(t *testing.T) {
+	users := newUsers(store.User{Sub: "sub-alice", Handle: "alice"})
+	r, i := resolver(identity("", "", creators), users)
+	r.MachineClients = map[string]string{"abc": "alice"}
+	verifierOf(r).sub = "client-abc"
+
+	got, err := r.Resolve(t.Context(), "tok-machine")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (Account{Sub: "sub-alice", Handle: "alice"}); got != want {
+		t.Errorf("account = %+v, want %+v", got, want)
+	}
+	if i.calls != 0 {
+		t.Errorf("userinfo called %d times for a machine token", i.calls)
+	}
+	if len(users.created()) != 0 {
+		t.Errorf("created %q for a machine token", users.created())
+	}
+
+	// A normal subject still goes through userinfo; only "client-" is a machine.
+	r, i = resolver(identity("sub-bob", "Bob", creators), newUsers())
+	if _, err := r.Resolve(t.Context(), "tok-human"); err != nil || i.calls != 1 {
+		t.Errorf("human login = %v, userinfo calls %d, want no error and one call", err, i.calls)
+	}
+}
+
+func TestResolveMachineUnknownClient(t *testing.T) {
+	users := newUsers(store.User{Sub: "sub-alice", Handle: "alice"})
+	r, i := resolver(identity("", ""), users)
+	r.MachineClients = map[string]string{"abc": "alice"}
+	verifierOf(r).sub = "client-zzz"
+
+	got, err := r.Resolve(t.Context(), "tok")
+	if !errors.Is(err, ErrUnknownMachine) || got != (Account{}) {
+		t.Fatalf("Resolve = %+v, %v, want the zero value and ErrUnknownMachine", got, err)
+	}
+	if i.calls != 0 || len(users.calls) != 0 {
+		t.Errorf("userinfo calls %d, store calls %q after an unknown machine client", i.calls, users.calls)
+	}
+}
+
+func TestResolveMachineUnknownHandle(t *testing.T) {
+	users := newUsers() // configured to "box", who has never logged in
+	r, _ := resolver(identity("", ""), users)
+	r.MachineClients = map[string]string{"abc": "box"}
+	verifierOf(r).sub = "client-abc"
+
+	got, err := r.Resolve(t.Context(), "tok")
+	if !errors.Is(err, store.ErrNotFound) || got != (Account{}) {
+		t.Fatalf("Resolve = %+v, %v, want the zero value and store.ErrNotFound", got, err)
+	}
+	if _, ok := refusalOf(err); !ok {
+		t.Errorf("err = %v, want a refusal", err)
+	}
+}
+
+func TestResolveMachineDisabled(t *testing.T) {
+	users := newUsers(store.User{Sub: "sub-alice", Handle: "alice", Disabled: true})
+	r, _ := resolver(identity("", ""), users)
+	r.MachineClients = map[string]string{"abc": "alice"}
+	verifierOf(r).sub = "client-abc"
+
+	got, err := r.Resolve(t.Context(), "tok")
+	if !errors.Is(err, ErrDisabled) || got != (Account{}) {
+		t.Fatalf("Resolve = %+v, %v, want the zero value and ErrDisabled", got, err)
+	}
+}
+
+// A store that cannot answer the handle lookup is infrastructure, not the machine's fault.
+func TestResolveMachineLookupFails(t *testing.T) {
+	boom := errors.New("dial tcp: connection refused")
+	users := newUsers()
+	users.byHandleErr = boom
+	r, _ := resolver(identity("", ""), users)
+	r.MachineClients = map[string]string{"abc": "alice"}
+	verifierOf(r).sub = "client-abc"
+
+	got, err := r.Resolve(t.Context(), "tok")
+	if err == nil || got != (Account{}) || Reason(err) != "login unavailable, try again" {
+		t.Fatalf("Resolve = %+v, %v (%q), want the zero value and the fixed sentence", got, err, Reason(err))
+	}
+	if !errors.Is(err, boom) {
+		t.Errorf("err = %v, want it to wrap the lookup failure", err)
+	}
+}
+
 func TestResolveRefusals(t *testing.T) {
 	tests := []struct {
 		name     string

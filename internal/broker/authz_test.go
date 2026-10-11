@@ -573,6 +573,46 @@ func TestMalformedOriginAllowed(t *testing.T) {
 	}
 }
 
+// fakeLookups records the phases and durations ObserveLookup was called with.
+type fakeLookups struct {
+	phases []string
+	durs   []time.Duration
+}
+
+func (f *fakeLookups) ObserveLookup(phase string, d time.Duration) {
+	f.phases = append(f.phases, phase)
+	f.durs = append(f.durs, d)
+}
+
+func TestAuthzObservesPhases(t *testing.T) {
+	// The owner's decision times the owner lookup and nothing else.
+	r := newAuthzRig()
+	m := &fakeLookups{}
+	r.authz.Metrics = m
+	if w := r.serve(http.MethodGet, ownerRequest()); w.Code != http.StatusOK {
+		t.Fatalf("= %d, want 200", w.Code)
+	}
+	if !reflect.DeepEqual(m.phases, []string{"owner"}) {
+		t.Errorf("phases = %q, want [owner]", m.phases)
+	}
+
+	// A stranger's decision times the owner lookup and then the share lookup.
+	r = newAuthzRig()
+	m = &fakeLookups{}
+	r.authz.Metrics = m
+	if w := r.serve(http.MethodGet, sharedRequest("alice-blog")); w.Code != http.StatusForbidden {
+		t.Fatalf("= %d, want 403", w.Code)
+	}
+	if !reflect.DeepEqual(m.phases, []string{"owner", "shares"}) {
+		t.Errorf("phases = %q, want [owner shares]", m.phases)
+	}
+	for i, d := range m.durs {
+		if d < 0 {
+			t.Errorf("phase %d duration = %v, want non-negative", i, d)
+		}
+	}
+}
+
 func TestGroupsOf(t *testing.T) {
 	tests := []struct {
 		name   string

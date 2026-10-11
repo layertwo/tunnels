@@ -456,6 +456,70 @@ func TestRefreshAfterRevoke(t *testing.T) {
 	}
 }
 
+// The client_credentials grant hands a machine a token whose subject names its client, so the
+// broker can map it to a handle; a machine has no refresh token because it asks again instead.
+func TestClientCredentialsGrant(t *testing.T) {
+	s := New(t)
+
+	status, tok := post(t, s.URL+"/token", url.Values{
+		"grant_type": {"client_credentials"}, "client_id": {"machine-1"}, "client_secret": {"s3cret"}, "resource": {APIResource},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("client_credentials = %d: %v", status, tok)
+	}
+	if tok.str("access_token") == "" || tok.str("token_type") != "Bearer" {
+		t.Errorf("token response = %v, want an access token of type Bearer", tok)
+	}
+	if _, ok := tok["refresh_token"]; ok {
+		t.Errorf("a machine token has a refresh token: %v", tok)
+	}
+	c := verify(t, s, tok.str("access_token"))
+	if c.Subject != "client-machine-1" {
+		t.Errorf("sub = %q, want client-machine-1", c.Subject)
+	}
+	if want := []string{APIResource, "machine-1", s.URL}; !slices.Equal(c.Audience, want) {
+		t.Errorf("aud = %v, want %v", c.Audience, want)
+	}
+
+	// Without a resource indicator the audience names the client and the issuer only, like the
+	// device flow's.
+	status, tok = post(t, s.URL+"/token", url.Values{"grant_type": {"client_credentials"}, "client_id": {"machine-2"}})
+	if status != http.StatusOK {
+		t.Fatalf("client_credentials without a resource = %d: %v", status, tok)
+	}
+	if want, got := []string{"machine-2", s.URL}, verify(t, s, tok.str("access_token")).Audience; !slices.Equal(got, want) {
+		t.Errorf("aud = %v, want %v", got, want)
+	}
+}
+
+// A confidential client may send its credentials in the Authorization header instead of the body;
+// the token endpoint reads them as the fallback, so the token still names the client.
+func TestClientCredentialsGrantBasicAuth(t *testing.T) {
+	s := New(t)
+	form := url.Values{"grant_type": {"client_credentials"}, "resource": {APIResource}}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, s.URL+"/token", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("machine-1", "s3cret")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var tok reply
+	if err := json.NewDecoder(resp.Body).Decode(&tok); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("client_credentials with Basic auth = %d: %v", resp.StatusCode, tok)
+	}
+	if c := verify(t, s, tok.str("access_token")); c.Subject != "client-machine-1" {
+		t.Errorf("sub = %q, want client-machine-1", c.Subject)
+	}
+}
+
 func TestNoRefreshTokenWithoutOfflineAccess(t *testing.T) {
 	s := New(t)
 	tok := login(t, s, "alice-sub", "openid profile groups")
@@ -469,7 +533,7 @@ func TestNoRefreshTokenWithoutOfflineAccess(t *testing.T) {
 
 func TestUnsupportedGrant(t *testing.T) {
 	s := New(t)
-	for _, grant := range []string{"authorization_code", "client_credentials", "password", ""} {
+	for _, grant := range []string{"authorization_code", "password", ""} {
 		t.Run(cmp.Or(grant, "none"), func(t *testing.T) {
 			status, body := post(t, s.URL+"/token", url.Values{"grant_type": {grant}, "client_id": {ClientID}})
 			wantError(t, status, body, "unsupported_grant_type")

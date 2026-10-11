@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/layertwo/tunnels/internal/idp"
 	"github.com/layertwo/tunnels/internal/names"
@@ -43,9 +44,10 @@ type Account struct {
 // What Resolve refuses with. A token the identity provider rejects surfaces as idp.ErrInvalidToken
 // and a handle that another account owns as store.ErrHandleTaken.
 var (
-	ErrNotCreator = errors.New("broker: not in the creators group")
-	ErrDisabled   = errors.New("broker: account is disabled")
-	ErrBadHandle  = errors.New("broker: username cannot be a handle")
+	ErrNotCreator     = errors.New("broker: not in the creators group")
+	ErrDisabled       = errors.New("broker: account is disabled")
+	ErrBadHandle      = errors.New("broker: username cannot be a handle")
+	ErrUnknownMachine = errors.New("broker: machine client is not configured")
 )
 
 // notValid is what a person is told when their token is refused.
@@ -62,11 +64,12 @@ func (e *refusal) Unwrap() error { return e.kind }
 
 // Resolver turns an access token into an Account. It keeps no state and is safe for concurrent use.
 type Resolver struct {
-	IdP           IdP
-	Verifier      TokenVerifier
-	Users         Users
-	CreatorsGroup string   // the group whose members may publish
-	Reserved      []string // handles nobody gets
+	IdP            IdP
+	Verifier       TokenVerifier
+	Users          Users
+	CreatorsGroup  string            // the group whose members may publish
+	Reserved       []string          // handles nobody gets
+	MachineClients map[string]string // client ids, each allowed to publish as the mapped handle
 }
 
 // Resolve says who the token belongs to and creates their row on the first login. Every failure is
@@ -78,6 +81,11 @@ func (r Resolver) Resolve(ctx context.Context, accessToken string) (Account, err
 	sub, err := r.Verifier.VerifyAccessToken(ctx, accessToken)
 	if err != nil {
 		return Account{}, err
+	}
+	// A client_credentials token names its client, not a person: it is pre-authorised by config, so
+	// it has no username or groups to ask the identity provider about and never passes the group check.
+	if id, ok := strings.CutPrefix(sub, "client-"); ok {
+		return r.machine(ctx, id)
 	}
 	id, err := r.IdP.UserInfo(ctx, accessToken)
 	if err != nil {
@@ -104,6 +112,26 @@ func (r Resolver) Resolve(ctx context.Context, accessToken string) (Account, err
 		return Account{}, &refusal{ErrDisabled, "your account is disabled: ask an admin"}
 	}
 	return Account{Sub: u.Sub, Username: id.Username, Handle: u.Handle}, nil
+}
+
+// machine turns a machine client id into the account of the handle config maps it to. The handle's
+// row must already exist: a machine publishes as its person, and never creates or picks a handle.
+func (r Resolver) machine(ctx context.Context, id string) (Account, error) {
+	handle, ok := r.MachineClients[id]
+	if !ok {
+		return Account{}, &refusal{ErrUnknownMachine, "this machine client is not configured; ask an admin"}
+	}
+	u, err := r.Users.UserByHandle(ctx, handle)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return Account{}, &refusal{store.ErrNotFound, "the handle " + strconv.Quote(handle) + " has no account yet; ask them to log in"}
+	case err != nil:
+		return Account{}, fmt.Errorf("broker: look up user by handle: %w", err)
+	}
+	if u.Disabled {
+		return Account{}, &refusal{ErrDisabled, "your account is disabled: ask an admin"}
+	}
+	return Account{Sub: u.Sub, Handle: u.Handle}, nil
 }
 
 // create gives a first-time user the handle their username makes. Existing users never come here,

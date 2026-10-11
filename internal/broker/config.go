@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/fatedier/frp/pkg/config/types"
+	"github.com/layertwo/tunnels/internal/names"
 )
 
 // Config is the broker's settings, one field per environment variable.
@@ -36,6 +37,10 @@ type Config struct {
 	MaxTunnelsPerUser int
 	BandwidthLimit    string
 	Reserved          []string
+
+	// MachineClients maps a Pocket ID client id to the handle its client_credentials token may
+	// publish as. A machine token has no username or groups, so this config is its authorisation.
+	MachineClients map[string]string
 
 	ListenAddr string
 	LogLevel   slog.Level
@@ -119,6 +124,27 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	for _, h := range strings.Split(optional("RESERVED_HANDLES", "admin,root,support,security"), ",") {
 		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
 			c.Reserved = append(c.Reserved, h)
+		}
+	}
+
+	if v := getenv("MACHINE_CLIENTS"); v != "" {
+		c.MachineClients = map[string]string{}
+		for _, pair := range strings.Split(v, ",") {
+			pair = strings.TrimSpace(pair)
+			if pair == "" {
+				continue
+			}
+			id, handle, ok := strings.Cut(pair, "=")
+			id, handle = strings.TrimSpace(id), strings.ToLower(strings.TrimSpace(handle))
+			if !ok {
+				bad("MACHINE_CLIENTS", "must be a comma-separated list of client-id=handle pairs")
+				continue
+			}
+			if id == "" || !names.ValidHandle(handle) {
+				bad("MACHINE_CLIENTS", "must map each client id to a 2 to 20 letter and digit handle, such as client-id=alice")
+				continue
+			}
+			c.MachineClients[id] = handle
 		}
 	}
 
