@@ -14,7 +14,6 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/clientcredentials"
 )
 
 // maxBody bounds what is read from the service.
@@ -210,30 +209,6 @@ func (o OIDC) Refresh(ctx context.Context, refreshToken string) (Tokens, error) 
 	return Tokens{AccessToken: tok.AccessToken, RefreshToken: tok.RefreshToken}, nil
 }
 
-// ClientCredentials gets an access token for a machine client from the discovered token endpoint.
-// A machine login has no refresh token: it asks for a token like this again when it needs one. The
-// secret is only ever sent to the provider's token endpoint, never logged.
-func (o OIDC) ClientCredentials(ctx context.Context, clientID, clientSecret string) (Tokens, error) {
-	ctx, cfg, err := o.config(ctx)
-	if err != nil {
-		return Tokens{}, err
-	}
-	// A confidential client: leave AuthStyle at its zero value so the library probes the token
-	// endpoint (client id and secret in the Authorization header first, then the body) instead of
-	// forcing one form.
-	cc := clientcredentials.Config{
-		ClientID:       clientID,
-		ClientSecret:   clientSecret,
-		TokenURL:       cfg.Endpoint.TokenURL,
-		EndpointParams: url.Values{"resource": {o.Resource}},
-	}
-	tok, err := cc.Token(ctx)
-	if err != nil {
-		return Tokens{}, clientCredentialsError(err)
-	}
-	return Tokens{AccessToken: tok.AccessToken, ClientID: clientID, ClientSecret: clientSecret}, nil
-}
-
 // ExchangeAssertion gets an access token for a machine by presenting a signed client assertion at the
 // token endpoint (client_credentials + client_assertion). The assertion is the credential; there is
 // no secret, and a machine login has no refresh token because it asks again like this instead.
@@ -295,24 +270,6 @@ func assertionError(status int, body []byte) error {
 	return fmt.Errorf("auth: the provider answered %d", status)
 }
 
-// clientCredentialsError names why the token endpoint refused, without the response body: a broken or
-// proxied endpoint that echoes the request could otherwise reprint client_secret on stderr.
-func clientCredentialsError(err error) error {
-	var re *oauth2.RetrieveError
-	if errors.As(err, &re) {
-		switch {
-		case re.ErrorCode != "" && re.ErrorDescription != "":
-			return fmt.Errorf("auth: client credentials: the provider refused: %s: %s", re.ErrorCode, re.ErrorDescription)
-		case re.ErrorCode != "":
-			return fmt.Errorf("auth: client credentials: the provider refused: %s", re.ErrorCode)
-		case re.Response != nil:
-			return fmt.Errorf("auth: client credentials: the provider answered %s", re.Response.Status)
-		}
-		return errors.New("auth: client credentials: the provider refused the request")
-	}
-	return fmt.Errorf("auth: client credentials: %w", err)
-}
-
 // RefreshStored refreshes the stored login. It reads the files first, so a token that another running
 // process rotated is the one used, and it writes them only when the refresh worked: a failure leaves
 // the files as they were.
@@ -325,15 +282,12 @@ func RefreshStored(ctx context.Context, s Store, o OIDC) (Tokens, error) {
 	if err != nil {
 		return Tokens{}, err
 	}
-	// A machine login has no refresh token: with a key it signs an assertion, with a secret it asks
-	// for a new access token with its credentials; everything else refreshes a person's login.
+	// A machine login has no refresh token: it signs an assertion with its key. Everything else
+	// refreshes a person's login.
 	var fresh Tokens
-	switch {
-	case t.MachineKey != "":
+	if t.MachineKey != "" {
 		fresh, err = o.refreshMachine(ctx, t)
-	case t.RefreshToken == "" && t.ClientID != "":
-		fresh, err = o.ClientCredentials(ctx, t.ClientID, t.ClientSecret)
-	default:
+	} else {
 		fresh, err = o.Refresh(ctx, t.RefreshToken)
 	}
 	if err != nil {

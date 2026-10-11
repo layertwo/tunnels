@@ -341,7 +341,7 @@ linux/arm64), signed with cosign.
 |------|--------|---------|
 | `/plugin/<secret>` | frps only | Login, NewProxy, CloseProxy, Ping, NewWorkConn hooks |
 | `/authz` | Traefik `forwardAuth` | allow or deny one visitor request |
-| `/api/me`; `/api/shares` in phase 2 | CLI, bearer token | ensure user, manage shares |
+| `/api/me`; `/api/machines`; `/api/shares` in phase 2 | CLI, bearer token | ensure user, manage machines and shares |
 | `/.well-known/tunnels.json` | anyone | bootstrap: issuer, CLI client id, API resource, service host, sites domain, minimum CLI version |
 | `GET /metrics` | Prometheus | request, in-flight and `/authz` lookup metrics; bounded, secret-free labels |
 | `/install.sh` (later), `/healthz` | anyone | installer, probe |
@@ -409,8 +409,8 @@ Sharing with the group `tunnels-viewers` means every viewer.
 `CREATORS_GROUP`, `DATABASE_URL`, `FRPS_DASHBOARD_URL`, `FRPS_DASHBOARD_USER`,
 `FRPS_DASHBOARD_PASSWORD`, `PLUGIN_SECRET`, `MAX_TUNNELS_PER_USER` (5),
 `DEFAULT_BANDWIDTH_LIMIT` (10MB per second, frp's format), `RESERVED_HANDLES`,
-`POCKET_ID_URL`, `POCKET_ID_API_KEY`, `POCKET_ID_API_ID` (the admin API the broker mints a machine's
-client with), `LOG_LEVEL`. Logs are structured JSON for
+`POCKET_ID_URL`, `POCKET_ID_API_KEY` (the Pocket ID admin API the broker mints a machine's client
+with), `POCKET_ID_API_ID` (the Tunnels API id the minted client is granted access to), `LOG_LEVEL`. Logs are structured JSON for
 logins, proxy registrations, denials and share changes, and never contain tokens. Outbound
 requests carry an explicit User-Agent. `DATABASE_URL` comes from the CNPG-generated secret
 `cnpg-tunnels-app` (key `uri`); the rest come from `secrets-broker.sops.yml` and the

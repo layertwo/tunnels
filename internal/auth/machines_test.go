@@ -268,7 +268,7 @@ func TestRefreshStoredMachine(t *testing.T) {
 	if got.ClientID != "machine-1" || got.MachineKey != path || got.Handle != "bot" || got.Server != "https://tunnels.example" {
 		t.Errorf("the machine login was lost: %+v", got)
 	}
-	if got.RefreshToken != "" || got.ClientSecret != "" {
+	if got.RefreshToken != "" {
 		t.Errorf("a machine store holds a secret: %+v", got)
 	}
 	if loaded, err := s.Load(); err != nil || loaded != got {
