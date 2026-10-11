@@ -45,10 +45,18 @@ breaking) · security · the deploy steps to activate it.
 
 ## Verify the release
 
-- Assets: `gh release view vX.Y.Z --json assets` — the archives and `checksums.txt`.
-- Images: the packages are **public**. The image workflow succeeded; get the digest the tag points at:
+- Assets: `gh release view vX.Y.Z --json assets` — the archives and `checksums.txt`. Check one with
+  `gh attestation verify <archive> -R layertwo/tunnels` and its line in `checksums.txt`.
+- Images: the packages are **public** and signed by digest with **cosign (keyless)** — the release notes
+  say so. Get the digest the tag points at:
   `podman manifest inspect ghcr.io/layertwo/tunnels-broker:vX.Y.Z` (or grep the `image` workflow log for
-  `:vX.Y.Z@sha256:`). **Pin that digest** — the one the tag resolves to.
+  `:vX.Y.Z@sha256:`), **pin that digest**, and confirm the signature:
+
+  ```sh
+  cosign verify ghcr.io/layertwo/tunnels-broker@sha256:<digest> \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    --certificate-identity-regexp 'https://github.com/layertwo/tunnels/.github/workflows/image.yml@.*'
+  ```
 
 ## Activate it in the homelab
 
