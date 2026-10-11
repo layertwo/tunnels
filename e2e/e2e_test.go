@@ -148,6 +148,7 @@ type stack struct {
 	plugin  string // the broker's plugin URL
 	backend int    // the local port the tunnels publish
 	frps    *frpsapi.Client
+	users   *store.Store // the broker's store, for the machine rows the tests create
 
 	mu        sync.Mutex
 	proto     string // X-Forwarded-Proto of the last request the backend got
@@ -166,6 +167,7 @@ func newStack(t *testing.T, maxTunnels int) *stack {
 		t.Fatal(err)
 	}
 	t.Cleanup(users.Close)
+	s.users = users
 	provider, err := idp.New(t.Context(), s.mock.URL, mockidp.APIResource, ua, "", "")
 	if err != nil {
 		t.Fatal(err)
@@ -180,7 +182,7 @@ func newStack(t *testing.T, maxTunnels int) *stack {
 		ServiceHost: "tunnels.test", SitesDomain: sites, Issuer: s.mock.URL, APIResource: mockidp.APIResource,
 		CreatorsGroup: "tunnels-creators", CLIClientID: mockidp.ClientID, MinCLIVersion: "0.0.0",
 		PluginSecret: secret, MaxTunnelsPerUser: maxTunnels, BandwidthLimit: "10MB", Reserved: []string{"admin"},
-	}, broker.Deps{IdP: provider, Verifier: provider, Users: users, Shares: users, Frps: s.frps, Log: slog.New(slog.NewJSONHandler(brokerLog, nil))}))
+	}, broker.Deps{IdP: provider, Verifier: provider, Users: users, Machines: users, Shares: users, Frps: s.frps, Log: slog.New(slog.NewJSONHandler(brokerLog, nil))}))
 	t.Cleanup(b.Close)
 	s.url = b.URL
 	s.plugin = b.URL + "/plugin/" + secret
@@ -203,7 +205,7 @@ func newStack(t *testing.T, maxTunnels int) *stack {
 		"transport": map[string]any{"heartbeatTimeout": 90},
 		"webServer": map[string]any{"addr": "127.0.0.1", "port": dash, "user": dashUser, "password": dashPassword},
 		"httpPlugins": []any{map[string]any{
-			"name": "broker", "addr": b.URL, "path": "/plugin/" + secret, "ops": []string{"Login", "NewProxy", "CloseProxy"},
+			"name": "broker", "addr": b.URL, "path": "/plugin/" + secret, "ops": []string{"Login", "NewProxy", "CloseProxy", "Ping", "NewWorkConn"},
 		}},
 	})
 	path := filepath.Join(t.TempDir(), "frps.json")
@@ -493,6 +495,167 @@ func TestWorkConnNeedsAToken(t *testing.T) {
 		if code, body := s.get(t, "alice."+sites); code != 200 || body != "hello" {
 			t.Errorf("request %d to alice's site = %d %q", i, code, body)
 		}
+	}
+}
+
+// newMachine records a machine owned by ownerSub, registers its key with the mock identity provider,
+// and returns its client id and a function that mints a fresh access token from an assertion, as a
+// machine does with its stored key. The private key never leaves this function.
+func (s *stack) newMachine(t *testing.T, handle, ownerSub string) (clientID string, token func() string) {
+	t.Helper()
+	key, err := auth.GenerateMachineKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientID = "machine-" + handle
+	s.mock.AddMachineKey(clientID, key.Public())
+	if err := s.users.CreateMachine(t.Context(), store.Machine{
+		Handle: handle, OwnerKind: "user", OwnerRef: ownerSub, ClientID: clientID, CreatedBy: ownerSub,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	o := auth.OIDC{Issuer: s.mock.URL, ClientID: clientID, Resource: mockidp.APIResource, HTTP: httpx.Client(ua, 10*time.Second)}
+	return clientID, func() string {
+		assertion, err := auth.ClientAssertion(key, clientID, s.mock.URL, mockidp.APIResource, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		tok, err := o.ExchangeAssertion(t.Context(), clientID, assertion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tok.AccessToken
+	}
+}
+
+// openWorkConn opens a work connection for runID carrying token, as one visitor request does, and
+// returns the refusal frps answered with. An accepted work connection gets no answer, so a read that
+// times out means it was registered and handed that control's visitors.
+func (s *stack) openWorkConn(t *testing.T, runID, token string) string {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", s.bind), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	cfg := yamux.DefaultConfig()
+	cfg.LogOutput = io.Discard
+	session, err := yamux.Client(conn, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := session.OpenStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rw := msg.NewV1ReadWriter(stream)
+	if err := rw.WriteMsg(&msg.NewWorkConn{RunID: runID, PrivilegeKey: token}); err != nil {
+		t.Fatal(err)
+	}
+	stream.SetReadDeadline(time.Now().Add(3 * time.Second))
+	m, err := rw.ReadMsg()
+	if err != nil {
+		return ""
+	}
+	if sw, ok := m.(*msg.StartWorkConn); ok {
+		return sw.Error
+	}
+	return ""
+}
+
+// A machine publishes as its own handle, on its own FQDN, without a passkey and without borrowing its
+// owner's name.
+func TestMachinePublishesAsItsOwnHandle(t *testing.T) {
+	s := newStack(t, 5)
+	_, token := s.newMachine(t, "nas", "sub-alice")
+	s.up(t, token(), "nas", "").waitPhase(t, "running")
+
+	if code, body := s.get(t, "nas."+sites); code != 200 || body != "hello" {
+		t.Errorf("the machine's site = %d %q, want 200 hello", code, body)
+	}
+}
+
+// Invariant 2: a machine's work connection is bound to its control by its subject (its client id),
+// not by the run ID alone. A work connection carrying another control's run ID is refused; the
+// machine's own is accepted.
+func TestMachineWorkConnIsBoundToItsControl(t *testing.T) {
+	s := newStack(t, 5)
+	// alice's control is the run ID a thief would steal and try to inject into.
+	s.up(t, s.token("sub-alice"), "alice", "").waitPhase(t, "running")
+	victim := s.runID(t, "alice")
+
+	_, token := s.newMachine(t, "nas", "sub-alice")
+	s.up(t, token(), "nas", "").waitPhase(t, "running")
+	own := s.runID(t, "nas")
+
+	if reason := s.openWorkConn(t, victim, token()); reason == "" {
+		t.Errorf("a machine work connection with alice's run ID was accepted; invariant 2 did not hold")
+	}
+	if reason := s.openWorkConn(t, own, token()); reason != "" {
+		t.Errorf("the machine's work connection with its own run ID was refused (%q); want accepted", reason)
+	}
+}
+
+// A machine's row is the revocation lever: disabling it refuses the next Ping, frpc closes the
+// session and the tunnel is gone within a heartbeat.
+func TestDisabledMachineLosesItsTunnel(t *testing.T) {
+	s := newStack(t, 5)
+	clientID, token := s.newMachine(t, "nas", "sub-alice")
+	s.up(t, token(), "nas", "").waitPhase(t, "running")
+	if code, body := s.get(t, "nas."+sites); code != 200 || body != "hello" {
+		t.Fatalf("the machine's site = %d %q before disabling", code, body)
+	}
+
+	if err := s.users.SetMachineDisabled(t.Context(), clientID, true); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 10*time.Second, "the disabled machine's tunnel is gone", func() bool {
+		code, _ := s.get(t, "nas."+sites)
+		return code != 200
+	})
+}
+
+// A machine's site is owned by its owner (a user), shareable like any other site, and a share is
+// keyed by the site: a share on the owner's own site does not admit the machine's site (invariant 10).
+func TestMachineSiteSharing(t *testing.T) {
+	s := newStack(t, 5)
+	s.up(t, s.token("sub-alice"), "alice", "").waitPhase(t, "running") // alice's user row
+	_, token := s.newMachine(t, "nas", "sub-alice")
+	s.up(t, token(), "nas", "").waitPhase(t, "running")
+	host := "nas." + sites
+	owner := s.token("sub-alice")
+
+	// The owner reaches her machine's site; a stranger does not.
+	if code := s.authz(t, host, "sub-alice", "Alice"); code != 200 {
+		t.Errorf("alice at her machine's site = %d, want 200", code)
+	}
+	if code := s.authz(t, host, "sub-carol", "Carol"); code != 403 {
+		t.Errorf("carol before any share = %d, want 403", code)
+	}
+
+	// A share keyed by the machine's site admits the sharee.
+	machineShare := store.Share{Handle: "nas", Tunnel: "", Kind: "user", Grantee: "Carol"}
+	if code := s.changeShare(t, http.MethodPut, owner, machineShare); code != 204 {
+		t.Fatalf("PUT machine share = %d, want 204", code)
+	}
+	if code := s.authz(t, host, "sub-carol", "Carol"); code != 200 {
+		t.Errorf("carol after the machine share = %d, want 200", code)
+	}
+
+	// A share on the owner's own site must not admit the machine's site.
+	if code := s.changeShare(t, http.MethodDelete, owner, machineShare); code != 204 {
+		t.Fatalf("DELETE machine share = %d, want 204", code)
+	}
+	ownShare := store.Share{Handle: "alice", Tunnel: "", Kind: "user", Grantee: "Carol"}
+	if code := s.changeShare(t, http.MethodPut, owner, ownShare); code != 204 {
+		t.Fatalf("PUT alice's own share = %d, want 204", code)
+	}
+	if code := s.authz(t, host, "sub-carol", "Carol"); code != 403 {
+		t.Errorf("carol at the machine's site via a share on alice's own site = %d, want 403 (invariant 10)", code)
+	}
+	// That share still admits alice's own site.
+	if code := s.authz(t, "alice."+sites, "sub-carol", "Carol"); code != 200 {
+		t.Errorf("carol at alice's own site = %d, want 200", code)
 	}
 }
 
