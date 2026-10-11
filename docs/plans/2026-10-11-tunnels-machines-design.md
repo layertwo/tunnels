@@ -106,7 +106,7 @@ Visitors are unchanged: they reach a site through the gate and the broker's `/au
 | 7 | A machine's handle shares **one namespace** with people; the reserved list applies; uniqueness is enforced across both. | One FQDN namespace; no land grab. |
 | 8 | `owner_kind`/`owner_ref` columns now (user today, group later). | Two columns that save a migration when groups land. |
 | 9 | Revocation is **a row** (disable/delete the machine, or delete its client). | The broker is the gate; revocation is instant at Login and within one heartbeat at Ping. |
-| 10 | A machine's site is authorised by its **owner** (from `owner_ref`); v1 admits only the owner, sharing a machine's site is deferred. | Matches SSH v1 (owner-only); machine sharing needs the shares key to accept a machine principal, a later change. |
+| 10 | A machine's site is owned by its **owner** (from `owner_ref`) and is **shareable like any other**: the owner admits, a share admits a viewer. A share is keyed by the **site** (owner sub + the site's handle + tunnel), not the tunnel name alone. | One sharing model for people and machines. Keying by the site stops a share on one of an owner's sites admitting another — a machine's `nas-blog` must not inherit a share on `alice-blog`. |
 | 11 | Handle uniqueness across people and machines is enforced **in the store**, not by convention. | Two tables cannot share a unique index and a create-path race must not collide; the shape is the builder's. |
 | 12 | The broker API is **principal-aware**: `/api/me` accepts a machine to report its handle; `/api/shares` refuses a machine subject. | A machine credential must not carry its owner's share authority (anti-goal). |
 
@@ -176,9 +176,9 @@ removing.
 
 | Area | Change |
 |------|--------|
-| `internal/store` | a `machines` table (`handle`, `owner_kind`, `owner_ref`, `client_id`, `disabled`, `created_at`, `created_by`) and methods |
+| `internal/store` | a `machines` table and methods; the `shares` key gains the site's **handle** (so a share covers one site), with a migration that backfills the owner's handle into existing rows |
 | `internal/broker` | `Resolver` resolves `client-<id>` to a machine in Login **and** NewWorkConn; `/api/machines` (create/list/delete); a Pocket ID admin client that registers the machine's **public key** as a federated credential; the API refuses a machine subject for share management |
-| `internal/broker` `/authz` | resolves a site's owner across `users` and `machines`; v1 admits only the machine's owner |
+| `internal/broker` `/authz` | resolves a site's owner across `users` and `machines`; a machine site admits its owner and sharees of **that site** |
 | `internal/broker` config | `MACHINE_CLIENTS` and `Deps.MachineClients` removed; a Pocket ID admin key, its URL, and the Tunnels API's id (for the client-access grant) added |
 | `internal/cli` | `machine create/list/remove`; generate and store the key pair (system keystore where possible); sign the `client_assertion` |
 | `internal/auth` | the client-credentials path gains a key-assertion mode (`client_assertion` in place of a secret) |
@@ -212,6 +212,7 @@ load-bearing** and the model is wrong if any fails.
 | 7 | The credential is never logged; the hook rejects before setting a user. | unit + e2e (token absent from logs) |
 | 8 | Token verification refuses algorithm confusion and wrong issuer/audience/expiry. | unit (`TestVerifyAccessTokenRejectsAlgorithmConfusion`, present) |
 | 9 | A client assertion is short-lived and **single-use** (Pocket ID's `jti` replay protection); a captured assertion cannot be replayed. | unit (the CLI never reuses a `jti`; a second exchange with the same assertion is refused) |
+| 10 | A share admits exactly one site: a share on one of an owner's tunnels never admits another. | unit (an owner with `blog` shared; the machine's `nas-blog` is refused) |
 
 Today's code fails invariant 2 for machines: `newWorkConn` resolves the subject through `users`, so a
 machine subject is not bound. NewWorkConn is dormant in production (not in `ops`), so this must be
@@ -225,6 +226,7 @@ fixed **in the same change that enables it**, not after.
 | Rogue copies a machine's disk or config | a hardware-backed private key does not copy, so no token can be minted; a copied software key is revoked by swapping the public key |
 | Run-ID thief injects a work connection | the NewWorkConn hook binds the work connection's subject to the control (invariant 2) — the reason for a per-machine subject |
 | Handle land grab | validation, reserved list, uniqueness across people and machines (invariant 6) |
+| A share leaks across an owner's sites | shares are keyed by the site's handle, not the tunnel name (invariant 10) |
 | Machine credential over-reaches | the machine's authority is a design item: it should not carry its owner's share API (see Deferred) |
 | Broker compromise | it holds hashes and rows, and a Pocket ID admin key — the key is the blast radius; rotate it |
 | Enumeration through refusals | refusal text is generic; run IDs and tokens are never logged |
@@ -276,6 +278,8 @@ fixed **in the same change that enables it**, not after.
 - The assertion's `iss` / `aud` / `sub`, lifetime and clock skew, and the signing library (reuse the
   module graph).
 - Whether the CLI or the broker performs the federated-credential registration call.
+- The `shares` migration (backfill the owner's handle) and how `share`/`unshare` name a machine's
+  site in the CLI (the label, or a `--machine` flag).
 - The Pocket ID admin client's error handling when minting fails mid-bootstrap (rollback).
 - The `Ping` path for a machine: re-check the row by the bound handle, or re-resolve the token.
 - Whether a machine counts toward `MAX_TUNNELS_PER_USER` and the bandwidth limit (it should).
