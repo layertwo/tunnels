@@ -183,8 +183,8 @@ func newStackWith(t *testing.T, maxTunnels int, machines map[string]string) *sta
 		ServiceHost: "tunnels.test", SitesDomain: sites, Issuer: s.mock.URL, APIResource: mockidp.APIResource,
 		CreatorsGroup: "tunnels-creators", CLIClientID: mockidp.ClientID, MinCLIVersion: "0.0.0",
 		PluginSecret: secret, MaxTunnelsPerUser: maxTunnels, BandwidthLimit: "10MB", Reserved: []string{"admin"},
-	}, broker.Deps{IdP: provider, Verifier: provider, Users: users, Shares: users, Frps: s.frps, Log: slog.New(slog.NewJSONHandler(brokerLog, nil)),
-		MachineClients: machines}))
+		MachineClients: machines,
+	}, broker.Deps{IdP: provider, Verifier: provider, Users: users, Shares: users, Frps: s.frps, Log: slog.New(slog.NewJSONHandler(brokerLog, nil))}))
 	t.Cleanup(b.Close)
 	s.url = b.URL
 	s.plugin = b.URL + "/plugin/" + secret
