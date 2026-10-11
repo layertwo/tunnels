@@ -23,13 +23,14 @@ type Frps interface {
 	OnlineProxyCount(ctx context.Context, user string) (int, error)
 }
 
-// Hooks is frps's HTTP plugin for the Login, NewProxy, CloseProxy and Ping ops, mounted at /plugin/<Secret>.
-// It keeps no state and is safe for concurrent use.
+// Hooks is frps's HTTP plugin for the Login, NewProxy, CloseProxy, Ping and NewWorkConn ops, mounted
+// at /plugin/<Secret>. It keeps no state and is safe for concurrent use.
 //
 // Every decision, accept or reject, is HTTP 200: frps shows its client any other error status as an
 // opaque "send Login request to plugin error". A decision that cannot be made (a dependency is down
-// or slow) is a reject, except a Ping: a ping the broker cannot verify is allowed, because frps
-// re-verifies the ping's token itself and this hook only adds the account checks frps cannot make.
+// or slow) is a reject, except a Ping and a NewWorkConn: a token the broker cannot verify is allowed,
+// because frps re-verifies it itself and these hooks only add the account checks frps cannot make.
+// NewWorkConn's binding relies on the Login op having set user.user to the verified handle.
 type Hooks struct {
 	Resolver          Resolver
 	Frps              Frps
@@ -82,6 +83,8 @@ func (h *Hooks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		res, err = h.closeProxy(ctx, req.Content)
 	case plugin.OpPing:
 		res, err = h.ping(ctx, req.Content)
+	case plugin.OpNewWorkConn:
+		res, err = h.newWorkConn(ctx, req.Content)
 	default:
 		err = fmt.Errorf("unknown op %q", req.Op)
 	}
@@ -215,6 +218,36 @@ func (h *Hooks) ping(ctx context.Context, raw json.RawMessage) (plugin.Response,
 	// A heartbeat claiming another handle is not this client's heartbeat, whatever its token.
 	if c.User.User != "" && c.User.User != acct.Handle {
 		return h.reject(ctx, plugin.OpPing, "token does not belong to this session", nil), nil
+	}
+	return plugin.Response{Unchange: true}, nil
+}
+
+// newWorkConn runs for every work connection, the request behind one visitor's page load. frps binds
+// a work connection to a control connection by run ID alone; this binds it to the control's user too,
+// so a creator who learned another's run ID cannot queue visitors into that session.
+//
+// As with ping, only a mismatch is refused. A token this broker cannot verify, or a store that is
+// down, is left to frps, which re-verifies the work connection's token itself before it acts.
+func (h *Hooks) newWorkConn(ctx context.Context, raw json.RawMessage) (plugin.Response, error) {
+	var c plugin.NewWorkConnContent
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return plugin.Response{}, err
+	}
+	if c.PrivilegeKey == "" {
+		return h.reject(ctx, plugin.OpNewWorkConn, "missing token", nil), nil
+	}
+	sub, err := h.Resolver.Verifier.VerifyAccessToken(ctx, c.PrivilegeKey)
+	if err != nil {
+		h.Log.DebugContext(ctx, "new work conn: could not verify the session, allowed", "err", err)
+		return plugin.Response{Unchange: true}, nil
+	}
+	u, err := h.Resolver.Users.UserBySub(ctx, sub)
+	if err != nil {
+		h.Log.DebugContext(ctx, "new work conn: could not look up the account, allowed", "err", err)
+		return plugin.Response{Unchange: true}, nil
+	}
+	if u.Handle != c.User.User {
+		return h.reject(ctx, plugin.OpNewWorkConn, "token does not belong to this session", nil), nil
 	}
 	return plugin.Response{Unchange: true}, nil
 }

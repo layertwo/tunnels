@@ -411,12 +411,39 @@ func TestPutShareIsIdempotent(t *testing.T) {
 	ctx := testCtx(t)
 	createUser(t, s, ctx, "sub-1", "alice")
 
-	sh := Share{Tunnel: "blog", Kind: "user", Grantee: "Bob"}
+	expires := time.Now().Add(time.Hour).UTC().Truncate(time.Microsecond)
+	sh := Share{Tunnel: "blog", Kind: "user", Grantee: "Bob", ExpiresAt: expires}
 	putShare(t, s, ctx, "sub-1", sh)
 	putShare(t, s, ctx, "sub-1", sh)
 
 	if got := count(t, dbURL, "select count(*) from shares"); got != 1 {
 		t.Errorf("shares has %d rows, want 1", got)
+	}
+	got, err := s.SharesByOwner(ctx, "sub-1")
+	if err != nil || len(got) != 1 || !got[0].ExpiresAt.Equal(expires) {
+		t.Errorf("SharesByOwner = %+v, %v; want one row ending %v", got, err, expires)
+	}
+}
+
+// Re-sharing a permanent grant with an end must replace its end, not keep it forever.
+func TestPutShareUpdatesExpiry(t *testing.T) {
+	dbURL := schemaURL(t)
+	s := openStore(t, dbURL)
+	ctx := testCtx(t)
+	createUser(t, s, ctx, "sub-1", "alice")
+
+	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob"}) // permanent first
+	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: time.Now().Add(-time.Hour)})
+
+	if got := count(t, dbURL, "select count(*) from shares"); got != 1 {
+		t.Errorf("shares has %d rows, want 1", got)
+	}
+	got, err := s.ShareMatches(ctx, "sub-1", "blog", "bob", nil)
+	if err != nil {
+		t.Fatalf("ShareMatches: %v", err)
+	}
+	if got {
+		t.Error("ShareMatches = true after the share was re-granted with a past end, want false")
 	}
 }
 
@@ -461,6 +488,59 @@ func TestSharesByOwnerOrders(t *testing.T) {
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("SharesByOwner = %+v, want %+v", got, want)
+	}
+}
+
+// A share may carry an absolute end; a share without one stays open. The time survives the round trip.
+func TestPutAndListShareWithExpiry(t *testing.T) {
+	s := newStore(t)
+	ctx := testCtx(t)
+	createUser(t, s, ctx, "sub-1", "alice")
+
+	expires := time.Now().Add(7 * 24 * time.Hour).UTC().Truncate(time.Microsecond)
+	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: expires})
+	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "carol"}) // no end, ever
+
+	got, err := s.SharesByOwner(ctx, "sub-1")
+	if err != nil {
+		t.Fatalf("SharesByOwner: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("SharesByOwner = %+v, want two shares", got)
+	}
+	if !got[0].ExpiresAt.Equal(expires) {
+		t.Errorf("expires_at = %v, want %v", got[0].ExpiresAt, expires)
+	}
+	if !got[1].ExpiresAt.IsZero() {
+		t.Errorf("a share without an expiry read back as %v, want the zero time", got[1].ExpiresAt)
+	}
+}
+
+// An expired share no longer admits a visitor; one without an end never expires.
+func TestShareMatchesIgnoresExpired(t *testing.T) {
+	s := newStore(t)
+	ctx := testCtx(t)
+	createUser(t, s, ctx, "sub-1", "alice")
+	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: time.Now().Add(-time.Hour)})
+	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "carol"})
+	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "dave", ExpiresAt: time.Now().Add(time.Hour)})
+
+	tests := []struct {
+		username string
+		want     bool
+	}{
+		{"bob", false},  // expired
+		{"carol", true}, // no end
+		{"dave", true},  // still in the future
+	}
+	for _, tt := range tests {
+		got, err := s.ShareMatches(ctx, "sub-1", "blog", tt.username, nil)
+		if err != nil {
+			t.Fatalf("ShareMatches(%q): %v", tt.username, err)
+		}
+		if got != tt.want {
+			t.Errorf("ShareMatches(%q) = %v, want %v", tt.username, got, tt.want)
+		}
 	}
 }
 
@@ -765,6 +845,45 @@ func TestSharesByOwnerScanFails(t *testing.T) {
 	}
 }
 
+// OpenRetry against a database that is up returns a working store on the first try.
+func TestOpenRetrySucceeds(t *testing.T) {
+	s, err := OpenRetry(testCtx(t), schemaURL(t), time.Minute)
+	if err != nil {
+		t.Fatalf("OpenRetry: %v", err)
+	}
+	t.Cleanup(s.Close)
+}
+
+// A server that never answers fails before the context does, with the last error.
+func TestOpenRetryGivesUp(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	start := time.Now()
+	s, err := OpenRetry(ctx, "postgres://postgres:postgres@127.0.0.1:1/postgres?sslmode=disable&connect_timeout=1", 200*time.Millisecond)
+	if err == nil {
+		s.Close()
+		t.Fatal("OpenRetry against an unreachable server succeeded, want an error")
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("OpenRetry took %v to give up, want well under the 30 s context", elapsed)
+	}
+}
+
+// A cancelled context stops the loop at once, even while the wait has time left.
+func TestOpenRetryStopsOnContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	start := time.Now()
+	s, err := OpenRetry(ctx, "postgres://postgres:postgres@127.0.0.1:1/postgres?sslmode=disable&connect_timeout=1", time.Minute)
+	if err == nil {
+		s.Close()
+		t.Fatal("OpenRetry with a cancelled context succeeded, want an error")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("OpenRetry took %v to stop on a cancelled context, want prompt", elapsed)
+	}
+}
+
 // A row whose expression raises ends the stream with an error instead of a partial list.
 func TestSharesByOwnerRowsError(t *testing.T) {
 	dbURL := schemaURL(t)
@@ -779,7 +898,7 @@ func TestSharesByOwnerRowsError(t *testing.T) {
 	if err := run(dbURL, `create function boom() returns text language plpgsql volatile as $$ begin raise exception 'boom'; end $$`); err != nil {
 		t.Fatalf("create boom: %v", err)
 	}
-	if err := run(dbURL, `create view shares as select owner_sub, tunnel, case when grantee = 'boom' then boom() else kind end as kind, grantee from shares_base`); err != nil {
+	if err := run(dbURL, `create view shares as select owner_sub, tunnel, case when grantee = 'boom' then boom() else kind end as kind, grantee, expires_at from shares_base`); err != nil {
 		t.Fatalf("create failing view: %v", err)
 	}
 	shares, err := s.SharesByOwner(ctx, "sub-1")

@@ -16,6 +16,7 @@ tunnel login                    # shows a URL and a code to approve in your brow
 tunnel up 3000                  # https://<handle>.w.tunnels.layertwo.dev serves http://127.0.0.1:3000
 tunnel up 3000 --name blog      # https://<handle>-blog.w.tunnels.layertwo.dev
 tunnel share --name blog bob    # lets bob reach the blog tunnel
+tunnel share --for 7d bob       # the share ends after a duration (7d, 24h, ...)
 tunnel share --group family     # --group shares with a Pocket ID group instead of a username
 tunnel unshare --name blog bob  # stops sharing it
 tunnel list                     # shows the shares you set
@@ -27,8 +28,7 @@ tunnel version
 user shares work today.
 
 Removing someone from `tunnels-creators`, or disabling their account in Pocket ID, ends their
-tunnel within one heartbeat once the Ping hook is enabled (a deferred change); until then it ends
-when their token expires, about an hour later.
+tunnel within one heartbeat: the Ping hook (in frps's `ops` since v0.2.0) rejects the next heartbeat.
 
 `tunnel up` runs until you stop it. A name is 1 to 42 lowercase letters, digits and inner dashes,
 and not `default` (that is the tunnel without a name).
@@ -77,10 +77,11 @@ one is missing or wrong, refuses to start with an error that names every such va
 | `MIN_CLI_VERSION` | `0.0.0` | served in `/.well-known/tunnels.json`, not enforced |
 | `LISTEN_ADDR`, `LOG_LEVEL` | `:8080`, `info` | |
 
-It serves `/plugin/<secret>` (frps's HTTP plugin for Login, NewProxy and CloseProxy), `/authz`
-(Traefik's forwardAuth), `GET /api/me`, `GET /.well-known/tunnels.json` and `GET /healthz`. frps needs
-OIDC auth with `additionalScopes = ["HeartBeats", "NewWorkConns"]` and the broker as its plugin; the
-[design](docs/design.md#frps) has its configuration and what the deployment must set around it.
+It serves `/plugin/<secret>` (frps's HTTP plugin for Login, NewProxy, CloseProxy, Ping and
+NewWorkConn), `/authz` (Traefik's forwardAuth), `GET /api/me`, `GET /.well-known/tunnels.json` and
+`GET /healthz`. frps needs OIDC auth with `additionalScopes = ["HeartBeats", "NewWorkConns"]` and
+the broker as its plugin; the [design](docs/design.md#frps) has its configuration and what the
+deployment must set around it.
 
 ## Versions
 

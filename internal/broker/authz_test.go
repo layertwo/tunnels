@@ -47,10 +47,11 @@ func newAuthzRig() *authzRig {
 // fakeShares is an in-memory Shares: a user grantee matches case-insensitively, a group grantee exactly,
 // and it records every call.
 type fakeShares struct {
-	users  []string // user grantees
-	groups []string // group grantees
-	err    error
-	calls  []shareCall
+	users   []string  // user grantees
+	groups  []string  // group grantees
+	expires time.Time // when non-zero and past, every grant has expired
+	err     error
+	calls   []shareCall
 
 	rows     []store.Share // SharesByOwner answer
 	storeErr error         // what the management methods fail with
@@ -98,6 +99,9 @@ func (f *fakeShares) ShareMatches(_ context.Context, ownerSub, tunnel, username 
 	f.calls = append(f.calls, shareCall{ownerSub, tunnel, username, groups})
 	if f.err != nil {
 		return false, f.err
+	}
+	if !f.expires.IsZero() && !f.expires.After(time.Now()) {
+		return false, nil // the store ignores expired rows
 	}
 	for _, grantee := range f.users {
 		if strings.EqualFold(grantee, username) {
@@ -411,6 +415,17 @@ func TestSharedUserAllowed(t *testing.T) {
 	}
 }
 
+// An expired share is invisible to authz, so a visitor it once admitted is refused.
+func TestAuthzIgnoresExpiredShare(t *testing.T) {
+	r := newAuthzRig()
+	r.shares.users = []string{"bob"}
+	r.shares.expires = time.Now().Add(-time.Hour)
+	w := r.serve(http.MethodGet, sharedRequest("alice-blog"))
+	if w.Code != http.StatusForbidden || w.Body.Len() != 0 {
+		t.Errorf("= %d %q, want an empty 403 for an expired share", w.Code, w.Body)
+	}
+}
+
 func TestSharedUserCaseInsensitive(t *testing.T) {
 	r := newAuthzRig()
 	r.shares.users = []string{"bob"}
@@ -490,6 +505,71 @@ func TestOwnerStillAllowed(t *testing.T) {
 	}
 	if len(r.shares.calls) != 0 {
 		t.Errorf("ShareMatches calls %+v for the owner, want none", r.shares.calls)
+	}
+}
+
+// A browser page served from one creator's tunnel must not make a state-changing request to
+// another creator's tunnel riding the visitor's session: the Origin names a different owner.
+func TestCrossOwnerStateChangeRefused(t *testing.T) {
+	h := ownerRequest()
+	h.Set("Origin", "https://bob-x."+sitesDomain)
+	w := newAuthzRig().serve(http.MethodPost, h)
+	if w.Code != http.StatusForbidden || w.Body.Len() != 0 {
+		t.Errorf("= %d %q, want an empty 403", w.Code, w.Body)
+	}
+}
+
+// A non-default port on the Origin host must not slip the check: the port is not part of the
+// sites host, so the owner is still bob.
+func TestCrossOwnerStateChangeWithPortRefused(t *testing.T) {
+	h := ownerRequest()
+	h.Set("Origin", "https://bob-x."+sitesDomain+":8443")
+	if w := newAuthzRig().serve(http.MethodPost, h); w.Code != http.StatusForbidden {
+		t.Errorf("= %d, want 403", w.Code)
+	}
+}
+
+// Safe methods cannot change anything, so they are never refused for their Origin.
+func TestCrossOwnerSafeMethodAllowed(t *testing.T) {
+	h := ownerRequest()
+	h.Set("Origin", "https://bob-x."+sitesDomain)
+	if w := newAuthzRig().serve(http.MethodGet, h); w.Code != http.StatusOK {
+		t.Errorf("= %d, want 200", w.Code)
+	}
+}
+
+func TestSameOwnerOriginAllowed(t *testing.T) {
+	h := ownerRequest()
+	h.Set("Origin", "https://alice-other."+sitesDomain)
+	if w := newAuthzRig().serve(http.MethodPost, h); w.Code != http.StatusOK {
+		t.Errorf("= %d, want 200", w.Code)
+	}
+}
+
+func TestForeignOriginAllowed(t *testing.T) {
+	h := ownerRequest()
+	h.Set("Origin", "https://example.com")
+	if w := newAuthzRig().serve(http.MethodPost, h); w.Code != http.StatusOK {
+		t.Errorf("= %d, want 200", w.Code)
+	}
+}
+
+// A non-browser client sends no Origin and is let through.
+func TestOriginAbsentAllowed(t *testing.T) {
+	if w := newAuthzRig().serve(http.MethodPost, ownerRequest()); w.Code != http.StatusOK {
+		t.Errorf("= %d, want 200", w.Code)
+	}
+}
+
+// Only a valid sites Origin owned by someone else is refused. A host that merely looks like a
+// sites host (Traefik never routes it) or an unparseable Origin is foreign, so it is allowed.
+func TestMalformedOriginAllowed(t *testing.T) {
+	for _, origin := range []string{"https://alice-blog." + sitesDomain + ".evil", "://"} {
+		h := ownerRequest()
+		h.Set("Origin", origin)
+		if w := newAuthzRig().serve(http.MethodPost, h); w.Code != http.StatusOK {
+			t.Errorf("origin %q = %d, want 200", origin, w.Code)
+		}
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/layertwo/tunnels/internal/auth"
 	"github.com/layertwo/tunnels/internal/idp"
@@ -134,7 +135,7 @@ func (s *server) changeShare(w http.ResponseWriter, r *http.Request, put bool) {
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody))
 	var sh store.Share
-	if err := dec.Decode(&sh); err != nil || !validShare(sh) {
+	if err := dec.Decode(&sh); err != nil || !validShare(sh, put) {
 		writeJSON(w, http.StatusBadRequest, errorBody("invalid share"))
 		return
 	}
@@ -159,12 +160,17 @@ func (s *server) changeShare(w http.ResponseWriter, r *http.Request, put bool) {
 }
 
 // validShare reports whether the body describes a share an owner may set. The empty tunnel is the
-// default tunnel; names.ValidTunnelName already rejects "default".
-func validShare(sh store.Share) bool {
+// default tunnel; names.ValidTunnelName already rejects "default". A PUT may set an end, which must
+// be in the future: a share that has already expired grants nothing. A DELETE ignores the end, so
+// that removing a grant always works.
+func validShare(sh store.Share, put bool) bool {
 	if sh.Tunnel != "" && !names.ValidTunnelName(sh.Tunnel) {
 		return false
 	}
 	if sh.Grantee == "" {
+		return false
+	}
+	if put && !sh.ExpiresAt.IsZero() && !sh.ExpiresAt.After(time.Now()) {
 		return false
 	}
 	switch sh.Kind {

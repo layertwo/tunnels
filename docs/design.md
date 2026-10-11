@@ -29,7 +29,7 @@ Decisions taken during design:
 - **Self-service sharing.** A tunnel is private to its owner by default. The owner shares it with
   Pocket ID usernames or groups through the CLI.
 - **Stateless broker.** Postgres holds users and shares. Run-ID pinning and tunnel caps ask
-  frps's dashboard API. One replica in v1; scaling out is a manifest change.
+  frps's dashboard API. Two replicas behind a PodDisruptionBudget; scaling is a manifest change.
 - **Short tokens plus explicit heartbeat settings for revocation.** frp's defaults do not revoke.
 - **Distroless, non-root, read-only containers.** The broker is a static Go binary on distroless.
   From phase 1, frps is the pinned official binary repackaged onto distroless. See Container
@@ -140,8 +140,9 @@ owner's visitors' requests, cookies included (reproduced against a real frps in 
 review). With the scope frps verifies a valid token on every work connection. It does not bind that
 token to this control: frp accepts any token whose subject has logged in since frps started, so a
 creator who learned another creator's run ID could still inject. Run IDs are therefore kept out
-of logs and errors, and a `NewWorkConn` plugin op that checks the token against `user.user` is the
-upgrade if run IDs ever leak (it would put the broker on the data path).
+of logs and errors. The broker's `NewWorkConn` hook (implemented) is what binds a work connection
+to a control user: it checks the connection's token against the `user.user` Login set, and
+enabling it is adding `"NewWorkConn"` to frps's plugin `ops`, exactly as `Ping` is enabled.
 
 Each ping re-reads a file token source, so the CLI keeps the token file fresh. Removing someone
 from `tunnels-creators` or disabling the account stops refresh, and the tunnel ends about an hour
@@ -152,9 +153,9 @@ every heartbeat; the broker re-resolves the token and rejects the ping when the 
 or no longer in the creators group, and frpc then closes the session. It rejects only an account
 refusal: a token the broker cannot verify (invalid, expired, or Pocket ID unreachable) is allowed
 and left to frps, which re-verifies the ping's token itself, so a key we cannot fetch does not tear
-down a session frps would have accepted. Enabling it is the
-`ops = ["Login", "NewProxy", "CloseProxy", "Ping"]` change to `[[httpPlugins]]` in `frps.toml` (a
-homelab manifest change, deferred).
+down a session frps would have accepted. `"Ping"` has been in `frps.toml`'s
+`[[httpPlugins]].ops` since v0.2.0 (homelab #2486); `"NewWorkConn"` is enabled by adding it to
+`ops` with the next release.
 
 `tunnel logout` only deletes the token files on that computer. Pocket ID publishes no token
 revocation endpoint (its discovery document lists none), so a copied refresh token stays good
@@ -242,9 +243,10 @@ and cannot see the host.
 
 No leader election and no sticky sessions: a ClusterIP Service in front of N replicas serves both
 Traefik and frps. Concurrent first logins are safe through the unique-handle constraint and an
-upsert. Migrations are embedded and applied under an advisory lock. v1 runs one replica; raising
-it, and CNPG to 2-3 instances, is a manifest change. frps itself cannot be load balanced: a
-tunnel is a live connection held by one process, so its HA is fast restart, not replicas.
+upsert. Migrations are embedded and applied under an advisory lock. The deploy runs two replicas
+behind a PodDisruptionBudget; raising that, and CNPG to 2-3 instances, is a manifest change. frps
+itself cannot be load balanced: a tunnel is a live connection held by one process, so its HA is
+fast restart, not replicas.
 
 ### Later: frps HA by client fan-out
 
@@ -317,7 +319,7 @@ enablePrometheus = true
 name = "broker"
 addr = "broker.tunnels.svc:8080"
 path = "/plugin/<secret>"
-ops = ["Login", "NewProxy", "CloseProxy"]
+ops = ["Login", "NewProxy", "CloseProxy", "Ping", "NewWorkConn"]
 ```
 
 Plugin rejections surface in the CLI as the reject reason (`detailedErrorsToClient` stays on).
@@ -330,7 +332,7 @@ linux/arm64), signed with cosign.
 
 | Path | Caller | Purpose |
 |------|--------|---------|
-| `/plugin/<secret>` | frps only | Login, NewProxy, CloseProxy hooks |
+| `/plugin/<secret>` | frps only | Login, NewProxy, CloseProxy, Ping, NewWorkConn hooks |
 | `/authz` | Traefik `forwardAuth` | allow or deny one visitor request |
 | `/api/me`; `/api/shares` in phase 2 | CLI, bearer token | ensure user, manage shares |
 | `/.well-known/tunnels.json` | anyone | bootstrap: issuer, CLI client id, API resource, service host, sites domain, minimum CLI version |
@@ -362,7 +364,8 @@ sees. A group name containing a comma is unsupported (groups travel comma-separa
 **API.** Bearer access token verified locally against Pocket ID's JWKS (issuer, audience,
 expiry). `GET /api/me` repeats the Login hook's userinfo and handle logic, so the CLI learns its
 handle at `tunnel login`. `GET`, `PUT` and `DELETE /api/shares` take `{tunnel, kind, grantee}`;
-PUT and DELETE are idempotent.
+PUT also takes an optional absolute RFC3339 `expires_at`, which must be in the future or the
+request is a 400. PUT and DELETE are idempotent.
 
 **Data model.**
 
@@ -373,6 +376,7 @@ shares (owner_sub text references users(sub) on delete cascade,
         tunnel text not null default '',                       -- '' = default tunnel
         kind text check (kind in ('user','group')), grantee text not null,
         created_at timestamptz not null default now(),
+        expires_at timestamptz,                                -- null = never
         primary key (owner_sub, tunnel, kind, grantee))
 ```
 
@@ -511,14 +515,14 @@ tunnels.layertwo.dev                      proxied; covered by the existing *.lay
 | Non-http exposure, custom domains | plugin allows only http proxies with no custom domains or locations |
 | Forged or stolen-for-another-audience token | frps verifies signature, issuer, expiry and audience (API resource); userinfo must also succeed |
 | Man-in-the-middle on the control channel captures a token | frp skips certificate verification unless `trustedCaFile` is set; every client config sets it and the CLI embeds a CA bundle |
-| Revoked creator keeps a tunnel | 1 h tokens, refresh stops, heartbeats (30 s / 90 s) end the tunnel; Ping hook (implemented) rejects a disabled or non-creator account on the next heartbeat once `"Ping"` is added to the plugin `ops` |
+| Revoked creator keeps a tunnel | 1 h tokens, refresh stops, heartbeats (30 s / 90 s) end the tunnel; the Ping hook (implemented, `"Ping"` in the plugin `ops` since v0.2.0) closes the window to one heartbeat by rejecting a disabled or non-creator account |
 | Visitor spoofs identity headers | stripped before the plugin; set only by the plugin; internal ones removed before the app |
 | Creator's app steals a visitor session | the plugin's cookie is host-only and not forwarded upstream; the app sees only `X-Tunnel-User` |
 | Access to another user's tunnel | `/authz` denies by default; owner by `sub`; shares by username or group |
 | Plugin endpoint abused | not routed; NetworkPolicy plus a secret path |
 | Broker compromise | no Kubernetes RBAC; a compromise affects tunnels, not other hostnames |
 | Abuse, load | per-host rate and in-flight limits; per-proxy bandwidth limit; per-user cap |
-| Cross-tunnel same-site requests | accepted (trusted creators); `__Secure-` cookies (`__Host-` once the plugin keeps the PKCE verifier out of a cookie); optional later hardening refuses cross-owner state-changing requests using `Origin` and `Sec-Fetch-Site` |
+| Cross-tunnel same-site requests | `__Secure-` cookies (`__Host-` once the plugin keeps the PKCE verifier out of a cookie); `/authz` refuses a state-changing request whose `Origin` is another owner's sites host (a missing or foreign `Origin` is allowed; `Sec-Fetch-Site` is not used) |
 | Supply chain | digest-pinned images, cosign-signed broker and frps images, checksummed CLI releases, frp pinned |
 | Code execution inside a pod | distroless images (no shell), non-root, read-only root filesystem, capabilities dropped, seccomp, user namespace, no service-account token, NetworkPolicy; see Container Hardening |
 
@@ -537,12 +541,31 @@ All of them fail closed.
 ## Testing
 
 - **Unit tests** (Go, table-driven) on the code where a bug is a security hole: the names
-  package, the three hooks, the `/authz` matrix (owner, shared user, shared group, case
+  package, the five plugin ops (Login, NewProxy, CloseProxy, Ping, NewWorkConn), the `/authz`
+  matrix (owner, shared user, shared group, case
   folding, default deny), the share API, token refresh.
 - **Integration test**, seeded from the spike: the official frps image, the broker and the CLI
   against a mock OIDC issuer. It asserts a stolen name, a wrong audience, an expired token, run-ID
   takeover and revocation by heartbeat.
 - **Smoke test** after deploy: a test creator and a test viewer through the real path.
+
+### Verify a deploy
+
+- `kubectl -n tunnels get deploy broker` shows `2/2`, and `kubectl -n tunnels get pdb broker`
+  shows `MIN AVAILABLE 1`.
+- frps's plugin `ops` includes `"Ping"` (deployed in v0.2.0, homelab #2486) and picks up
+  `"NewWorkConn"` with the next release, once this branch's broker image is pinned.
+- A user share: a second account reaches the site, and `tunnel unshare` denies that visitor on
+  their next request (the share row is gone and `/authz` has no cache).
+- A revoked creator's tunnel: remove them from `tunnels-creators` (or disable the account) and
+  the tunnel ends within one heartbeat (the Ping hook, backed by the `HeartBeats` scope).
+- A group share: a member of the group reaches the site (needs the gate to forward
+  `X-Tunnels-Groups`).
+- A cross-owner state-changing request: a `POST` to `alice-blog.w.tunnels.layertwo.dev` with
+  `Origin: https://bob-x.w.tunnels.layertwo.dev` is refused, while a `GET` or an `Origin`-less
+  request is allowed.
+- The `NewWorkConn` hook is dormant until `"NewWorkConn"` is added to frps's `ops` with the next
+  release, once the broker image containing it is pinned; `"Ping"` is already enabled.
 
 ## Phasing
 
@@ -556,9 +579,9 @@ All of them fail closed.
   `X-Tunnels-Groups` (a deferred homelab change); until then the header is stripped and group
   shares admit no one. User shares work today.
 - **Phase 3:** hardening: heartbeat revocation proven end to end, the Ping-hook kill switch
-  (implemented; enabling it is the frps `ops` change), tuned limits, Gatus, docs, machine
+  (implemented and enabled — `"Ping"` in `ops` since v0.2.0), tuned limits, Gatus, docs, machine
   clients.
-- **Later:** SSH, a web UI, share expiry, live tunnel status, frps HA by client fan-out.
+- **Later:** SSH, a web UI, live tunnel status, frps HA by client fan-out.
 
 ## Verification
 
@@ -587,7 +610,8 @@ Each item is a build-time check with a stated fallback.
 7. A public-client device flow completes without a secret, and refresh keeps the audience and
    rechecks groups.
 8. frps's dashboard API (v0.71.0) answers `/api/clients?runId=` and lists proxies with `user`
-   to the broker. Fallback: keep run-ID and cap state in Postgres and stay at one replica.
+   to the broker. Fallback: keep run-ID and cap state in Postgres and drop to a single broker
+   replica (the deployed default is two).
 9. The embedded client builds with `CGO_ENABLED=0` for every release target and connects to the
    official frps image using a file token source.
 10. Cross-user tests pass: a stolen name and a run-ID takeover are both refused.
@@ -603,16 +627,13 @@ Each item is a build-time check with a stated fallback.
 |---------|----------|
 | Web UI | people ask for one beyond the CLI |
 | Live tunnel status in `tunnel list` | frps dashboard data is worth surfacing |
-| Share expiry | long-lived shares become a problem |
 | Public (login-free) tunnels | webhook receivers are needed |
 | Non-browser access to sites (bearer tokens) | CI or scripts must call a tunnel |
 | Machine clients | headless servers need to publish (phase 3) |
-| Instant kill switch (Ping hook) | implemented; enable by adding `"Ping"` to the plugin `ops` when the hour-long revocation window bites |
-| Broker replicas above one, CNPG above one | an outage of either matters |
+| CNPG above one | a Postgres outage matters |
 | Sharding frps | one frps is outgrown |
 | frps HA (zero-downtime restarts) | an frps restart blip matters; see "Later: frps HA by client fan-out" |
 | Admin API or UI | operators outgrow Pocket ID plus SQL |
-| Cross-owner CSRF hardening in `/authz` | creators stop being fully trusted |
 | Separate registrable domain for sites | cookie or CORS exposure to your apps matters |
 | Public Suffix List entry for the sites domain | a separate domain is not wanted and isolation is |
 
