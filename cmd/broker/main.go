@@ -59,7 +59,12 @@ func run() error {
 		return err
 	}
 	frps := frpsapi.New(cfg.FrpsDashboardURL, cfg.FrpsDashboardUser, cfg.FrpsDashboardPassword, userAgent)
-	pocket := pocketid.New(cfg.PocketIDURL, cfg.PocketIDAPIKey, httpx.Client(userAgent, 10*time.Second))
+	// Machines are optional: with no admin config the broker still serves people, and the machine
+	// endpoints answer "not configured".
+	var pocket broker.PocketID
+	if cfg.PocketIDURL != "" {
+		pocket = pocketid.New(cfg.PocketIDURL, cfg.PocketIDAPIKey, httpx.Client(userAgent, 10*time.Second))
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,

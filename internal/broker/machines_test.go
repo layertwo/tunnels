@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
@@ -401,6 +402,25 @@ func TestMachinesDisableLookupError(t *testing.T) {
 	w := r.do("PUT", "/api/machines/nas", bearer(r.idp.Issue("sub-alice", mockidp.IssueOpts{})), `{"disabled":true}`)
 	if w.Code != 503 || strings.Contains(w.Body.String(), "5432") {
 		t.Fatalf("= %d %q, want 503 without an internal address", w.Code, w.Body)
+	}
+}
+
+// With no Pocket ID admin config the machine endpoints are off, not a panic: the broker serves people
+// only.
+func TestMachinesUnconfigured(t *testing.T) {
+	r := newServerRig(t)
+	// Rebuild the handler with no Pocket ID client, as a broker with the machine config unset.
+	r.h = NewHandler(r.cfg, Deps{IdP: r.client, Verifier: r.client, Users: r.users, Machines: r.machines, PocketID: nil, Shares: r.shares, Frps: r.frps, Log: slog.New(slog.DiscardHandler)})
+	alice := r.idp.Issue("sub-alice", mockidp.IssueOpts{})
+
+	for _, tt := range []struct{ method, target, body string }{
+		{"POST", "/api/machines", `{"handle":"nas","publicKey":` + goodJWK + `}`},
+		{"DELETE", "/api/machines/nas", ""},
+	} {
+		w := r.do(tt.method, tt.target, bearer(alice), tt.body)
+		if w.Code != 503 || !strings.Contains(w.Body.String(), "not configured") {
+			t.Errorf("%s = %d %q, want 503 not configured", tt.method, w.Code, w.Body)
+		}
 	}
 }
 

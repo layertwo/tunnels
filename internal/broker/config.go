@@ -98,9 +98,11 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 
 		DatabaseURL: required("DATABASE_URL"),
 
-		PocketIDURL:    required("POCKET_ID_URL"),
-		PocketIDAPIKey: required("POCKET_ID_API_KEY"),
-		PocketIDAPIID:  required("POCKET_ID_API_ID"),
+		// The machine-admin config is optional: with none of it set the broker serves people only, and
+		// the machine endpoints answer "not configured". Set all three, or none.
+		PocketIDURL:    optional("POCKET_ID_URL", ""),
+		PocketIDAPIKey: optional("POCKET_ID_API_KEY", ""),
+		PocketIDAPIID:  optional("POCKET_ID_API_ID", ""),
 
 		FrpsDashboardURL:      required("FRPS_DASHBOARD_URL"),
 		FrpsDashboardUser:     required("FRPS_DASHBOARD_USER"),
@@ -117,6 +119,10 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	}
 	if badDashboardURL(c.PocketIDURL) {
 		bad("POCKET_ID_URL", "must be an http or https URL with a host and nothing else: no credentials, query or fragment")
+	}
+	// The machine-admin config is all-or-nothing: a half-set one is a mistake, not "machines off".
+	if machines := c.PocketIDURL != ""; machines != (c.PocketIDAPIKey != "") || machines != (c.PocketIDAPIID != "") {
+		bad("POCKET_ID_URL", "must be set with POCKET_ID_API_KEY and POCKET_ID_API_ID, or all three left unset")
 	}
 	if c.PluginSecret != "" && !secretRE.MatchString(c.PluginSecret) {
 		bad("PLUGIN_SECRET", `must be at least 32 characters from A-Z, a-z, 0-9, "-" and "_"`)
