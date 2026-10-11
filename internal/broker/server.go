@@ -101,6 +101,12 @@ func (s *server) me(w http.ResponseWriter, r *http.Request) {
 // noSharesStore is what the share endpoints say when the broker has no shares store at all.
 const noSharesStore = "sharing is unavailable, try again"
 
+// The sentences the share endpoints answer with, kept as constants so they read the same everywhere.
+const (
+	sharesUnavailable = "shares unavailable, try again"
+	invalidShare      = "invalid share"
+)
+
 // sharesGet lists the caller's own shares.
 func (s *server) sharesGet(w http.ResponseWriter, r *http.Request) {
 	acct, ok := s.ownerOnly(w, r)
@@ -117,7 +123,7 @@ func (s *server) sharesGet(w http.ResponseWriter, r *http.Request) {
 	shares, err := s.d.Shares.SharesByOwner(ctx, acct.Sub)
 	if err != nil {
 		s.d.Log.Warn("api/shares: could not list the shares", "err", err)
-		writeJSON(w, http.StatusServiceUnavailable, errorBody("shares unavailable, try again"))
+		writeJSON(w, http.StatusServiceUnavailable, errorBody(sharesUnavailable))
 		return
 	}
 	if shares == nil {
@@ -141,7 +147,7 @@ func (s *server) changeShare(w http.ResponseWriter, r *http.Request, put bool) {
 		return
 	}
 	var sh store.Share
-	if !decodeStrict(w, r, &sh, "invalid share") {
+	if !decodeStrict(w, r, &sh, invalidShare) {
 		return
 	}
 	// An older CLI sends only the tunnel: every share before machines was the caller's own site, so
@@ -150,7 +156,7 @@ func (s *server) changeShare(w http.ResponseWriter, r *http.Request, put bool) {
 		sh.Handle = acct.Handle
 	}
 	if !validShare(sh, put) {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid share"))
+		writeJSON(w, http.StatusBadRequest, errorBody(invalidShare))
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), defaultDecisionTimeout)
@@ -162,7 +168,7 @@ func (s *server) changeShare(w http.ResponseWriter, r *http.Request, put bool) {
 	}
 	if err := apply(ctx, acct.Sub, sh); err != nil {
 		s.d.Log.Warn("api/shares: could not store the share", "err", err)
-		writeJSON(w, http.StatusServiceUnavailable, errorBody("shares unavailable, try again"))
+		writeJSON(w, http.StatusServiceUnavailable, errorBody(sharesUnavailable))
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

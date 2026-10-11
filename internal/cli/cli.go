@@ -231,6 +231,7 @@ func up(ctx context.Context, env Env, args []string) int {
 			}
 			printed[st.Err] = true
 			msg := st.Err
+			// keep in sync with the broker's newProxy message in hooks.go: "tunnel limit of %d reached"
 			if strings.HasPrefix(msg, "tunnel limit of") {
 				msg += " (a tunnel that ended without saying goodbye counts for up to 90 seconds)"
 			}

@@ -22,6 +22,13 @@ type PocketID interface {
 // machineRefused is what a machine is told when it calls an endpoint only its owner may use.
 const machineRefused = "a machine cannot manage shares or machines; use its owner's account"
 
+// The sentences the machine endpoints answer with, kept as constants so they read the same everywhere.
+const (
+	machinesUnavailable = "machines unavailable, try again"
+	machineCreateFailed = "could not create the machine, try again"
+	invalidMachine      = "invalid machine"
+)
+
 // ownerOnly resolves the caller and refuses a machine. A machine is marked Machine on its Account (see
 // AccountBySubject) and carries no sub, so an endpoint keyed by the caller's sub would otherwise act as
 // the empty sub — and a machine must never carry its owner's authority (Decision 12). It writes the
@@ -75,7 +82,7 @@ func (s *server) machinesCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body machineRequest
-	if !decodeStrict(w, r, &body, "invalid machine") {
+	if !decodeStrict(w, r, &body, invalidMachine) {
 		return
 	}
 	var jwk map[string]json.RawMessage
@@ -97,7 +104,7 @@ func (s *server) machinesCreate(w http.ResponseWriter, r *http.Request) {
 	clientID, err := s.d.PocketID.CreateClient(ctx, "machine-"+handle, s.cfg.Issuer, s.cfg.APIResource, body.PublicKey, s.cfg.PocketIDAPIID)
 	if err != nil {
 		s.d.Log.Warn("api/machines: could not mint the client", "err", err)
-		writeJSON(w, http.StatusServiceUnavailable, errorBody("could not create the machine, try again"))
+		writeJSON(w, http.StatusServiceUnavailable, errorBody(machineCreateFailed))
 		return
 	}
 	err = s.d.Machines.CreateMachine(ctx, store.Machine{Handle: handle, OwnerKind: "user", OwnerRef: acct.Sub, ClientID: clientID, CreatedBy: acct.Sub})
@@ -108,7 +115,7 @@ func (s *server) machinesCreate(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		s.rollbackClient(ctx, clientID)
 		s.d.Log.Warn("api/machines: could not store the machine", "err", err)
-		writeJSON(w, http.StatusServiceUnavailable, errorBody("could not create the machine, try again"))
+		writeJSON(w, http.StatusServiceUnavailable, errorBody(machineCreateFailed))
 	default:
 		writeJSON(w, http.StatusCreated, machineJSON{Handle: handle, ClientID: clientID})
 	}
@@ -134,7 +141,7 @@ func (s *server) machinesList(w http.ResponseWriter, r *http.Request) {
 	machines, err := s.d.Machines.MachinesByOwner(ctx, acct.Sub)
 	if err != nil {
 		s.d.Log.Warn("api/machines: could not list the machines", "err", err)
-		writeJSON(w, http.StatusServiceUnavailable, errorBody("machines unavailable, try again"))
+		writeJSON(w, http.StatusServiceUnavailable, errorBody(machinesUnavailable))
 		return
 	}
 	out := make([]machineJSON, 0, len(machines))
@@ -151,7 +158,7 @@ func (s *server) ownedMachine(ctx context.Context, w http.ResponseWriter, r *htt
 	m, err := s.d.Machines.MachineByHandle(ctx, strings.ToLower(r.PathValue("handle")))
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		s.d.Log.Warn("api/machines: could not look up the machine", "err", err)
-		writeJSON(w, http.StatusServiceUnavailable, errorBody("machines unavailable, try again"))
+		writeJSON(w, http.StatusServiceUnavailable, errorBody(machinesUnavailable))
 		return store.Machine{}, false
 	}
 	if errors.Is(err, store.ErrNotFound) || m.OwnerRef != acct.Sub {
@@ -176,7 +183,7 @@ func (s *server) machinesDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.d.Machines.DeleteMachine(ctx, m.ClientID); err != nil {
 		s.d.Log.Warn("api/machines: could not delete the machine", "err", err)
-		writeJSON(w, http.StatusServiceUnavailable, errorBody("machines unavailable, try again"))
+		writeJSON(w, http.StatusServiceUnavailable, errorBody(machinesUnavailable))
 		return
 	}
 	if err := s.d.PocketID.DeleteClient(ctx, m.ClientID); err != nil {
@@ -197,7 +204,7 @@ func (s *server) machinesDisable(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Disabled bool `json:"disabled"`
 	}
-	if !decodeStrict(w, r, &body, "invalid machine") {
+	if !decodeStrict(w, r, &body, invalidMachine) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), defaultDecisionTimeout)
@@ -208,7 +215,7 @@ func (s *server) machinesDisable(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.d.Machines.SetMachineDisabled(ctx, m.ClientID, body.Disabled); err != nil {
 		s.d.Log.Warn("api/machines: could not change the machine's disabled flag", "err", err)
-		writeJSON(w, http.StatusServiceUnavailable, errorBody("machines unavailable, try again"))
+		writeJSON(w, http.StatusServiceUnavailable, errorBody(machinesUnavailable))
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

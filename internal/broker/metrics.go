@@ -84,6 +84,8 @@ func routeOf(path string) string {
 		return "/api/me"
 	case path == "/api/shares":
 		return "/api/shares"
+	case strings.HasPrefix(path, "/api/machines"):
+		return "/api/machines"
 	case path == "/.well-known/tunnels.json":
 		return "/.well-known/tunnels.json"
 	case path == "/healthz":

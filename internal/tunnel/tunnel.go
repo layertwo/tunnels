@@ -79,15 +79,15 @@ func Build(o Options) (*v1.ClientCommonConfig, []v1.ProxyConfigurer, error) {
 		}},
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("tunnel: %w", err) // coverage-ignore // the map above holds only strings, ints and maps, which always marshal
+		return nil, nil, fmt.Errorf("tunnel: %w", err) // coverage-ignore: the map above holds only strings, ints and maps, which always marshal
 	}
 
 	var cfg v1.ClientConfig
 	if err := config.LoadConfigure(raw, &cfg, true, "json"); err != nil {
-		return nil, nil, fmt.Errorf("tunnel: load the frp configuration: %w", err) // coverage-ignore // raw is built here from ClientConfig's own shape, so it always decodes
+		return nil, nil, fmt.Errorf("tunnel: load the frp configuration: %w", err) // coverage-ignore: raw is built here from ClientConfig's own shape, so it always decodes
 	}
 	if err := cfg.Complete(); err != nil {
-		return nil, nil, fmt.Errorf("tunnel: %w", err) // coverage-ignore // the only caller that could fail, AuthClientConfig.Complete, never returns an error
+		return nil, nil, fmt.Errorf("tunnel: %w", err) // coverage-ignore: the only caller that could fail, AuthClientConfig.Complete, never returns an error
 	}
 	proxies := make([]v1.ProxyConfigurer, 0, len(cfg.Proxies))
 	for _, p := range cfg.Proxies {
@@ -121,7 +121,7 @@ func Run(ctx context.Context, o Options, onStatus func(Status)) error {
 
 	src := source.NewConfigSource()
 	if err := src.ReplaceAll(proxies, nil); err != nil {
-		return fmt.Errorf("tunnel: %w", err) // coverage-ignore // Build already validated the one proxy's name
+		return fmt.Errorf("tunnel: %w", err) // coverage-ignore: Build already validated the one proxy's name
 	}
 	svr, err := client.NewService(client.ServiceOptions{
 		Common:                 common,
@@ -129,7 +129,7 @@ func Run(ctx context.Context, o Options, onStatus func(Status)) error {
 		UnsafeFeatures:         security.NewUnsafeFeatures(nil),
 	})
 	if err != nil {
-		return fmt.Errorf("tunnel: %w", err) // coverage-ignore // the config Build returns always passes NewService's checks
+		return fmt.Errorf("tunnel: %w", err) // coverage-ignore: the config Build returns always passes NewService's checks
 	}
 
 	stop := make(chan struct{})
@@ -150,7 +150,7 @@ func Run(ctx context.Context, o Options, onStatus func(Status)) error {
 	if err != nil {
 		return errors.New(strings.TrimSuffix(err.Error(), loginFailExitNote))
 	}
-	return nil // coverage-ignore // svr.Run returns nil only after ctx is done, which returned just above
+	return nil // coverage-ignore: svr.Run returns nil only after ctx is done, which returned just above
 }
 
 // watch reports each change of the proxy's status until stop is closed.
