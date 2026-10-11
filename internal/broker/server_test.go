@@ -191,6 +191,24 @@ func TestAPIMeKeepsTheStoredHandle(t *testing.T) {
 	}
 }
 
+// NewHandler takes the machine-client map from the Configuration, not from Deps: there is exactly
+// one place to set it, so a handler built from cfg alone still resolves a machine client.
+func TestNewHandlerMachineClientsComeFromConfig(t *testing.T) {
+	r := newServerRig(t)
+	r.users.users["sub-alice"] = store.User{Sub: "sub-alice", Handle: "alice"}
+	cfg := r.cfg
+	cfg.MachineClients = map[string]string{"abc": "alice"}
+	h := NewHandler(cfg, Deps{IdP: r.client, Verifier: r.client, Users: r.users, Shares: r.shares, Frps: r.frps, Log: slog.New(slog.DiscardHandler)})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/me", nil)
+	req.Header = bearer(r.idp.Issue("client-abc", mockidp.IssueOpts{})) // a client_credentials subject
+	h.ServeHTTP(w, req)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"handle":"alice"`) {
+		t.Errorf("= %d %q, want 200 with the configured handle", w.Code, w.Body)
+	}
+}
+
 // A token can pass the local check (signature, audience, expiry) for a person the provider has since
 // deleted or revoked; userinfo is what notices, and the person is told to log in again.
 func TestAPIMeUnknownToTheProviderIs401(t *testing.T) {
