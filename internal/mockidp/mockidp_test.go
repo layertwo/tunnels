@@ -2,6 +2,9 @@ package mockidp
 
 import (
 	"cmp"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -613,4 +616,100 @@ func TestIssueRefreshToken(t *testing.T) {
 	s.RevokeUser("alice-sub")
 	status, body := refresh(t, s, s.IssueRefreshToken("alice-sub"))
 	wantError(t, status, body, "invalid_grant")
+}
+
+// ---- federated client credentials: a machine asserts with a signed key
+
+// machineKey makes a fresh ES256 key pair for a test, as the CLI does for a machine.
+func machineKey(t *testing.T) jose.JSONWebKey {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return jose.JSONWebKey{Key: priv, Algorithm: string(jose.ES256)}
+}
+
+// machineAssertion signs a client assertion exactly as auth.ClientAssertion does: iss/aud/sub, iat,
+// a short exp and a jti. An empty jti leaves the claim out.
+func machineAssertion(t *testing.T, key jose.JSONWebKey, clientID, issuer, audience string, exp time.Time, jti string) string {
+	t.Helper()
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: key}, (&jose.SignerOptions{}).WithType("JWT"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := jwt.Signed(signer).Claims(jwt.Claims{
+		Issuer: issuer, Subject: clientID, Audience: jwt.Audience{audience},
+		IssuedAt: jwt.NewNumericDate(time.Now()), Expiry: jwt.NewNumericDate(exp), ID: jti,
+	}).Serialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// federated posts a client_credentials grant that authenticates with a client_assertion.
+func federated(t *testing.T, s *Server, clientID, assertion string) (int, reply) {
+	t.Helper()
+	return post(t, s.URL+"/token", url.Values{
+		"grant_type": {"client_credentials"}, "client_id": {clientID},
+		"client_assertion_type": {"urn:ietf:params:oauth:client-assertion-type:jwt-bearer"},
+		"client_assertion":      {assertion},
+	})
+}
+
+func TestFederatedClientCredentials(t *testing.T) {
+	s := New(t)
+	key := machineKey(t)
+	s.AddMachineKey("machine-1", key.Public())
+	assertion := machineAssertion(t, key, "machine-1", s.URL, APIResource, time.Now().Add(time.Minute), "jti-one")
+
+	status, tok := federated(t, s, "machine-1", assertion)
+	if status != http.StatusOK {
+		t.Fatalf("federated client_credentials = %d: %v", status, tok)
+	}
+	if tok.str("token_type") != "Bearer" || tok.str("access_token") == "" {
+		t.Errorf("token response = %v, want a Bearer access token", tok)
+	}
+	if _, ok := tok["refresh_token"]; ok {
+		t.Errorf("a machine token has a refresh token: %v", tok)
+	}
+	if c := verify(t, s, tok.str("access_token")); c.Subject != "client-machine-1" {
+		t.Errorf("sub = %q, want client-machine-1", c.Subject)
+	}
+
+	// single use: the same assertion cannot be exchanged again
+	status, body := federated(t, s, "machine-1", assertion)
+	wantError(t, status, body, "invalid_grant")
+}
+
+func TestFederatedClientCredentialsRefusals(t *testing.T) {
+	s := New(t)
+	key := machineKey(t)
+	s.AddMachineKey("machine-1", key.Public())
+	other := machineKey(t)
+	expired := time.Now().Add(-time.Minute)
+	future := time.Now().Add(time.Minute)
+
+	tests := []struct {
+		name      string
+		clientID  string
+		assertion string
+	}{
+		{"wrong key", "machine-1", machineAssertion(t, other, "machine-1", s.URL, APIResource, future, "jti-wrong")},
+		{"expired", "machine-1", machineAssertion(t, key, "machine-1", s.URL, APIResource, expired, "jti-exp")},
+		{"wrong issuer", "machine-1", machineAssertion(t, key, "machine-1", "https://elsewhere", APIResource, future, "jti-iss")},
+		{"wrong audience", "machine-1", machineAssertion(t, key, "machine-1", s.URL, "https://other", future, "jti-aud")},
+		{"wrong subject", "machine-1", machineAssertion(t, key, "machine-2", s.URL, APIResource, future, "jti-sub")},
+		{"no jti", "machine-1", machineAssertion(t, key, "machine-1", s.URL, APIResource, future, "")},
+		{"unknown client", "machine-2", machineAssertion(t, key, "machine-2", s.URL, APIResource, future, "jti-unknown")},
+		{"garbage", "machine-1", "not-a-jwt"},
+		{"an access token is not an assertion", "machine-1", s.Issue("machine-1", IssueOpts{})},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status, body := federated(t, s, tt.clientID, tt.assertion)
+			wantError(t, status, body, "invalid_grant")
+		})
+	}
 }

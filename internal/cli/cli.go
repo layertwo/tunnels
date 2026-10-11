@@ -40,11 +40,16 @@ const usage = `Usage:
   tunnel share [--group] [--for DURATION] LABEL GRANTEE  let someone else reach a site (group shares need the gate to forward groups)
   tunnel unshare [--group] LABEL GRANTEE  stop sharing a site
   tunnel list                                     show what you share
+  tunnel machine create NAME                      make a machine publish as itself, no passkey (run it on the machine)
+  tunnel machine list                             show your machines
+  tunnel machine remove NAME                      revoke a machine
   tunnel logout                                   forget the login on this computer
   tunnel version
 `
 
 const usageUp = "Usage: tunnel up PORT [--name NAME]"
+
+const usageMachine = "Usage: tunnel machine create NAME | list | remove NAME"
 
 // Main runs the command in args and returns the exit code: 0 done, 1 failed, 2 used wrongly.
 func Main(args []string, env Env) int {
@@ -72,6 +77,8 @@ func Main(args []string, env Env) int {
 		return share(ctx, env, rest, true)
 	case "list":
 		return list(ctx, env, rest)
+	case "machine":
+		return machine(ctx, env, rest)
 	case "logout", "version":
 		if len(rest) > 0 {
 			fmt.Fprint(env.Stderr, usage)
@@ -381,6 +388,110 @@ func list(ctx context.Context, env Env, args []string) int {
 	for _, sh := range shares {
 		fmt.Fprintf(env.Stdout, "%s\t%s\t%s\t%s\n", names.Label(sh.Handle, sh.Tunnel), sh.Kind, sh.Grantee, expiryLabel(sh.ExpiresAt))
 	}
+	return 0
+}
+
+// machine dispatches the machine subcommands: create, list and remove.
+func machine(ctx context.Context, env Env, args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(env.Stderr, usageMachine)
+		return 2
+	}
+	switch sub, rest := args[0], args[1:]; sub {
+	case "create":
+		return machineCreate(ctx, env, rest)
+	case "list":
+		return machineList(ctx, env, rest)
+	case "remove":
+		return machineRemove(ctx, env, rest)
+	default:
+		fmt.Fprintf(env.Stderr, "unknown machine command %q\n%s\n", sub, usageMachine)
+		return 2
+	}
+}
+
+// machineBad prints the usage line and fails the command as used wrongly.
+func machineBad(env Env, format string, a ...any) int {
+	fmt.Fprintf(env.Stderr, format+"\n"+usageMachine+"\n", a...)
+	return 2
+}
+
+// machineCreate runs on the target machine: it generates a key pair here, asks the broker (as the
+// owner) to register the public half, and leaves the config dir ready for up. The private key never
+// leaves this machine.
+func machineCreate(ctx context.Context, env Env, args []string) int {
+	if len(args) != 1 || !names.ValidHandle(args[0]) {
+		return machineBad(env, "give a machine handle: 2 to 20 lowercase letters and digits")
+	}
+	handle := args[0]
+	s, err := store(env)
+	if err != nil {
+		fmt.Fprintln(env.Stderr, err)
+		return 1
+	}
+	tok, ok := session(ctx, env)
+	if !ok {
+		return 1
+	}
+	key, err := auth.GenerateMachineKey()
+	if err != nil {
+		fmt.Fprintln(env.Stderr, err) // coverage-ignore: ecdsa generation cannot fail; crypto/rand.Reader does not
+		return 1
+	}
+	keyPath := filepath.Join(s.Dir, auth.MachineKeyFile)
+	if err := auth.SaveMachineKey(keyPath, key); err != nil {
+		fmt.Fprintln(env.Stderr, err)
+		return 1
+	}
+	m, err := auth.CreateMachine(ctx, env.HTTP, tok.Server, tok.AccessToken, handle, key.Public())
+	if err != nil {
+		os.Remove(keyPath) // no key without a machine
+		fmt.Fprintln(env.Stderr, err)
+		return 1
+	}
+	login := auth.Tokens{ClientID: m.ClientID, MachineKey: keyPath, Handle: m.Handle, Server: tok.Server}
+	if err := s.Save(login); err != nil {
+		fmt.Fprintln(env.Stderr, err) // coverage-ignore: session just wrote here, so saving the machine login cannot fail
+		return 1
+	}
+	fmt.Fprintf(env.Stdout, "Created machine %s\n", m.Handle)
+	return 0
+}
+
+// machineList prints the owner's machines, each as its handle and client id.
+func machineList(ctx context.Context, env Env, args []string) int {
+	if len(args) != 0 {
+		return machineBad(env, "list takes no arguments")
+	}
+	tok, ok := session(ctx, env)
+	if !ok {
+		return 1
+	}
+	machines, err := auth.ListMachines(ctx, env.HTTP, tok.Server, tok.AccessToken)
+	if err != nil {
+		fmt.Fprintln(env.Stderr, err)
+		return 1
+	}
+	for _, m := range machines {
+		fmt.Fprintf(env.Stdout, "%s\t%s\n", m.Handle, m.ClientID)
+	}
+	return 0
+}
+
+// machineRemove revokes a machine by handle.
+func machineRemove(ctx context.Context, env Env, args []string) int {
+	if len(args) != 1 || !names.ValidHandle(args[0]) {
+		return machineBad(env, "give the machine's handle: 2 to 20 lowercase letters and digits")
+	}
+	tok, ok := session(ctx, env)
+	if !ok {
+		return 1
+	}
+	if err := auth.DeleteMachine(ctx, env.HTTP, tok.Server, tok.AccessToken, args[0]); err != nil {
+		fmt.Fprintln(env.Stderr, err)
+		return 1
+	}
+	fmt.Fprintf(env.Stdout, "Removed machine %s\n", args[0])
 	return 0
 }
 

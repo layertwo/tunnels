@@ -61,6 +61,8 @@ type Server struct {
 	deviceRequests []url.Values
 	deviceCodes    map[string]*deviceGrant
 	refreshTokens  map[string]*refreshGrant
+	machineKeys    map[string]jose.JSONWebKey // client id → the public key it asserts with
+	usedJTIs       map[string]bool            // assertions already exchanged
 }
 
 // deviceGrant is one device authorization request.
@@ -95,6 +97,8 @@ func New(t testing.TB) *Server {
 		refreshGrace:  60 * time.Second,
 		deviceCodes:   map[string]*deviceGrant{},
 		refreshTokens: map[string]*refreshGrant{},
+		machineKeys:   map[string]jose.JSONWebKey{},
+		usedJTIs:      map[string]bool{},
 	}
 
 	mux := http.NewServeMux()
@@ -149,6 +153,15 @@ func (s *Server) RevokeUser(sub string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.revoked[sub] = true
+}
+
+// AddMachineKey registers the public key a machine client asserts with, as Pocket ID's federated
+// credential does. From then on the client_credentials grant only succeeds with an assertion signed
+// by the matching private key.
+func (s *Server) AddMachineKey(clientID string, key jose.JSONWebKey) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.machineKeys[clientID] = key
 }
 
 // Approve completes the device authorization that handed out userCode, as the user sub.
@@ -370,7 +383,7 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	case "refresh_token":
 		resp, errCode = s.exchangeRefreshToken(r.Form.Get("refresh_token"))
 	case "client_credentials":
-		resp = s.exchangeClientCredentials(r.Form)
+		resp, errCode = s.exchangeClientCredentials(r.Form)
 	default:
 		errCode = "unsupported_grant_type"
 	}
@@ -423,16 +436,56 @@ func (s *Server) exchangeRefreshToken(token string) (resp map[string]any, errCod
 }
 
 // exchangeClientCredentials answers the client_credentials grant for a machine client: a token whose
-// subject names the client so the broker can map it to a handle, with no refresh token. The client
-// secret is not checked: the mock has no registry of machine clients.
-func (s *Server) exchangeClientCredentials(form url.Values) map[string]any {
-	aud := []string{form.Get("client_id"), s.URL}
+// subject names the client so the broker can map it to a handle, with no refresh token. A request
+// with a client_assertion is verified against the registered federated key; one without is the older
+// secret-style call, which the mock does not check (it has no registry of secrets).
+func (s *Server) exchangeClientCredentials(form url.Values) (map[string]any, string) {
+	clientID := form.Get("client_id")
+	if assertion := form.Get("client_assertion"); assertion != "" {
+		if errCode := s.verifyAssertion(clientID, assertion); errCode != "" {
+			return nil, errCode
+		}
+	}
+	aud := []string{clientID, s.URL}
 	if resource := form.Get("resource"); resource != "" {
 		aud = slices.Insert(aud, 0, resource)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.tokenResponse("client-"+form.Get("client_id"), aud, form.Get("scope"))
+	return s.tokenResponse("client-"+clientID, aud, form.Get("scope")), ""
+}
+
+// verifyAssertion checks a federated client assertion the way Pocket ID does: signed by the client's
+// registered key, naming this issuer and the API resource, its subject the client id, and carrying a
+// jti that has not been used before. It returns an OAuth2 error code, or "" when the assertion holds.
+func (s *Server) verifyAssertion(clientID, raw string) string {
+	s.mu.Lock()
+	key, known := s.machineKeys[clientID]
+	s.mu.Unlock()
+	if !known {
+		return "invalid_grant"
+	}
+	tok, err := jwt.ParseSigned(raw, []jose.SignatureAlgorithm{jose.ES256})
+	if err != nil {
+		return "invalid_grant"
+	}
+	var c jwt.Claims
+	if err := tok.Claims(key.Key, &c); err != nil {
+		return "invalid_grant"
+	}
+	if err := c.ValidateWithLeeway(jwt.Expected{Issuer: s.URL, AnyAudience: jwt.Audience{APIResource}, Time: time.Now()}, 0); err != nil {
+		return "invalid_grant"
+	}
+	if c.Subject != clientID || c.ID == "" {
+		return "invalid_grant"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.usedJTIs[c.ID] {
+		return "invalid_grant" // single use: a captured assertion cannot be replayed
+	}
+	s.usedJTIs[c.ID] = true
+	return ""
 }
 
 // tokenResponse builds the success answer of the token endpoint: an access token with the server

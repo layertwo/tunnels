@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-jose/go-jose/v4"
 	"github.com/layertwo/tunnels/internal/auth"
 	"github.com/layertwo/tunnels/internal/httpx"
 	"github.com/layertwo/tunnels/internal/mockidp"
@@ -44,13 +45,23 @@ type world struct {
 	dir      string
 	out, err *syncBuffer
 
-	mu           sync.Mutex
-	runs         []tunnel.Options
-	run          func(ctx context.Context, o tunnel.Options, onStatus func(tunnel.Status)) error
-	shares       []auth.Share    // what GET /api/shares answers
-	sharesStatus int             // when non-zero, GET /api/shares answers this status instead
-	putStatus    int             // when non-zero, PUT or DELETE /api/shares answers this status instead
-	shareReq     []recordedShare // every PUT or DELETE /api/shares
+	mu             sync.Mutex
+	runs           []tunnel.Options
+	run            func(ctx context.Context, o tunnel.Options, onStatus func(tunnel.Status)) error
+	shares         []auth.Share    // what GET /api/shares answers
+	sharesStatus   int             // when non-zero, GET /api/shares answers this status instead
+	putStatus      int             // when non-zero, PUT or DELETE /api/shares answers this status instead
+	shareReq       []recordedShare // every PUT or DELETE /api/shares
+	machines       []auth.Machine  // what GET /api/machines answers
+	machinesStatus int             // when non-zero, the machine endpoints answer this status instead
+	machineReq     []recordedMachine
+}
+
+// recordedMachine is one request to a machine endpoint.
+type recordedMachine struct {
+	method string
+	path   string
+	body   string
 }
 
 // recordedShare is one request to change a share.
@@ -89,6 +100,9 @@ func newWorld(t *testing.T) *world {
 	})
 	mux.HandleFunc("PUT /api/shares", w.changeShare)
 	mux.HandleFunc("DELETE /api/shares", w.changeShare)
+	mux.HandleFunc("POST /api/machines", w.createMachine)
+	mux.HandleFunc("GET /api/machines", w.listMachines)
+	mux.HandleFunc("DELETE /api/machines/{handle}", w.deleteMachine)
 	w.svc = httptest.NewServer(mux)
 	t.Cleanup(w.svc.Close)
 	return w
@@ -138,6 +152,73 @@ func (w *world) changeShare(rw http.ResponseWriter, r *http.Request) {
 		io.WriteString(rw, `{"error":"you do not own that tunnel"}`)
 		return
 	}
+	rw.WriteHeader(http.StatusNoContent)
+}
+
+// createMachine answers POST /api/machines like the broker: it registers the posted public key with
+// the mock identity provider (as a federated credential) and returns the machine's client id.
+func (w *world) createMachine(rw http.ResponseWriter, r *http.Request) {
+	raw, _ := io.ReadAll(r.Body)
+	w.mu.Lock()
+	w.machineReq = append(w.machineReq, recordedMachine{method: r.Method, path: r.URL.Path, body: string(raw)})
+	status := w.machinesStatus
+	w.mu.Unlock()
+	if status != 0 {
+		rw.WriteHeader(status)
+		io.WriteString(rw, `{"error":"the handle is taken"}`)
+		return
+	}
+	var body struct {
+		Handle    string          `json:"handle"`
+		PublicKey json.RawMessage `json:"publicKey"`
+	}
+	var public jose.JSONWebKey
+	json.Unmarshal(raw, &body)
+	json.Unmarshal(body.PublicKey, &public)
+	clientID := "machine-" + body.Handle
+	w.idp.AddMachineKey(clientID, public)
+	m := auth.Machine{Handle: body.Handle, ClientID: clientID}
+	w.mu.Lock()
+	w.machines = append(w.machines, m)
+	w.mu.Unlock()
+	rw.WriteHeader(http.StatusCreated)
+	json.NewEncoder(rw).Encode(m)
+}
+
+// listMachines answers GET /api/machines.
+func (w *world) listMachines(rw http.ResponseWriter, _ *http.Request) {
+	w.mu.Lock()
+	status, machines := w.machinesStatus, w.machines
+	w.mu.Unlock()
+	if status != 0 {
+		rw.WriteHeader(status)
+		io.WriteString(rw, `{"error":"machines unavailable, try again"}`)
+		return
+	}
+	json.NewEncoder(rw).Encode(map[string]any{"machines": machines})
+}
+
+// deleteMachine answers DELETE /api/machines/{handle}.
+func (w *world) deleteMachine(rw http.ResponseWriter, r *http.Request) {
+	handle := r.PathValue("handle")
+	w.mu.Lock()
+	w.machineReq = append(w.machineReq, recordedMachine{method: r.Method, path: r.URL.Path})
+	status := w.machinesStatus
+	w.mu.Unlock()
+	if status != 0 {
+		rw.WriteHeader(status)
+		io.WriteString(rw, `{"error":"no such machine"}`)
+		return
+	}
+	w.mu.Lock()
+	kept := w.machines[:0]
+	for _, m := range w.machines {
+		if m.Handle != handle {
+			kept = append(kept, m)
+		}
+	}
+	w.machines = kept
+	w.mu.Unlock()
 	rw.WriteHeader(http.StatusNoContent)
 }
 
@@ -692,6 +773,9 @@ func TestCommandsWithoutAConfigDir(t *testing.T) {
 		{"share", []string{"share", "alice", "bob"}, 1, "no place for the login"},
 		{"unshare", []string{"unshare", "alice", "bob"}, 1, "no place for the login"},
 		{"list", []string{"list"}, 1, "no place for the login"},
+		{"machine create", []string{"machine", "create", "nas"}, 1, "no place for the login"},
+		{"machine list", []string{"machine", "list"}, 1, "no place for the login"},
+		{"machine remove", []string{"machine", "remove", "nas"}, 1, "no place for the login"},
 		{"logout", []string{"logout"}, 1, "no place for the login"},
 		{"version", []string{"version"}, 0, "tunnel 1.2.3"}, // version never touches the config dir
 	} {
@@ -945,5 +1029,206 @@ func TestLogoutCannotClear(t *testing.T) {
 	env.ConfigDir = ""
 	if c := Main([]string{"logout"}, env); c != 1 || !strings.Contains(w.err.String(), "auth: remove") {
 		t.Errorf("exit %d, stderr:\n%s", c, w.err)
+	}
+}
+
+// ---- machine
+
+// machine create generates a key pair on this machine, sends only its public half, and makes the
+// config dir the machine's login.
+func TestMachineCreate(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	if c := w.main("machine", "create", "nas"); c != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
+	}
+	if len(w.machineReq) != 1 {
+		t.Fatalf("%d machine requests, want 1", len(w.machineReq))
+	}
+	req := w.machineReq[0]
+	if req.method != http.MethodPost || req.path != "/api/machines" {
+		t.Errorf("asked %s %s, want POST /api/machines", req.method, req.path)
+	}
+	if strings.Contains(req.body, `"d"`) {
+		t.Error("the request body carries the private key")
+	}
+
+	keyPath := filepath.Join(w.dir, auth.MachineKeyFile)
+	raw, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"d"`) {
+		t.Error("the key file has no private component")
+	}
+	if runtime.GOOS != "windows" {
+		if fi, err := os.Stat(keyPath); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Errorf("%s: %v %v, want mode 0600", keyPath, fi, err)
+		}
+	}
+	// The private component never reaches the log.
+	var key map[string]string
+	json.Unmarshal(raw, &key)
+	for _, out := range []*syncBuffer{w.out, w.err} {
+		if strings.Contains(out.String(), key["d"]) {
+			t.Errorf("the output contains the private key:\n%s", out)
+		}
+	}
+
+	tok, err := (auth.Store{Dir: w.dir}).Load()
+	if err != nil || tok.ClientID != "machine-nas" || tok.MachineKey != keyPath || tok.Handle != "nas" || tok.Server != w.svc.URL {
+		t.Errorf("stored %+v, %v", tok, err)
+	}
+	if tok.RefreshToken != "" || tok.ClientSecret != "" {
+		t.Errorf("a machine login stored a secret: %+v", tok)
+	}
+	if !strings.Contains(w.out.String(), "nas") {
+		t.Errorf("stdout lacks the machine's handle:\n%s", w.out)
+	}
+}
+
+// After machine create, up publishes as the machine: it signs an assertion and exchanges it for a
+// token, with no passkey and no secret.
+func TestMachineCreateThenUp(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	w.run = func(_ context.Context, _ tunnel.Options, onStatus func(tunnel.Status)) error {
+		onStatus(tunnel.Status{Phase: "running"})
+		return nil
+	}
+	if c := w.main("machine", "create", "nas"); c != 0 {
+		t.Fatalf("machine create: exit %d; stderr:\n%s", c, w.err)
+	}
+	if c := w.main("up", "3000"); c != 0 {
+		t.Fatalf("up: exit %d; stderr:\n%s", c, w.err)
+	}
+	if len(w.runs) != 1 || w.runs[0].Handle != "nas" {
+		t.Errorf("runs = %+v, want one as nas", w.runs)
+	}
+	if raw, _ := os.ReadFile((auth.Store{Dir: w.dir}).AccessTokenPath()); len(raw) == 0 {
+		t.Error("up left no access token")
+	}
+}
+
+// A machine create that cannot write the key fails before it calls the broker.
+func TestMachineCreateKeySaveFails(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	if err := os.Mkdir(filepath.Join(w.dir, auth.MachineKeyFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if c := w.main("machine", "create", "nas"); c != 1 || !strings.Contains(w.err.String(), "machine key") {
+		t.Errorf("exit %d, stderr:\n%s", c, w.err)
+	}
+	if len(w.machineReq) != 0 {
+		t.Errorf("the broker was called without a key: %+v", w.machineReq)
+	}
+}
+
+// A machine create that the broker refuses leaves no key behind.
+func TestMachineCreateRefused(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	w.mu.Lock()
+	w.machinesStatus = http.StatusConflict
+	w.mu.Unlock()
+	if c := w.main("machine", "create", "nas"); c != 1 || !strings.Contains(w.err.String(), "taken") {
+		t.Errorf("exit %d, stderr:\n%s", c, w.err)
+	}
+	if _, err := os.Stat(filepath.Join(w.dir, auth.MachineKeyFile)); !os.IsNotExist(err) {
+		t.Errorf("the key file was kept after a refused create: %v", err)
+	}
+}
+
+func TestMachineList(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	w.mu.Lock()
+	w.machines = []auth.Machine{{Handle: "nas", ClientID: "machine-nas"}, {Handle: "pi", ClientID: "machine-pi"}}
+	w.mu.Unlock()
+	if c := w.main("machine", "list"); c != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
+	}
+	for _, want := range []string{"nas", "machine-nas", "pi", "machine-pi"} {
+		if !strings.Contains(w.out.String(), want) {
+			t.Errorf("stdout lacks %q:\n%s", want, w.out)
+		}
+	}
+}
+
+func TestMachineRemove(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	w.mu.Lock()
+	w.machines = []auth.Machine{{Handle: "nas", ClientID: "machine-nas"}}
+	w.mu.Unlock()
+	if c := w.main("machine", "remove", "nas"); c != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
+	}
+	if len(w.machineReq) != 1 || w.machineReq[0].method != http.MethodDelete || w.machineReq[0].path != "/api/machines/nas" {
+		t.Errorf("requests = %+v, want one DELETE /api/machines/nas", w.machineReq)
+	}
+	if w.machines != nil && len(w.machines) != 0 {
+		t.Errorf("machines = %+v, want none", w.machines)
+	}
+	if !strings.Contains(w.out.String(), "nas") {
+		t.Errorf("stdout lacks the machine's handle:\n%s", w.out)
+	}
+}
+
+func TestMachineAPIErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		status int
+		want   string
+	}{
+		{"list", []string{"machine", "list"}, http.StatusServiceUnavailable, "machines unavailable, try again"},
+		{"remove", []string{"machine", "remove", "nas"}, http.StatusNotFound, "no such machine"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newWorld(t)
+			w.loggedIn()
+			w.mu.Lock()
+			w.machinesStatus = tc.status
+			w.mu.Unlock()
+			if c := w.main(tc.args...); c != 1 || !strings.Contains(w.err.String(), tc.want) {
+				t.Errorf("exit %d, stderr:\n%s", c, w.err)
+			}
+		})
+	}
+}
+
+func TestMachineNotLoggedIn(t *testing.T) {
+	for _, args := range [][]string{{"machine", "create", "nas"}, {"machine", "list"}, {"machine", "remove", "nas"}} {
+		w := newWorld(t)
+		if c := w.main(args...); c != 1 || !strings.Contains(w.err.String(), "run: tunnel login") {
+			t.Errorf("%q: exit %d, stderr:\n%s", args, c, w.err)
+		}
+	}
+}
+
+func TestMachineArgumentErrors(t *testing.T) {
+	for _, args := range [][]string{
+		{"machine"},
+		{"machine", "frobnicate"},
+		{"machine", "create"},
+		{"machine", "create", "nas", "extra"},
+		{"machine", "create", "NAS"},
+		{"machine", "create", "n"},
+		{"machine", "remove"},
+		{"machine", "remove", "NAS"},
+		{"machine", "list", "extra"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			w := newWorld(t)
+			w.loggedIn()
+			if c := w.main(args...); c != 2 {
+				t.Errorf("exit %d, want 2", c)
+			}
+			if !strings.Contains(w.err.String(), "tunnel machine") {
+				t.Errorf("no usage line on stderr:\n%s", w.err)
+			}
+		})
 	}
 }

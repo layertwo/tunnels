@@ -13,7 +13,8 @@ import (
 
 // Tokens are what a login leaves on disk. Handle and Server are what the service told the CLI at
 // login: the name it publishes under and the address it logged in at. A machine login has no
-// refresh token; it carries the client credentials it asks for new access tokens with instead.
+// refresh token; it carries either the client credentials it asks for new access tokens with or, now,
+// the path to the private key it signs an assertion with.
 type Tokens struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
@@ -21,6 +22,7 @@ type Tokens struct {
 	Server       string `json:"server"`
 	ClientID     string `json:"client_id,omitempty"`
 	ClientSecret string `json:"client_secret,omitempty"`
+	MachineKey   string `json:"machine_key,omitempty"` // path to the machine's private key, when this is a machine
 }
 
 // ErrNotLoggedIn is what Load says when nobody has logged in here.
