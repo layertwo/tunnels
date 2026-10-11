@@ -47,8 +47,9 @@ func (f *fakePocketID) DeleteClient(_ context.Context, clientID string) error {
 	return f.deleteErr
 }
 
-// alice is a creator; a machine token for a machine registered in the rig.
+// alice is a creator; a machine token for a machine registered in the rig, with its owner present.
 func machineToken(r *serverRig, clientID string) string {
+	r.users.users["sub-bob"] = store.User{Sub: "sub-bob", Handle: "bob"} // the machine's owner
 	r.machines.machines[clientID] = store.Machine{Handle: "nas", OwnerRef: "sub-bob", ClientID: clientID}
 	return r.idp.Issue("client-"+clientID, mockidp.IssueOpts{})
 }
@@ -336,11 +337,79 @@ func TestMachinesDeleteClientCleanupFailureStillRevokes(t *testing.T) {
 	}
 }
 
+// The reversible revocation lever: the owner turns a machine off and on again. A disabled machine is
+// refused at Login and loses its tunnel within a heartbeat (Design Decision 9).
+func TestMachinesDisable(t *testing.T) {
+	r := newServerRig(t)
+	r.machines.machines["c1"] = store.Machine{Handle: "nas", OwnerRef: "sub-alice", ClientID: "c1"}
+	alice := r.idp.Issue("sub-alice", mockidp.IssueOpts{})
+
+	if w := r.do("PUT", "/api/machines/nas", bearer(alice), `{"disabled":true}`); w.Code != 204 {
+		t.Fatalf("disable = %d %q, want 204", w.Code, w.Body)
+	}
+	if m := r.machines.machines["c1"]; !m.Disabled {
+		t.Errorf("machine after disable = %+v, want Disabled", m)
+	}
+	if w := r.do("PUT", "/api/machines/nas", bearer(alice), `{"disabled":false}`); w.Code != 204 {
+		t.Fatalf("enable = %d %q, want 204", w.Code, w.Body)
+	}
+	if m := r.machines.machines["c1"]; m.Disabled {
+		t.Errorf("machine after enable = %+v, want enabled", m)
+	}
+}
+
+// A machine another account owns is not there as far as this caller can tell: no enumeration.
+func TestMachinesDisableRefusesAnotherOwnersMachine(t *testing.T) {
+	r := newServerRig(t)
+	r.machines.machines["c1"] = store.Machine{Handle: "nas", OwnerRef: "sub-bob", ClientID: "c1"}
+	w := r.do("PUT", "/api/machines/nas", bearer(r.idp.Issue("sub-alice", mockidp.IssueOpts{})), `{"disabled":true}`)
+	if w.Code != 404 {
+		t.Errorf("= %d %q, want 404", w.Code, w.Body)
+	}
+	if m := r.machines.machines["c1"]; m.Disabled {
+		t.Errorf("another owner's machine was disabled: %+v", m)
+	}
+}
+
+func TestMachinesDisableUnknownAndInvalid(t *testing.T) {
+	r := newServerRig(t)
+	alice := r.idp.Issue("sub-alice", mockidp.IssueOpts{})
+	if w := r.do("PUT", "/api/machines/nas", bearer(alice), `{"disabled":true}`); w.Code != 404 {
+		t.Errorf("unknown machine = %d %q, want 404", w.Code, w.Body)
+	}
+	if w := r.do("PUT", "/api/machines/nas", bearer(alice), `not json`); w.Code != 400 {
+		t.Errorf("bad body = %d %q, want 400", w.Code, w.Body)
+	}
+	if w := r.do("PUT", "/api/machines/nas", bearer(alice), `{"disabled":true} extra`); w.Code != 400 {
+		t.Errorf("trailing json = %d %q, want 400", w.Code, w.Body)
+	}
+}
+
+func TestMachinesDisableStoreError(t *testing.T) {
+	r := newServerRig(t)
+	r.machines.machines["c1"] = store.Machine{Handle: "nas", OwnerRef: "sub-alice", ClientID: "c1"}
+	r.machines.disableErr = errors.New("db down")
+	w := r.do("PUT", "/api/machines/nas", bearer(r.idp.Issue("sub-alice", mockidp.IssueOpts{})), `{"disabled":true}`)
+	if w.Code != 503 {
+		t.Fatalf("= %d %q, want 503", w.Code, w.Body)
+	}
+}
+
+func TestMachinesDisableLookupError(t *testing.T) {
+	r := newServerRig(t)
+	r.machines.err = errors.New("dial tcp 10.0.0.5:5432: connect: connection refused")
+	w := r.do("PUT", "/api/machines/nas", bearer(r.idp.Issue("sub-alice", mockidp.IssueOpts{})), `{"disabled":true}`)
+	if w.Code != 503 || strings.Contains(w.Body.String(), "5432") {
+		t.Fatalf("= %d %q, want 503 without an internal address", w.Code, w.Body)
+	}
+}
+
 func TestMachinesNeedAToken(t *testing.T) {
 	r := newServerRig(t)
 	for _, tt := range []struct{ method, target, body string }{
 		{"POST", "/api/machines", `{"handle":"nas","publicKey":` + goodJWK + `}`},
 		{"GET", "/api/machines", ""},
+		{"PUT", "/api/machines/nas", `{"disabled":true}`},
 		{"DELETE", "/api/machines/nas", ""},
 	} {
 		w := r.do(tt.method, tt.target, nil, tt.body)
@@ -358,6 +427,7 @@ func TestMachinesRefuseAMachineSubject(t *testing.T) {
 	for _, tt := range []struct{ method, target, body string }{
 		{"POST", "/api/machines", `{"handle":"pi","publicKey":` + goodJWK + `}`},
 		{"GET", "/api/machines", ""},
+		{"PUT", "/api/machines/nas", `{"disabled":true}`},
 		{"DELETE", "/api/machines/nas", ""},
 	} {
 		w := r.do(tt.method, tt.target, bearer(token), tt.body)

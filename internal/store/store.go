@@ -47,7 +47,7 @@ type Share struct {
 var (
 	// ErrNotFound means no row matches. A failed query is never ErrNotFound.
 	ErrNotFound = errors.New("store: user not found")
-	// ErrHandleTaken means another sub owns the handle.
+	// ErrHandleTaken means another user or machine already owns the handle.
 	ErrHandleTaken = errors.New("store: handle is taken")
 )
 

@@ -46,6 +46,7 @@ func NewHandler(cfg Config, d Deps) http.Handler {
 	mux.HandleFunc("POST /api/machines", s.machinesCreate)
 	mux.HandleFunc("GET /api/machines", s.machinesList)
 	mux.HandleFunc("DELETE /api/machines/{handle}", s.machinesDelete)
+	mux.HandleFunc("PUT /api/machines/{handle}", s.machinesDisable)
 	mux.HandleFunc("GET /api/shares", s.sharesGet)
 	mux.HandleFunc("PUT /api/shares", s.sharesPut)
 	mux.HandleFunc("DELETE /api/shares", s.sharesDelete)

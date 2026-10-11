@@ -40,6 +40,7 @@ type MachineStore interface {
 	CreateMachine(ctx context.Context, m store.Machine) error
 	MachinesByOwner(ctx context.Context, ownerRef string) ([]store.Machine, error)
 	DeleteMachine(ctx context.Context, clientID string) error
+	SetMachineDisabled(ctx context.Context, clientID string, disabled bool) error
 }
 
 // Account is a principal who may publish tunnels: a person or a machine. Handle is the stored one and
@@ -48,6 +49,7 @@ type Account struct {
 	Sub      string `json:"sub"`
 	Username string `json:"username"`
 	Handle   string `json:"handle"`
+	Machine  bool   `json:"machine,omitempty"` // a machine is its own principal; /api/me reports it
 }
 
 // What Resolve refuses with. A token the identity provider rejects surfaces as idp.ErrInvalidToken
@@ -140,16 +142,19 @@ func (r Resolver) AccountBySubject(ctx context.Context, sub string) (Account, er
 		if m.Disabled {
 			return Account{}, &refusal{ErrDisabled, "this machine is disabled; ask its owner"}
 		}
-		// The design's Publish flow checks the owner is not disabled. A missing owner row is left as it
-		// was: the machine's own row is its revocation lever, and its sites already read as unknown.
-		if owner, err := r.Users.UserBySub(ctx, m.OwnerRef); err != nil {
-			if !errors.Is(err, store.ErrNotFound) {
-				return Account{}, fmt.Errorf("broker: look up machine owner: %w", err)
-			}
-		} else if owner.Disabled {
+		// A machine's authority derives from its owner, so the owner must still exist and be enabled (the
+		// design's Publish flow). A missing owner row orphans the machine: fail closed, as /authz already
+		// denies a site whose owner is gone.
+		owner, err := r.Users.UserBySub(ctx, m.OwnerRef)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			return Account{}, &refusal{ErrUnknownMachine, "this machine's owner no longer exists; ask an admin"}
+		case err != nil:
+			return Account{}, fmt.Errorf("broker: look up machine owner: %w", err)
+		case owner.Disabled:
 			return Account{}, &refusal{ErrDisabled, "this machine's owner is disabled; ask an admin"}
 		}
-		return Account{Handle: m.Handle}, nil
+		return Account{Machine: true, Handle: m.Handle}, nil
 	}
 	u, err := r.Users.UserBySub(ctx, sub)
 	if err != nil {

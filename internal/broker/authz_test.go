@@ -744,6 +744,15 @@ func TestMachineUnknownOwnerDenied(t *testing.T) {
 	}
 }
 
+// A broker built without a machine store (a bare Deps) must deny an unknown handle, not panic.
+func TestMachineNilMachinesDenied(t *testing.T) {
+	r := newAuthzRig()
+	r.authz.Machines = nil
+	if w := r.serve(http.MethodGet, sharedRequest("nas-blog")); w.Code != http.StatusForbidden || w.Body.Len() != 0 {
+		t.Errorf("= %d %q, want an empty 403 without a machine store", w.Code, w.Body)
+	}
+}
+
 // A store that cannot answer about the machine, or about the owner it names, is an outage, not a deny.
 func TestMachineLookupErrorIs503(t *testing.T) {
 	r := newAuthzRig()

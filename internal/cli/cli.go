@@ -3,6 +3,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -473,6 +474,11 @@ func machineRemove(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintln(env.Stderr, err)
 		return 1
 	}
+	// If this box is logged in as the machine just removed, its local login and private key go too.
+	// The server-side machine is already gone; a local cleanup that fails must not undo that.
+	if tok.Handle == args[0] {
+		_ = forgetLocal(env)
+	}
 	fmt.Fprintf(env.Stdout, "Removed machine %s\n", args[0])
 	return 0
 }
@@ -497,12 +503,24 @@ func expiryLabel(t time.Time) string {
 	return t.Format(time.RFC3339)
 }
 
-func logout(env Env) int {
+// forgetLocal clears this computer's login and the machine's private key from the config dir.
+func forgetLocal(env Env) error {
 	s, err := store(env)
-	if err == nil {
-		err = s.Clear()
-	}
 	if err != nil {
+		return err
+	}
+	if err := s.Clear(); err != nil {
+		return err
+	}
+	// A machine's private key is a credential too; logging out must not leave it behind.
+	if err := os.Remove(filepath.Join(s.Dir, auth.MachineKeyFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func logout(env Env) int {
+	if err := forgetLocal(env); err != nil {
 		fmt.Fprintln(env.Stderr, err)
 		return 1
 	}

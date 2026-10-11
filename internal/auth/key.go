@@ -14,6 +14,8 @@ import (
 )
 
 // MachineKeyFile is the machine's private key in the config dir; it is 0600 and never sent.
+// shortcut: one fixed path per config dir, so one machine per host; a second `machine create`
+// overwrites the first's key, and a per-machine name would need the login to record the path.
 const MachineKeyFile = "machine-key.json"
 
 // assertionLifetime bounds a client assertion. It is single-use, so it need only outlive one token

@@ -509,6 +509,10 @@ func (s *stack) newMachine(t *testing.T, handle, ownerSub string) (clientID stri
 	}
 	clientID = "machine-" + handle
 	s.mock.AddMachineKey(clientID, key.Public())
+	// A machine's owner must have a row; create it if the caller has not logged in as them yet.
+	if _, err := s.users.CreateUser(t.Context(), ownerSub, strings.TrimPrefix(ownerSub, "sub-")); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.users.CreateMachine(t.Context(), store.Machine{
 		Handle: handle, OwnerKind: "user", OwnerRef: ownerSub, ClientID: clientID, CreatedBy: ownerSub,
 	}); err != nil {

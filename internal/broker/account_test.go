@@ -195,14 +195,15 @@ func TestResolveExistingUserKeepsHandle(t *testing.T) {
 
 // fakeMachines is an in-memory MachineStore that behaves like store.Store, and records every call.
 type fakeMachines struct {
-	machines  map[string]store.Machine // by client id
-	err       error
-	createErr error
-	deleteErr error
-	created   []store.Machine
-	deleted   []string
-	steps     *[]string // when set, the order of create/delete calls, shared with the Pocket ID fake
-	calls     []string
+	machines   map[string]store.Machine // by client id
+	err        error
+	createErr  error
+	deleteErr  error
+	disableErr error
+	created    []store.Machine
+	deleted    []string
+	steps      *[]string // when set, the order of create/delete calls, shared with the Pocket ID fake
+	calls      []string
 }
 
 func newMachines(existing ...store.Machine) *fakeMachines {
@@ -285,11 +286,26 @@ func (f *fakeMachines) DeleteMachine(_ context.Context, clientID string) error {
 	return nil
 }
 
+func (f *fakeMachines) SetMachineDisabled(_ context.Context, clientID string, disabled bool) error {
+	f.calls = append(f.calls, "SetMachineDisabled "+clientID)
+	f.note("SetMachineDisabled")
+	if f.disableErr != nil {
+		return f.disableErr
+	}
+	m, ok := f.machines[clientID]
+	if !ok {
+		return store.ErrNotFound
+	}
+	m.Disabled = disabled
+	f.machines[clientID] = m
+	return nil
+}
+
 // A machine is its own principal: its Pocket ID client id (client-<id>) resolves through the machines
 // table to its own handle, and never through a person's row or the identity provider.
 func TestResolveMachine(t *testing.T) {
-	machines := newMachines(store.Machine{Handle: "nas", ClientID: "abc"})
-	r, i := resolver(identity("", "", creators), newUsers())
+	machines := newMachines(store.Machine{Handle: "nas", ClientID: "abc", OwnerRef: "sub-alice"})
+	r, i := resolver(identity("", "", creators), newUsers(store.User{Sub: "sub-alice", Handle: "alice"}))
 	r.Machines = machines
 	verifierOf(r).sub = "client-abc"
 
@@ -297,7 +313,7 @@ func TestResolveMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := (Account{Handle: "nas"}); got != want {
+	if want := (Account{Handle: "nas", Machine: true}); got != want {
 		t.Errorf("account = %+v, want %+v", got, want)
 	}
 	if i.calls != 0 {
@@ -372,12 +388,12 @@ func TestAccountBySubject(t *testing.T) {
 		want     Account
 		wantErr  error
 	}{
-		{"machine", "client-abc", nil, []store.Machine{{Handle: "nas", ClientID: "abc"}}, Account{Handle: "nas"}, nil},
+		{"machine, enabled owner", "client-abc", []store.User{{Sub: "owner", Handle: "alice"}}, []store.Machine{{Handle: "nas", ClientID: "abc", OwnerRef: "owner"}}, Account{Handle: "nas", Machine: true}, nil},
 		{"machine, unknown", "client-zzz", nil, nil, Account{}, ErrUnknownMachine},
 		{"machine, disabled", "client-abc", nil, []store.Machine{{Handle: "nas", ClientID: "abc", Disabled: true}}, Account{}, ErrDisabled},
-		{"machine, enabled owner", "client-abc", []store.User{{Sub: "owner", Handle: "alice"}}, []store.Machine{{Handle: "nas", ClientID: "abc", OwnerRef: "owner"}}, Account{Handle: "nas"}, nil},
 		{"machine, disabled owner", "client-abc", []store.User{{Sub: "owner", Handle: "alice", Disabled: true}}, []store.Machine{{Handle: "nas", ClientID: "abc", OwnerRef: "owner"}}, Account{}, ErrDisabled},
-		{"machine, owner row gone", "client-abc", nil, []store.Machine{{Handle: "nas", ClientID: "abc", OwnerRef: "owner"}}, Account{Handle: "nas"}, nil},
+		{"machine, owner row gone", "client-abc", nil, []store.Machine{{Handle: "nas", ClientID: "abc", OwnerRef: "owner"}}, Account{}, ErrUnknownMachine},
+		{"machine, no owner ref", "client-abc", nil, []store.Machine{{Handle: "nas", ClientID: "abc"}}, Account{}, ErrUnknownMachine},
 		{"user", "sub-1", []store.User{{Sub: "sub-1", Handle: "alice"}}, nil, Account{Sub: "sub-1", Handle: "alice"}, nil},
 		{"user, unknown", "sub-9", nil, nil, Account{}, store.ErrNotFound},
 	}

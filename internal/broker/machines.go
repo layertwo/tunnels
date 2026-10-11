@@ -22,16 +22,16 @@ type PocketID interface {
 // machineRefused is what a machine is told when it calls an endpoint only its owner may use.
 const machineRefused = "a machine cannot manage shares or machines; use its owner's account"
 
-// ownerOnly resolves the caller and refuses a machine. A machine's Account carries no sub (see
-// AccountBySubject), so an endpoint keyed by the caller's sub would otherwise act as the empty sub —
-// and a machine must never carry its owner's authority (Decision 12). It writes the status itself and
-// returns false, so the caller does nothing more.
+// ownerOnly resolves the caller and refuses a machine. A machine is marked Machine on its Account (see
+// AccountBySubject) and carries no sub, so an endpoint keyed by the caller's sub would otherwise act as
+// the empty sub — and a machine must never carry its owner's authority (Decision 12). It writes the
+// status itself and returns false, so the caller does nothing more.
 func (s *server) ownerOnly(w http.ResponseWriter, r *http.Request) (Account, bool) {
 	acct, ok := s.account(w, r)
 	if !ok {
 		return Account{}, false
 	}
-	if acct.Sub == "" {
+	if acct.Machine {
 		writeJSON(w, http.StatusForbidden, errorBody(machineRefused))
 		return Account{}, false
 	}
@@ -84,6 +84,8 @@ func (s *server) machinesCreate(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), defaultDecisionTimeout)
 	defer cancel()
 
+	// shortcut: a crash between minting the client and writing the row leaves an orphan client with no
+	// row, which the resolver denies (harmless); revisit with an outbox if orphans ever matter.
 	clientID, err := s.d.PocketID.CreateClient(ctx, "machine-"+handle, s.cfg.Issuer, s.cfg.APIResource, body.PublicKey, s.cfg.PocketIDAPIID)
 	if err != nil {
 		s.d.Log.Warn("api/machines: could not mint the client", "err", err)
@@ -163,6 +165,47 @@ func (s *server) machinesDelete(w http.ResponseWriter, r *http.Request) {
 	if err := s.d.PocketID.DeleteClient(ctx, m.ClientID); err != nil {
 		// The row is the revocation lever; a client that could not be cleaned up only leaves litter.
 		s.d.Log.Warn("api/machines: deleted the machine but not its client", "err", err)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// machinesDisable turns one of the caller's machines off or on again. The row's disabled flag is the
+// reversible revocation lever (Design Decision 9), where DELETE is the permanent one: a disabled
+// machine is refused at Login and loses its tunnel within a heartbeat. The machine must be the caller's.
+func (s *server) machinesDisable(w http.ResponseWriter, r *http.Request) {
+	acct, ok := s.ownerOnly(w, r)
+	if !ok {
+		return
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody))
+	var body struct {
+		Disabled bool `json:"disabled"`
+	}
+	if err := dec.Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid machine"))
+		return
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid machine"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), defaultDecisionTimeout)
+	defer cancel()
+
+	m, err := s.d.Machines.MachineByHandle(ctx, strings.ToLower(r.PathValue("handle")))
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		s.d.Log.Warn("api/machines: could not look up the machine", "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, errorBody("machines unavailable, try again"))
+		return
+	}
+	if errors.Is(err, store.ErrNotFound) || m.OwnerRef != acct.Sub {
+		writeJSON(w, http.StatusNotFound, errorBody("no such machine"))
+		return
+	}
+	if err := s.d.Machines.SetMachineDisabled(ctx, m.ClientID, body.Disabled); err != nil {
+		s.d.Log.Warn("api/machines: could not change the machine's disabled flag", "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, errorBody("machines unavailable, try again"))
+		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
