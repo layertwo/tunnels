@@ -463,6 +463,60 @@ func TestRefreshStoredWhenLoggedOut(t *testing.T) {
 	}
 }
 
+// A machine login has no refresh token: RefreshStored asks for a new access token with the stored
+// client credentials and keeps them, along with the handle and server.
+func TestRefreshStoredClientCredentials(t *testing.T) {
+	o, m := newOIDC(t)
+	s := Store{Dir: t.TempDir()}
+	before := Tokens{AccessToken: m.Issue("sub-alice", mockidp.IssueOpts{}), ClientID: "machine-1", ClientSecret: "s3cret",
+		Handle: "bot", Server: "https://tunnels.example"}
+	if err := s.Save(before); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := RefreshStored(t.Context(), s, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AccessToken == before.AccessToken || got.AccessToken == "" {
+		t.Errorf("the access token was not replaced: %+v", got)
+	}
+	if got.RefreshToken != "" {
+		t.Errorf("RefreshToken = %q, want none for a machine login", got.RefreshToken)
+	}
+	if got.ClientID != "machine-1" || got.ClientSecret != "s3cret" {
+		t.Errorf("the machine credentials were lost: %+v", got)
+	}
+	if got.Handle != "bot" || got.Server != "https://tunnels.example" {
+		t.Errorf("handle and server were lost: %+v", got)
+	}
+	if loaded, err := s.Load(); err != nil || loaded != got {
+		t.Errorf("stored = %+v, %v, want what RefreshStored returned", loaded, err)
+	}
+	if raw, _ := os.ReadFile(s.AccessTokenPath()); string(raw) != got.AccessToken {
+		t.Error("access-token does not hold the new access token")
+	}
+	if sub := verifies(t, m, got.AccessToken); sub != "client-machine-1" {
+		t.Errorf("refreshed access token is for %q, want client-machine-1", sub)
+	}
+}
+
+// A machine refresh that fails keeps the stored login, exactly as a person's does.
+func TestRefreshStoredClientCredentialsFailureKeepsFiles(t *testing.T) {
+	s := Store{Dir: t.TempDir()}
+	before := Tokens{AccessToken: "at", ClientID: "machine-1", ClientSecret: "s3cret", Handle: "bot", Server: "https://s"}
+	if err := s.Save(before); err != nil {
+		t.Fatal(err)
+	}
+	down := OIDC{Issuer: "http://127.0.0.1:1", ClientID: "c", Resource: "r", HTTP: client()}
+	if _, err := RefreshStored(t.Context(), s, down); err == nil {
+		t.Fatal("RefreshStored of a machine login with the provider down succeeded")
+	}
+	if got, err := s.Load(); err != nil || got != before {
+		t.Errorf("stored = %+v, %v, want the login unchanged", got, err)
+	}
+}
+
 // Good tokens are worth more than fresh ones: whatever goes wrong, the files stay as they were.
 func TestRefreshFailureKeepsFiles(t *testing.T) {
 	o, m := newOIDC(t)
@@ -991,5 +1045,58 @@ func TestRefreshStoredWhenSaveFails(t *testing.T) {
 	}
 	if got, err := s.Load(); err != nil || got != before {
 		t.Errorf("stored tokens changed after a failed save: %+v, %v, want %+v", got, err, before)
+	}
+}
+
+// A machine client asks for its own token: the client_credentials grant, with the resource the API
+// is known by. There is no refresh token, and the credentials are kept for the next call.
+func TestClientCredentials(t *testing.T) {
+	o, m := newOIDC(t)
+	rec := &recorder{}
+	o.HTTP = &http.Client{Transport: rec, Timeout: 10 * time.Second}
+
+	got, err := o.ClientCredentials(t.Context(), "machine-1", "s3cret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AccessToken == "" || got.RefreshToken != "" {
+		t.Errorf("ClientCredentials = %+v, want an access token and no refresh token", got)
+	}
+	if got.ClientID != "machine-1" || got.ClientSecret != "s3cret" {
+		t.Errorf("ClientCredentials did not keep the credentials: %+v", got)
+	}
+	if sub := verifies(t, m, got.AccessToken); sub != "client-machine-1" {
+		t.Errorf("access token is for %q, want client-machine-1", sub)
+	}
+
+	if len(rec.forms) != 1 {
+		t.Fatalf("%d token requests, want 1", len(rec.forms))
+	}
+	form := rec.forms[0]
+	for key, want := range map[string]string{
+		"grant_type": "client_credentials", "client_id": "machine-1", "client_secret": "s3cret", "resource": mockidp.APIResource,
+	} {
+		if value := form.Get(key); value != want {
+			t.Errorf("token request %s = %q, want %q", key, value, want)
+		}
+	}
+}
+
+func TestClientCredentialsErrors(t *testing.T) {
+	down := OIDC{Issuer: "http://127.0.0.1:1", ClientID: "c", Resource: "r", HTTP: client()}
+	if _, err := down.ClientCredentials(t.Context(), "machine-1", "s3cret"); err == nil || !strings.Contains(err.Error(), "discover") {
+		t.Errorf("ClientCredentials without a provider: err = %v, want a discovery error", err)
+	}
+
+	issuer := brokenIDP(t,
+		func(http.ResponseWriter, *http.Request) {},
+		func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "boom", http.StatusInternalServerError) })
+	o := OIDC{Issuer: issuer, ClientID: "c", Resource: "r", HTTP: client()}
+	_, err := o.ClientCredentials(t.Context(), "machine-1", "s3cret")
+	if err == nil || !strings.Contains(err.Error(), "client credentials") {
+		t.Errorf("ClientCredentials when the token endpoint fails: err = %v, want a client-credentials error", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "s3cret") {
+		t.Errorf("the error repeats the client secret: %v", err)
 	}
 }

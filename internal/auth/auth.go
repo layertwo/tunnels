@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/clientcredentials"
 )
 
 // maxBody bounds what is read from the service.
@@ -208,6 +210,28 @@ func (o OIDC) Refresh(ctx context.Context, refreshToken string) (Tokens, error) 
 	return Tokens{AccessToken: tok.AccessToken, RefreshToken: tok.RefreshToken}, nil
 }
 
+// ClientCredentials gets an access token for a machine client from the discovered token endpoint.
+// A machine login has no refresh token: it asks for a token like this again when it needs one. The
+// secret is only ever sent to the provider's token endpoint, never logged.
+func (o OIDC) ClientCredentials(ctx context.Context, clientID, clientSecret string) (Tokens, error) {
+	ctx, cfg, err := o.config(ctx)
+	if err != nil {
+		return Tokens{}, err
+	}
+	cc := clientcredentials.Config{
+		ClientID:       clientID,
+		ClientSecret:   clientSecret,
+		TokenURL:       cfg.Endpoint.TokenURL,
+		EndpointParams: url.Values{"resource": {o.Resource}},
+		AuthStyle:      oauth2.AuthStyleInParams, // a public client: the id and secret ride the body, as in the device flow
+	}
+	tok, err := cc.Token(ctx)
+	if err != nil {
+		return Tokens{}, fmt.Errorf("auth: client credentials: %w", err)
+	}
+	return Tokens{AccessToken: tok.AccessToken, ClientID: clientID, ClientSecret: clientSecret}, nil
+}
+
 // RefreshStored refreshes the stored login. It reads the files first, so a token that another running
 // process rotated is the one used, and it writes them only when the refresh worked: a failure leaves
 // the files as they were.
@@ -220,7 +244,14 @@ func RefreshStored(ctx context.Context, s Store, o OIDC) (Tokens, error) {
 	if err != nil {
 		return Tokens{}, err
 	}
-	fresh, err := o.Refresh(ctx, t.RefreshToken)
+	// A machine login has no refresh token, so it asks for a new access token with its credentials;
+	// everything else refreshes a person's login.
+	var fresh Tokens
+	if t.RefreshToken == "" && t.ClientID != "" {
+		fresh, err = o.ClientCredentials(ctx, t.ClientID, t.ClientSecret)
+	} else {
+		fresh, err = o.Refresh(ctx, t.RefreshToken)
+	}
 	if err != nil {
 		return Tokens{}, err
 	}

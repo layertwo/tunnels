@@ -1,7 +1,7 @@
 // Package mockidp is an in-process stand-in for Pocket ID v2.18.0, for tests. It serves the OIDC
 // discovery document, the JWKS, the userinfo endpoint, the device authorization endpoint and a
-// token endpoint (device_code and refresh_token grants), and signs the access tokens it issues
-// with an RSA key it generates itself.
+// token endpoint (device_code, refresh_token and client_credentials grants), and signs the access
+// tokens it issues with an RSA key it generates itself.
 package mockidp
 
 import (
@@ -359,6 +359,8 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		resp, errCode = s.exchangeDeviceCode(r.Form.Get("device_code"))
 	case "refresh_token":
 		resp, errCode = s.exchangeRefreshToken(r.Form.Get("refresh_token"))
+	case "client_credentials":
+		resp = s.exchangeClientCredentials(r.Form)
 	default:
 		errCode = "unsupported_grant_type"
 	}
@@ -408,6 +410,19 @@ func (s *Server) exchangeRefreshToken(token string) (resp map[string]any, errCod
 		return nil, "invalid_grant"
 	}
 	return s.tokenResponse(g.sub, g.aud, g.scope), ""
+}
+
+// exchangeClientCredentials answers the client_credentials grant for a machine client: a token whose
+// subject names the client so the broker can map it to a handle, with no refresh token. The client
+// secret is not checked: the mock has no registry of machine clients.
+func (s *Server) exchangeClientCredentials(form url.Values) map[string]any {
+	aud := []string{form.Get("client_id"), s.URL}
+	if resource := form.Get("resource"); resource != "" {
+		aud = slices.Insert(aud, 0, resource)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tokenResponse("client-"+form.Get("client_id"), aud, form.Get("scope"))
 }
 
 // tokenResponse builds the success answer of the token endpoint: an access token with the server

@@ -35,6 +35,7 @@ type Env struct {
 
 const usage = `Usage:
   tunnel login [--server HOST]                    log in with your browser
+  tunnel login --machine CLIENT_ID [--server HOST]  log in as a machine client (secret from TUNNELS_CLIENT_SECRET)
   tunnel up PORT [--name NAME]                    publish http://127.0.0.1:PORT until you stop it
   tunnel share [--name NAME] [--group] [--for DURATION] GRANTEE  let someone else reach a tunnel (group shares need the gate to forward groups)
   tunnel unshare [--name NAME] [--group] GRANTEE  stop sharing a tunnel
@@ -121,6 +122,7 @@ func login(ctx context.Context, env Env, args []string) int {
 	fs := pflag.NewFlagSet("login", pflag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	server := fs.String("server", env.DefaultServer, "the tunnel service")
+	machine := fs.String("machine", "", "log in as a machine client id; the secret comes from TUNNELS_CLIENT_SECRET")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
 		if err != nil {
 			fmt.Fprintln(env.Stderr, err)
@@ -139,7 +141,20 @@ func login(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintf(env.Stderr, "cannot reach %s: %v\n", base, err)
 		return 1
 	}
-	tok, err := oidcFor(b, env.HTTP).DeviceLogin(ctx, env.Stdout)
+	o := oidcFor(b, env.HTTP)
+	var tok auth.Tokens
+	if *machine != "" {
+		// The secret is never a flag: it would land in the shell history. The environment is not
+		// printed and the token file is 0600, so it stays off the screen and off disk for others.
+		secret := os.Getenv("TUNNELS_CLIENT_SECRET")
+		if secret == "" {
+			fmt.Fprintln(env.Stderr, "set TUNNELS_CLIENT_SECRET to the secret of the machine client")
+			return 1
+		}
+		tok, err = o.ClientCredentials(ctx, *machine, secret)
+	} else {
+		tok, err = o.DeviceLogin(ctx, env.Stdout)
+	}
 	if err != nil {
 		fmt.Fprintln(env.Stderr, err)
 		return 1
@@ -154,7 +169,11 @@ func login(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintln(env.Stderr, err)
 		return 1
 	}
-	fmt.Fprintf(env.Stdout, "Logged in as %s (%s)\n", me.Username, me.Handle)
+	if *machine != "" {
+		fmt.Fprintf(env.Stdout, "Logged in as the machine client %s (%s)\n", *machine, me.Handle)
+	} else {
+		fmt.Fprintf(env.Stdout, "Logged in as %s (%s)\n", me.Username, me.Handle)
+	}
 	return 0
 }
 
