@@ -336,6 +336,7 @@ linux/arm64), signed with cosign.
 | `/authz` | Traefik `forwardAuth` | allow or deny one visitor request |
 | `/api/me`; `/api/shares` in phase 2 | CLI, bearer token | ensure user, manage shares |
 | `/.well-known/tunnels.json` | anyone | bootstrap: issuer, CLI client id, API resource, service host, sites domain, minimum CLI version |
+| `GET /metrics` | Prometheus | request, in-flight and `/authz` lookup metrics; bounded, secret-free labels |
 | `/install.sh` (later), `/healthz` | anyone | installer, probe |
 
 `/plugin` is never routed by Traefik.
@@ -346,8 +347,9 @@ invalid tokens fail here and frps then verifies signature, audience and expiry. 
 disabled or unsuitable. If the Login carries a run ID, ask frps whether that run ID is online
 under a different user and reject if so. Return the content with `user` set to the handle. The hook never modifies `privilege_key`: frps
 verifies that same token right after, which is what makes any claim the broker reads from it
-safe. (Phase 3: a machine token is recognised by its `client-` subject, skips userinfo, and its
-`client_id` claim maps to a handle from configuration.)
+safe. (A machine token is recognised by its `client-` subject, skips userinfo, and its client id
+maps through `MACHINE_CLIENTS` to a handle whose account must already exist: implemented; enabling
+it is the Pocket ID machine client and that setting.)
 
 **NewProxy hook.** The type must be http with no custom domains or locations. `proxy_name` must
 be `<handle>.<n>` and `subdomain` must be `<handle>` (n = `default`) or `<handle>-<n>` (n a valid
@@ -385,7 +387,8 @@ Sharing with the group `tunnels-viewers` means every viewer.
 **Configuration** (environment): `SERVICE_HOST`, `SITES_DOMAIN`, `ISSUER`, `API_RESOURCE`,
 `CREATORS_GROUP`, `DATABASE_URL`, `FRPS_DASHBOARD_URL`, `FRPS_DASHBOARD_USER`,
 `FRPS_DASHBOARD_PASSWORD`, `PLUGIN_SECRET`, `MAX_TUNNELS_PER_USER` (5),
-`DEFAULT_BANDWIDTH_LIMIT` (10MB per second, frp's format), `RESERVED_HANDLES`, `LOG_LEVEL`. Logs are structured JSON for
+`DEFAULT_BANDWIDTH_LIMIT` (10MB per second, frp's format), `RESERVED_HANDLES`,
+`MACHINE_CLIENTS` (optional, `client_id=handle` pairs), `LOG_LEVEL`. Logs are structured JSON for
 logins, proxy registrations, denials and share changes, and never contain tokens. Outbound
 requests carry an explicit User-Agent. `DATABASE_URL` comes from the CNPG-generated secret
 `cnpg-tunnels-app` (key `uri`); the rest come from `secrets-broker.sops.yml` and the
@@ -398,6 +401,7 @@ at build time (`-ldflags`), so users type no URL.
 
 ```
 tunnel login                       device flow against Pocket ID; tokens stored 0600
+tunnel login --machine CLIENT_ID   client_credentials; secret from TUNNELS_CLIENT_SECRET
 tunnel up 3000 [--name blog]       prints https://alice-blog.w.tunnels.layertwo.dev and stays up
 tunnel share --name blog bob       --group family shares with a Pocket ID group
 tunnel unshare --name blog bob
@@ -408,7 +412,9 @@ tunnel version
 
 - **login:** reads `/.well-known/tunnels.json`, runs the device flow with the public client
   `tunnels-cli` (scopes `openid profile groups offline_access`, `resource` = the API), then
-  calls `/api/me` for the handle.
+  calls `/api/me` for the handle. `--machine CLIENT_ID` instead runs the client-credentials grant
+  with the secret from `TUNNELS_CLIENT_SECRET`; the stored token has no refresh token, so the
+  refresh path re-runs client credentials with the stored client id and secret.
 - **up:** builds the frp client config in memory and loads it in strict mode, as frpc does: wss
   to `tunnels.layertwo.dev:443`, `user = <handle>`, `auth.method = "oidc"` with a file token
   source, `auth.additionalScopes = ["HeartBeats", "NewWorkConns"]`, `transport.heartbeatInterval = 30`,
@@ -438,8 +444,9 @@ Manual in the UI, as the rest of the repo does today.
 - **Client `tunnels-gate`:** confidential, authorization code with PKCE, allowed groups
   `tunnels-viewers` and `tunnels-creators`, callback `https://*.w.tunnels.layertwo.dev/oidc/callback`.
   Used only by the Traefik plugin. Its id and secret go into `secrets-oidc.sops.yml`.
-- **Machine clients** (headless servers, phase 3): confidential, client access to the API, with
-  a config mapping client id to handle.
+- **Machine clients** (headless servers): confidential, client access to the API; the broker maps
+  the client id to a handle through `MACHINE_CLIENTS`, and that handle must already have logged in
+  (implemented; creating the client and setting `MACHINE_CLIENTS` is the homelab step).
 
 ## Networking and TLS
 
@@ -475,7 +482,9 @@ tunnels.layertwo.dev                      proxied; covered by the existing *.lay
   middleware is currently not emitted on live responses (checked on idp and send), so it does
   not break sites today. If it ever starts being emitted it would break every tunneled app.
 - **Monitoring:** a Gatus check on `https://tunnels.layertwo.dev/healthz`; frps metrics are
-  exposed on 7500.
+  exposed on 7500; the broker serves Prometheus metrics at `GET /metrics` with bounded,
+  secret-free labels (route, method, status and the `/authz` lookup phase) — implemented; enabling
+  it is a scrape config and a NetworkPolicy that lets Prometheus reach the broker.
 
 ## Container Hardening
 
@@ -579,8 +588,9 @@ All of them fail closed.
   `X-Tunnels-Groups` (a deferred homelab change); until then the header is stripped and group
   shares admit no one. User shares work today.
 - **Phase 3:** hardening: heartbeat revocation proven end to end, the Ping-hook kill switch
-  (implemented and enabled — `"Ping"` in `ops` since v0.2.0), tuned limits, Gatus, docs, machine
-  clients.
+  (implemented and enabled — `"Ping"` in `ops` since v0.2.0), tuned limits, Gatus, docs, broker
+  metrics and machine clients (both implemented; enabling machine clients is the Pocket ID client
+  plus `MACHINE_CLIENTS`, and metrics a scrape plus NetworkPolicy).
 - **Later:** SSH, a web UI, live tunnel status, frps HA by client fan-out.
 
 ## Verification
@@ -629,7 +639,6 @@ Each item is a build-time check with a stated fallback.
 | Live tunnel status in `tunnel list` | frps dashboard data is worth surfacing |
 | Public (login-free) tunnels | webhook receivers are needed |
 | Non-browser access to sites (bearer tokens) | CI or scripts must call a tunnel |
-| Machine clients | headless servers need to publish (phase 3) |
 | CNPG above one | a Postgres outage matters |
 | Sharding frps | one frps is outgrown |
 | frps HA (zero-downtime restarts) | an frps restart blip matters; see "Later: frps HA by client fan-out" |
@@ -729,4 +738,4 @@ Also checked without a cluster: the production frps ConfigMap under the producti
   - `/authz` trusts `X-Forwarded-Host`, `X-Tunnels-Sub` and `X-Tunnels-User` completely. The forwardAuth middleware must list `X-Tunnels-Sub` and `X-Tunnels-User` in `authResponseHeaders` (Traefik then deletes any copy the visitor sent before it copies the gate's), must leave `trustForwardHeader` at `false` (with `true` a creator could send `Host: alice.<sites>` with `X-Forwarded-Host: bob.<sites>`, be authorised against their own label and be served alice's site), and `/authz` must be reachable by Traefik only. Leaving `authRequestHeaders` unset is fine; listing only the two identity headers also works, because Traefik sets `X-Forwarded-Host` afterwards.
   - Rate limit `/api/` and the frps route in Traefik. Every Login reaches the broker before frps checks anything, and a token with a key id nobody has seen makes the broker fetch the provider's key set (go-oidc has no limit on that).
   - Cap the proxy count in frps as well if the broker's limit must hold: the dashboard lags the plugin's answer, so many clients started at once can overshoot it.
-- Revocation: machine-client tokens last one hour and cannot be refreshed, so deleting a client ends its tunnel within an hour plus one ping (about 30 s); the broker's Ping hook is what makes it immediate.
+- Revocation: machine-client access tokens last one hour; the CLI renews them with client credentials while the client secret is valid, so deleting the client ends its tunnel within an hour plus one ping (about 30 s); the broker's Ping hook (and the disabled-account check) is what makes it immediate.
