@@ -117,3 +117,17 @@ func TestClientFollowsNoRedirect(t *testing.T) {
 		t.Errorf("the redirect was followed: %q", leaked)
 	}
 }
+
+// A *url.Error repeats the whole URL (a path, a run ID, a handle); only its cause may reach a log.
+func TestUnwrapURLError(t *testing.T) {
+	cause := errors.New("dial tcp 10.0.0.5:5432: connect: connection refused")
+	wrapped := &url.Error{Op: "Get", URL: "https://idp.example.test/token?secret=x", Err: cause}
+	if got := UnwrapURLError(wrapped); got != cause {
+		t.Errorf("UnwrapURLError(%v) = %v, want the cause", wrapped, got)
+	}
+
+	plain := errors.New("boom")
+	if got := UnwrapURLError(plain); got != plain {
+		t.Errorf("UnwrapURLError(%v) = %v, want the error unchanged", plain, got)
+	}
+}

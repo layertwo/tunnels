@@ -88,11 +88,7 @@ func get[T any](ctx context.Context, c *Client, path string, query url.Values) (
 	if err != nil {
 		// A *url.Error repeats the whole URL, and with it the run ID or the handle asked about; the
 		// cause is all that is wanted in a log.
-		var ue *url.Error
-		if errors.As(err, &ue) {
-			err = ue.Err
-		}
-		return zero, fmt.Errorf("frpsapi: %s: %w", path, err)
+		return zero, fmt.Errorf("frpsapi: %s: %w", path, httpx.UnwrapURLError(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

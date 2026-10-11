@@ -180,10 +180,6 @@ func (r Resolver) create(ctx context.Context, id idp.Identity) (store.User, erro
 	return u, nil
 }
 
-// reasonOf is what to tell the person behind a failed Resolve, and whether they caused the failure.
-// Only refusals and an invalid token have their own sentence; any other error gets a fixed one, so no
-// internal detail reaches them. The failures they did not cause (a dependency is down) are the only
-// ones worth logging in full.
 // refusalOf returns the refusal behind err, if it is one. A failure that is not a refusal (a bad
 // token, or a dependency that could not answer) is not the person's own doing.
 func refusalOf(err error) (r *refusal, ok bool) {
@@ -191,6 +187,10 @@ func refusalOf(err error) (r *refusal, ok bool) {
 	return r, ok
 }
 
+// reasonOf is what to tell the person behind a failed Resolve, and whether they caused the failure.
+// Only refusals and an invalid token have their own sentence; any other error gets a fixed one, so no
+// internal detail reaches them. The failures they did not cause (a dependency is down) are the only
+// ones worth logging in full.
 func reasonOf(err error) (text string, theirs bool) {
 	if r, ok := refusalOf(err); ok {
 		return r.text, true

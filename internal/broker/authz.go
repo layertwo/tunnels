@@ -107,10 +107,10 @@ func (a Authz) decide(r *http.Request) outcome {
 		return outcome{reason: "host"}
 	}
 	label, ok := names.SiteLabel(hosts[0], a.SitesDomain)
-	handle, tunnel, valid := names.ParseLabel(label)
-	if !ok || !valid {
+	if !ok {
 		return outcome{reason: "host"}
 	}
+	handle, tunnel, _ := names.ParseLabel(label) // SiteLabel only returns ok for a label it can parse
 
 	o := outcome{label: label}
 	subs, users := r.Header["X-Tunnels-Sub"], r.Header["X-Tunnels-User"]

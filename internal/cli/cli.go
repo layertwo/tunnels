@@ -188,27 +188,12 @@ func up(ctx context.Context, env Env, args []string) int {
 		return bad("%q is not a tunnel name: use 1 to 42 lowercase letters, digits and inner dashes, other than %q", *name, names.Default)
 	}
 
-	s, err := store(env)
-	if err != nil {
-		fmt.Fprintln(env.Stderr, err)
-		return 1
-	}
-	tok, err := s.Load()
-	if err != nil {
-		fmt.Fprintln(env.Stderr, err)
-		return 1
-	}
-	b, err := auth.Discover(ctx, env.HTTP, tok.Server)
-	if err != nil {
-		fmt.Fprintf(env.Stderr, "cannot reach %s: %v\n", tok.Server, err)
+	// Start with a fresh token: the stored one may be hours old, and frp logs in with what the file holds.
+	s, b, tok, ok := session(ctx, env)
+	if !ok {
 		return 1
 	}
 	o := oidcFor(b, env.HTTP)
-	// Start with a fresh token: the stored one may be hours old, and frp logs in with what the file holds.
-	if _, err := auth.RefreshStored(ctx, s, o); err != nil {
-		fmt.Fprintf(env.Stderr, "could not refresh your session (%s); run: tunnel login\n", strings.TrimSuffix(err.Error(), "; run: tunnel login"))
-		return 1
-	}
 	caFile, err := tunnel.WriteCABundle(s.Dir)
 	if err != nil {
 		fmt.Fprintln(env.Stderr, err)
@@ -231,6 +216,7 @@ func up(ctx context.Context, env Env, args []string) int {
 			}
 			printed[st.Err] = true
 			msg := st.Err
+			// keep in sync with the broker's newProxy message in hooks.go: "tunnel limit of %d reached"
 			if strings.HasPrefix(msg, "tunnel limit of") {
 				msg += " (a tunnel that ended without saying goodbye counts for up to 90 seconds)"
 			}
@@ -257,30 +243,32 @@ func warnRefreshFailed(out io.Writer) func(error) {
 	}
 }
 
-// session loads the stored login, finds the service and refreshes the token. It prints what up
-// prints when either step fails.
-func session(ctx context.Context, env Env) (auth.Tokens, bool) {
+// session loads the stored login, finds the service and refreshes the token; it is the one place that
+// prints what a failure of either step means. It also returns the store and the bootstrap document, for
+// the caller that needs them (up).
+func session(ctx context.Context, env Env) (auth.Store, auth.Bootstrap, auth.Tokens, bool) {
 	s, err := store(env)
 	if err != nil {
 		fmt.Fprintln(env.Stderr, err)
-		return auth.Tokens{}, false
+		return auth.Store{}, auth.Bootstrap{}, auth.Tokens{}, false
 	}
 	tok, err := s.Load()
 	if err != nil {
 		fmt.Fprintln(env.Stderr, err)
-		return auth.Tokens{}, false
+		return auth.Store{}, auth.Bootstrap{}, auth.Tokens{}, false
 	}
 	b, err := auth.Discover(ctx, env.HTTP, tok.Server)
 	if err != nil {
 		fmt.Fprintf(env.Stderr, "cannot reach %s: %v\n", tok.Server, err)
-		return auth.Tokens{}, false
+		return auth.Store{}, auth.Bootstrap{}, auth.Tokens{}, false
 	}
 	tok, err = auth.RefreshStored(ctx, s, oidcFor(b, env.HTTP))
 	if err != nil {
+		// auth.Refresh's errors already end with "; run: tunnel login"; strip it so the sentence is not doubled.
 		fmt.Fprintf(env.Stderr, "could not refresh your session (%s); run: tunnel login\n", strings.TrimSuffix(err.Error(), "; run: tunnel login"))
-		return auth.Tokens{}, false
+		return auth.Store{}, auth.Bootstrap{}, auth.Tokens{}, false
 	}
-	return tok, true
+	return s, b, tok, true
 }
 
 // share grants or, when remove is set, removes access to one of the owner's sites, named by its label
@@ -329,7 +317,7 @@ func share(ctx context.Context, env Env, args []string, remove bool) int {
 	}
 	sh := auth.Share{Handle: handle, Tunnel: tunnel, Kind: kind, Grantee: fs.Arg(1), ExpiresAt: expiresAt}
 
-	tok, ok := session(ctx, env)
+	_, _, tok, ok := session(ctx, env)
 	if !ok {
 		return 1
 	}
@@ -358,7 +346,7 @@ func list(ctx context.Context, env Env, args []string) int {
 		fmt.Fprint(env.Stderr, usage)
 		return 2
 	}
-	tok, ok := session(ctx, env)
+	_, _, tok, ok := session(ctx, env)
 	if !ok {
 		return 1
 	}
@@ -411,7 +399,7 @@ func machineCreate(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintln(env.Stderr, err)
 		return 1
 	}
-	tok, ok := session(ctx, env)
+	_, _, tok, ok := session(ctx, env)
 	if !ok {
 		return 1
 	}
@@ -445,7 +433,7 @@ func machineList(ctx context.Context, env Env, args []string) int {
 	if len(args) != 0 {
 		return machineBad(env, "list takes no arguments")
 	}
-	tok, ok := session(ctx, env)
+	_, _, tok, ok := session(ctx, env)
 	if !ok {
 		return 1
 	}
@@ -465,7 +453,7 @@ func machineRemove(ctx context.Context, env Env, args []string) int {
 	if len(args) != 1 || !names.ValidHandle(args[0]) {
 		return machineBad(env, "give the machine's handle: 2 to 20 lowercase letters and digits")
 	}
-	tok, ok := session(ctx, env)
+	_, _, tok, ok := session(ctx, env)
 	if !ok {
 		return 1
 	}

@@ -2,9 +2,21 @@
 package httpx
 
 import (
+	"errors"
 	"net/http"
+	"net/url"
 	"time"
 )
+
+// UnwrapURLError drops the *url.Error wrapper, which repeats the whole URL — and with it a path, a run
+// ID or a handle — leaving only the cause for a log. Any other error passes through.
+func UnwrapURLError(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
+}
 
 // Client returns an HTTP client with an overall deadline of timeout and the given User-Agent on every
 // request. It follows no redirect: Go would forward the Authorization header to the same host on

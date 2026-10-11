@@ -117,13 +117,21 @@ func get(ctx context.Context, hc *http.Client, url, bearer string) (int, []byte,
 	return send(ctx, hc, http.MethodGet, url, bearer, nil)
 }
 
-// serviceError is the service's own sentence ({"error": "..."}) when it gave one, else the status.
-func serviceError(status int, body []byte) error {
+// errorText is the service's own sentence ({"error": "..."}) when the body carried one.
+func errorText(body []byte) (string, bool) {
 	var e struct {
 		Error string `json:"error"`
 	}
 	if json.Unmarshal(body, &e) == nil && e.Error != "" {
-		return errors.New(e.Error)
+		return e.Error, true
+	}
+	return "", false
+}
+
+// serviceError is the service's own sentence ({"error": "..."}) when it gave one, else the status.
+func serviceError(status int, body []byte) error {
+	if msg, ok := errorText(body); ok {
+		return errors.New(msg)
 	}
 	return fmt.Errorf("the service answered %d", status)
 }
@@ -261,11 +269,8 @@ func (o OIDC) postToken(ctx context.Context, tokenURL string, form url.Values) (
 
 // assertionError names why the token endpoint refused an assertion, without the answer body.
 func assertionError(status int, body []byte) error {
-	var e struct {
-		Error string `json:"error"`
-	}
-	if json.Unmarshal(body, &e) == nil && e.Error != "" {
-		return fmt.Errorf("auth: the provider refused the machine: %s", e.Error)
+	if msg, ok := errorText(body); ok {
+		return fmt.Errorf("auth: the provider refused the machine: %s", msg)
 	}
 	return fmt.Errorf("auth: the provider answered %d", status)
 }
