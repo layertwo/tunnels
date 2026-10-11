@@ -27,3 +27,8 @@ the conventions that are easy to get wrong.
 - Tests: `go test -race ./...`. Store tests read `TEST_DATABASE_URL` and skip without it. The e2e test
   is behind the `e2e` build tag and runs without `-race` (an upstream frp race).
 - Work lands as one PR per task against `mainline`; only the human merges.
+
+## Releasing
+
+See the `releasing-tunnels` skill (`.opencode/skills/releasing-tunnels/`): the tag-driven release flow,
+what a release's notes must say, and the homelab deploy order.
