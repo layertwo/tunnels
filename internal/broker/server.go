@@ -137,7 +137,16 @@ func (s *server) changeShare(w http.ResponseWriter, r *http.Request, put bool) {
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody))
 	var sh store.Share
-	if err := dec.Decode(&sh); err != nil || !validShare(sh, put) {
+	if err := dec.Decode(&sh); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid share"))
+		return
+	}
+	// An older CLI sends only the tunnel: every share before machines was the caller's own site, so
+	// a missing handle defaults to the caller's.
+	if sh.Handle == "" {
+		sh.Handle = acct.Handle
+	}
+	if !validShare(sh, put) {
 		writeJSON(w, http.StatusBadRequest, errorBody("invalid share"))
 		return
 	}
@@ -166,6 +175,9 @@ func (s *server) changeShare(w http.ResponseWriter, r *http.Request, put bool) {
 // be in the future: a share that has already expired grants nothing. A DELETE ignores the end, so
 // that removing a grant always works.
 func validShare(sh store.Share, put bool) bool {
+	if !names.ValidHandle(sh.Handle) {
+		return false
+	}
 	if sh.Tunnel != "" && !names.ValidTunnelName(sh.Tunnel) {
 		return false
 	}

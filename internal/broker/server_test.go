@@ -366,7 +366,9 @@ func TestSharesPutValidates(t *testing.T) {
 		{"empty grantee", `{"tunnel":"blog","kind":"user","grantee":""}`, 400},
 		{"group grantee with a comma", `{"tunnel":"blog","kind":"group","grantee":"a,b"}`, 400},
 		{"expires_at not a time", `{"tunnel":"blog","kind":"user","grantee":"bob","expires_at":"soon"}`, 400},
+		{"handle with a dash", `{"handle":"al-ice","tunnel":"blog","kind":"user","grantee":"bob"}`, 400},
 		{"good", `{"tunnel":"blog","kind":"user","grantee":"bob"}`, 204},
+		{"good with an explicit handle", `{"handle":"alice","tunnel":"blog","kind":"user","grantee":"bob"}`, 204},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -376,7 +378,7 @@ func TestSharesPutValidates(t *testing.T) {
 				t.Errorf("= %d %q, want %d", w.Code, w.Body, tt.code)
 			}
 			if tt.code == 204 {
-				want := []shareWrite{{"sub-alice", store.Share{Tunnel: "blog", Kind: "user", Grantee: "bob"}}}
+				want := []shareWrite{{"sub-alice", store.Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob"}}}
 				if !reflect.DeepEqual(r.shares.puts, want) {
 					t.Errorf("recorded %+v, want %+v", r.shares.puts, want)
 				}
@@ -386,6 +388,21 @@ func TestSharesPutValidates(t *testing.T) {
 				t.Errorf("the store was called for bad input: %+v", r.shares.puts)
 			}
 		})
+	}
+}
+
+// A pre-machines CLI sends only the tunnel. Every such share was the caller's own site, so a missing
+// handle defaults to the caller's: the stored share is keyed by (owner_sub, caller's handle, tunnel),
+// which is exactly what ShareMatches looks up.
+func TestSharesPutDefaultsHandleToCaller(t *testing.T) {
+	r := newServerRig(t)
+	w := r.do("PUT", "/api/shares", bearer(r.idp.Issue("sub-alice", mockidp.IssueOpts{})), `{"tunnel":"blog","kind":"user","grantee":"bob"}`)
+	if w.Code != 204 {
+		t.Fatalf("= %d %q, want 204", w.Code, w.Body)
+	}
+	want := []shareWrite{{"sub-alice", store.Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob"}}}
+	if !reflect.DeepEqual(r.shares.puts, want) {
+		t.Errorf("recorded %+v, want the caller's handle %+v", r.shares.puts, want)
 	}
 }
 
@@ -435,7 +452,7 @@ func TestSharesDelete(t *testing.T) {
 	if w.Code != 204 {
 		t.Fatalf("= %d %q, want 204", w.Code, w.Body)
 	}
-	want := []shareWrite{{"sub-alice", store.Share{Tunnel: "blog", Kind: "group", Grantee: "family"}}}
+	want := []shareWrite{{"sub-alice", store.Share{Handle: "alice", Tunnel: "blog", Kind: "group", Grantee: "family"}}}
 	if !reflect.DeepEqual(r.shares.deletes, want) {
 		t.Errorf("recorded %+v, want %+v", r.shares.deletes, want)
 	}
@@ -449,7 +466,7 @@ func TestSharesDeleteIgnoresExpiry(t *testing.T) {
 	if w.Code != 204 {
 		t.Fatalf("= %d %q, want 204 for a delete with a past expires_at", w.Code, w.Body)
 	}
-	want := []shareWrite{{"sub-alice", store.Share{Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)}}}
+	want := []shareWrite{{"sub-alice", store.Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)}}}
 	if !reflect.DeepEqual(r.shares.deletes, want) {
 		t.Errorf("recorded %+v, want %+v", r.shares.deletes, want)
 	}

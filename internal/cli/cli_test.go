@@ -591,12 +591,12 @@ func TestShareNotLoggedIn(t *testing.T) {
 func TestShareArgumentErrors(t *testing.T) {
 	for _, args := range [][]string{
 		{"share"},
-		{"share", "alice"},                        // no grantee
-		{"share", "alice", "bob", "extra"},        // too many
-		{"share", "Blog", "bob"},                  // a label is lowercase
-		{"share", "a_b", "bob"},                   // not a label
-		{"share", "alice-", "bob"},                // a dash with no tunnel name
-		{"share", "alice-default", "bob"},         // "default" is not a tunnel name
+		{"share", "alice"},                 // no grantee
+		{"share", "alice", "bob", "extra"}, // too many
+		{"share", "Blog", "bob"},           // a label is lowercase
+		{"share", "a_b", "bob"},            // not a label
+		{"share", "alice-", "bob"},         // a dash with no tunnel name
+		{"share", "alice-default", "bob"},  // "default" is not a tunnel name
 		{"share", "--bogus", "bob"},
 		{"unshare"},
 		{"unshare", "alice", "bob", "extra"},

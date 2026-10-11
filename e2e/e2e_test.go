@@ -603,7 +603,7 @@ func TestSharing(t *testing.T) {
 		t.Errorf("carol before the share = %d, want 403", code)
 	}
 
-	user := store.Share{Tunnel: "", Kind: "user", Grantee: "Carol"}
+	user := store.Share{Handle: "alice", Tunnel: "", Kind: "user", Grantee: "Carol"}
 	if code := s.changeShare(t, http.MethodPut, owner, user); code != 204 {
 		t.Fatalf("PUT user share = %d, want 204", code)
 	}
@@ -622,7 +622,7 @@ func TestSharing(t *testing.T) {
 	}
 
 	// A group share admits a member, and only a member.
-	group := store.Share{Tunnel: "", Kind: "group", Grantee: "family"}
+	group := store.Share{Handle: "alice", Tunnel: "", Kind: "group", Grantee: "family"}
 	if code := s.changeShare(t, http.MethodPut, owner, group); code != 204 {
 		t.Fatalf("PUT group share = %d, want 204", code)
 	}
