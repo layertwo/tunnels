@@ -34,8 +34,10 @@ type Machine struct {
 	CreatedBy string
 }
 
-// Share grants one user or group access to one tunnel. The empty Tunnel is the default tunnel.
+// Share grants one user or group access to one site: the owner's handle and tunnel together. The empty
+// Tunnel is the handle's default site.
 type Share struct {
+	Handle    string    `json:"handle"` // the site's handle: the owner for a person's own site, the machine for a machine's
 	Tunnel    string    `json:"tunnel"` // "" is the default tunnel
 	Kind      string    `json:"kind"`   // "user" or "group"
 	Grantee   string    `json:"grantee"`
@@ -335,15 +337,15 @@ func (s *Store) DeleteMachine(ctx context.Context, clientID string) error {
 }
 
 const (
-	shareInsert = "insert into shares (owner_sub, tunnel, kind, grantee, expires_at) values ($1, $2, $3, $4, $5) on conflict (owner_sub, tunnel, kind, grantee) do update set expires_at = excluded.expires_at"
-	shareDelete = "delete from shares where owner_sub = $1 and tunnel = $2 and kind = $3 and grantee = $4"
-	shareList   = "select tunnel, kind, grantee, expires_at from shares where owner_sub = $1 order by tunnel, kind, grantee"
+	shareInsert = "insert into shares (owner_sub, handle, tunnel, kind, grantee, expires_at) values ($1, $2, $3, $4, $5, $6) on conflict (owner_sub, handle, tunnel, kind, grantee) do update set expires_at = excluded.expires_at"
+	shareDelete = "delete from shares where owner_sub = $1 and handle = $2 and tunnel = $3 and kind = $4 and grantee = $5"
+	shareList   = "select handle, tunnel, kind, grantee, expires_at from shares where owner_sub = $1 order by handle, tunnel, kind, grantee"
 	shareMatch  = `select exists (
     select 1 from shares
-    where owner_sub = $1 and tunnel = $2
+    where owner_sub = $1 and handle = $2 and tunnel = $3
       and (expires_at is null or expires_at > now())
-      and ((kind = 'user' and lower(grantee) = lower($3))
-        or (kind = 'group' and grantee = any($4)))
+      and ((kind = 'user' and lower(grantee) = lower($4))
+        or (kind = 'group' and grantee = any($5)))
 )`
 )
 
@@ -353,7 +355,7 @@ func (s *Store) PutShare(ctx context.Context, ownerSub string, sh Share) error {
 	if !sh.ExpiresAt.IsZero() {
 		expires = &sh.ExpiresAt
 	}
-	if _, err := s.pool.Exec(ctx, shareInsert, ownerSub, sh.Tunnel, sh.Kind, sh.Grantee, expires); err != nil {
+	if _, err := s.pool.Exec(ctx, shareInsert, ownerSub, sh.Handle, sh.Tunnel, sh.Kind, sh.Grantee, expires); err != nil {
 		return fmt.Errorf("store: put share: %w", err)
 	}
 	return nil
@@ -361,13 +363,13 @@ func (s *Store) PutShare(ctx context.Context, ownerSub string, sh Share) error {
 
 // DeleteShare removes the share. Deleting a share that is not there does nothing.
 func (s *Store) DeleteShare(ctx context.Context, ownerSub string, sh Share) error {
-	if _, err := s.pool.Exec(ctx, shareDelete, ownerSub, sh.Tunnel, sh.Kind, sh.Grantee); err != nil {
+	if _, err := s.pool.Exec(ctx, shareDelete, ownerSub, sh.Handle, sh.Tunnel, sh.Kind, sh.Grantee); err != nil {
 		return fmt.Errorf("store: delete share: %w", err)
 	}
 	return nil
 }
 
-// SharesByOwner returns the owner's shares, ordered by tunnel, kind, grantee.
+// SharesByOwner returns the owner's shares, ordered by handle, tunnel, kind, grantee.
 func (s *Store) SharesByOwner(ctx context.Context, ownerSub string) ([]Share, error) {
 	rows, err := s.pool.Query(ctx, shareList, ownerSub)
 	if err != nil {
@@ -379,7 +381,7 @@ func (s *Store) SharesByOwner(ctx context.Context, ownerSub string) ([]Share, er
 	for rows.Next() {
 		var sh Share
 		var expires *time.Time
-		if err := rows.Scan(&sh.Tunnel, &sh.Kind, &sh.Grantee, &expires); err != nil {
+		if err := rows.Scan(&sh.Handle, &sh.Tunnel, &sh.Kind, &sh.Grantee, &expires); err != nil {
 			return nil, fmt.Errorf("store: list shares: %w", err)
 		}
 		if expires != nil {
@@ -393,11 +395,11 @@ func (s *Store) SharesByOwner(ctx context.Context, ownerSub string) ([]Share, er
 	return shares, nil
 }
 
-// ShareMatches reports whether the owner shared the tunnel with this username, case-insensitively, or
-// with one of these groups. A failed query is an error, never false.
-func (s *Store) ShareMatches(ctx context.Context, ownerSub, tunnel, username string, groups []string) (bool, error) {
+// ShareMatches reports whether the owner shared the site (handle + tunnel) with this username,
+// case-insensitively, or with one of these groups. A failed query is an error, never false.
+func (s *Store) ShareMatches(ctx context.Context, ownerSub, handle, tunnel, username string, groups []string) (bool, error) {
 	var ok bool
-	if err := s.pool.QueryRow(ctx, shareMatch, ownerSub, tunnel, username, groups).Scan(&ok); err != nil {
+	if err := s.pool.QueryRow(ctx, shareMatch, ownerSub, handle, tunnel, username, groups).Scan(&ok); err != nil {
 		return false, fmt.Errorf("store: match share: %w", err)
 	}
 	return ok, nil

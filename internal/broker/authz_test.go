@@ -61,8 +61,8 @@ type fakeShares struct {
 }
 
 type shareCall struct {
-	ownerSub, tunnel, username string
-	groups                     []string
+	ownerSub, handle, tunnel, username string
+	groups                             []string
 }
 
 // shareWrite is one PutShare or DeleteShare call.
@@ -95,8 +95,8 @@ func (f *fakeShares) SharesByOwner(_ context.Context, ownerSub string) ([]store.
 	return f.rows, nil
 }
 
-func (f *fakeShares) ShareMatches(_ context.Context, ownerSub, tunnel, username string, groups []string) (bool, error) {
-	f.calls = append(f.calls, shareCall{ownerSub, tunnel, username, groups})
+func (f *fakeShares) ShareMatches(_ context.Context, ownerSub, handle, tunnel, username string, groups []string) (bool, error) {
+	f.calls = append(f.calls, shareCall{ownerSub, handle, tunnel, username, groups})
 	if f.err != nil {
 		return false, f.err
 	}
@@ -410,8 +410,8 @@ func TestSharedUserAllowed(t *testing.T) {
 	if w.Code != http.StatusOK || w.Header().Get("X-Tunnel-User") != "bob" || w.Body.Len() != 0 {
 		t.Fatalf("= %d %v %q, want 200 as bob", w.Code, w.Header(), w.Body)
 	}
-	if got := r.shares.calls; len(got) != 1 || got[0].ownerSub != "sub-alice" || got[0].tunnel != "blog" || got[0].username != "bob" {
-		t.Errorf("ShareMatches calls %+v, want sub-alice, tunnel blog, bob", got)
+	if got := r.shares.calls; len(got) != 1 || got[0].ownerSub != "sub-alice" || got[0].handle != "alice" || got[0].tunnel != "blog" || got[0].username != "bob" {
+		t.Errorf("ShareMatches calls %+v, want sub-alice, handle alice, tunnel blog, bob", got)
 	}
 }
 

@@ -124,6 +124,19 @@ func migrationFiles(t *testing.T) []string {
 	return files
 }
 
+// runMigration applies one migration file by name, so a test can build the schema in stages: the
+// up-only migrations run in name order, and a test that needs a row before a later one applies it.
+func runMigration(t *testing.T, dbURL, name string) {
+	t.Helper()
+	sql, err := os.ReadFile(filepath.Join("migrations", name))
+	if err != nil {
+		t.Fatalf("read migration %s: %v", name, err)
+	}
+	if err := run(dbURL, string(sql)); err != nil {
+		t.Fatalf("apply migration %s: %v", name, err)
+	}
+}
+
 func TestOpenIsIdempotent(t *testing.T) {
 	dbURL := schemaURL(t)
 	s := openStore(t, dbURL)
@@ -368,6 +381,30 @@ func TestMigrationFilesAscend(t *testing.T) {
 	}
 }
 
+// The share-key migration runs against a live table: it adds the site's handle, backfills it from the
+// owner's users row (every share ever stored was a person's own site), and refuses a later row with no
+// handle.
+func TestShareHandleMigrationBackfills(t *testing.T) {
+	dbURL := schemaURL(t)
+	for _, name := range []string{"001_users.sql", "002_shares.sql", "003_share_expiry.sql", "004_machines.sql"} {
+		runMigration(t, dbURL, name)
+	}
+	if err := run(dbURL, "insert into users (sub, handle) values ('sub-alice', 'alice')"); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	if err := run(dbURL, "insert into shares (owner_sub, tunnel, kind, grantee) values ('sub-alice', 'blog', 'user', 'bob'), ('sub-alice', '', 'user', 'carol')"); err != nil {
+		t.Fatalf("seed shares: %v", err)
+	}
+	runMigration(t, dbURL, "005_share_site.sql")
+
+	if got := count(t, dbURL, "select count(*) from shares where handle = 'alice'"); got != 2 {
+		t.Errorf("%d shares backfilled with the owner's handle, want 2", got)
+	}
+	if err := run(dbURL, "insert into shares (owner_sub, tunnel, kind, grantee) values ('sub-alice', 'x', 'user', 'dave')"); err == nil {
+		t.Error("a share without a handle was inserted, want the NOT NULL constraint to refuse it")
+	}
+}
+
 // An admin disables an account in the table; both lookups must report it, or the broker would never
 // refuse a disabled account.
 func TestDisabledIsRead(t *testing.T) {
@@ -412,7 +449,7 @@ func TestPutShareIsIdempotent(t *testing.T) {
 	createUser(t, s, ctx, "sub-1", "alice")
 
 	expires := time.Now().Add(time.Hour).UTC().Truncate(time.Microsecond)
-	sh := Share{Tunnel: "blog", Kind: "user", Grantee: "Bob", ExpiresAt: expires}
+	sh := Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "Bob", ExpiresAt: expires}
 	putShare(t, s, ctx, "sub-1", sh)
 	putShare(t, s, ctx, "sub-1", sh)
 
@@ -420,8 +457,8 @@ func TestPutShareIsIdempotent(t *testing.T) {
 		t.Errorf("shares has %d rows, want 1", got)
 	}
 	got, err := s.SharesByOwner(ctx, "sub-1")
-	if err != nil || len(got) != 1 || !got[0].ExpiresAt.Equal(expires) {
-		t.Errorf("SharesByOwner = %+v, %v; want one row ending %v", got, err, expires)
+	if err != nil || len(got) != 1 || got[0].Handle != "alice" || !got[0].ExpiresAt.Equal(expires) {
+		t.Errorf("SharesByOwner = %+v, %v; want one row for alice ending %v", got, err, expires)
 	}
 }
 
@@ -432,13 +469,13 @@ func TestPutShareUpdatesExpiry(t *testing.T) {
 	ctx := testCtx(t)
 	createUser(t, s, ctx, "sub-1", "alice")
 
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob"}) // permanent first
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: time.Now().Add(-time.Hour)})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob"}) // permanent first
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: time.Now().Add(-time.Hour)})
 
 	if got := count(t, dbURL, "select count(*) from shares"); got != 1 {
 		t.Errorf("shares has %d rows, want 1", got)
 	}
-	got, err := s.ShareMatches(ctx, "sub-1", "blog", "bob", nil)
+	got, err := s.ShareMatches(ctx, "sub-1", "alice", "blog", "bob", nil)
 	if err != nil {
 		t.Fatalf("ShareMatches: %v", err)
 	}
@@ -453,7 +490,7 @@ func TestDeleteShareIsIdempotent(t *testing.T) {
 	ctx := testCtx(t)
 	createUser(t, s, ctx, "sub-1", "alice")
 
-	sh := Share{Tunnel: "blog", Kind: "user", Grantee: "Bob"}
+	sh := Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "Bob"}
 	putShare(t, s, ctx, "sub-1", sh)
 	for i := range 2 { // the second delete removes a row that is not there
 		if err := s.DeleteShare(ctx, "sub-1", sh); err != nil {
@@ -471,16 +508,16 @@ func TestSharesByOwnerOrders(t *testing.T) {
 	createUser(t, s, ctx, "sub-1", "alice")
 	createUser(t, s, ctx, "sub-2", "carol")
 
-	// Stored out of order: the read sorts by tunnel, kind, grantee.
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "alice"})
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "", Kind: "user", Grantee: "bob"})
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "group", Grantee: "family"})
-	putShare(t, s, ctx, "sub-2", Share{Tunnel: "blog", Kind: "user", Grantee: "alice"}) // another owner
+	// Stored out of order: the read sorts by handle, tunnel, kind, grantee.
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "alice"})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "", Kind: "user", Grantee: "bob"})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "zoe", Tunnel: "blog", Kind: "group", Grantee: "family"})
+	putShare(t, s, ctx, "sub-2", Share{Handle: "carol", Tunnel: "blog", Kind: "user", Grantee: "alice"}) // another owner
 
 	want := []Share{
-		{Tunnel: "", Kind: "user", Grantee: "bob"},
-		{Tunnel: "blog", Kind: "group", Grantee: "family"},
-		{Tunnel: "blog", Kind: "user", Grantee: "alice"},
+		{Handle: "alice", Tunnel: "", Kind: "user", Grantee: "bob"},
+		{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "alice"},
+		{Handle: "zoe", Tunnel: "blog", Kind: "group", Grantee: "family"},
 	}
 	got, err := s.SharesByOwner(ctx, "sub-1")
 	if err != nil {
@@ -498,8 +535,8 @@ func TestPutAndListShareWithExpiry(t *testing.T) {
 	createUser(t, s, ctx, "sub-1", "alice")
 
 	expires := time.Now().Add(7 * 24 * time.Hour).UTC().Truncate(time.Microsecond)
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: expires})
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "carol"}) // no end, ever
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: expires})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "carol"}) // no end, ever
 
 	got, err := s.SharesByOwner(ctx, "sub-1")
 	if err != nil {
@@ -521,9 +558,9 @@ func TestShareMatchesIgnoresExpired(t *testing.T) {
 	s := newStore(t)
 	ctx := testCtx(t)
 	createUser(t, s, ctx, "sub-1", "alice")
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: time.Now().Add(-time.Hour)})
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "carol"})
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "dave", ExpiresAt: time.Now().Add(time.Hour)})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: time.Now().Add(-time.Hour)})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "carol"})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "dave", ExpiresAt: time.Now().Add(time.Hour)})
 
 	tests := []struct {
 		username string
@@ -534,7 +571,7 @@ func TestShareMatchesIgnoresExpired(t *testing.T) {
 		{"dave", true},  // still in the future
 	}
 	for _, tt := range tests {
-		got, err := s.ShareMatches(ctx, "sub-1", "blog", tt.username, nil)
+		got, err := s.ShareMatches(ctx, "sub-1", "alice", "blog", tt.username, nil)
 		if err != nil {
 			t.Fatalf("ShareMatches(%q): %v", tt.username, err)
 		}
@@ -548,10 +585,10 @@ func TestShareMatchesUserIsCaseInsensitive(t *testing.T) {
 	s := newStore(t)
 	ctx := testCtx(t)
 	createUser(t, s, ctx, "sub-1", "alice")
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "Bob"})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "Bob"})
 
 	for _, username := range []string{"bob", "BOB", "bOb"} {
-		got, err := s.ShareMatches(ctx, "sub-1", "blog", username, nil)
+		got, err := s.ShareMatches(ctx, "sub-1", "alice", "blog", username, nil)
 		if err != nil {
 			t.Fatalf("ShareMatches(%q): %v", username, err)
 		}
@@ -565,7 +602,7 @@ func TestShareMatchesIsExact(t *testing.T) {
 	s := newStore(t)
 	ctx := testCtx(t)
 	createUser(t, s, ctx, "sub-1", "alice")
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob"})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob"})
 
 	tests := []struct {
 		username string
@@ -576,7 +613,7 @@ func TestShareMatchesIsExact(t *testing.T) {
 		{"bo", false},
 	}
 	for _, tt := range tests {
-		got, err := s.ShareMatches(ctx, "sub-1", "blog", tt.username, nil)
+		got, err := s.ShareMatches(ctx, "sub-1", "alice", "blog", tt.username, nil)
 		if err != nil {
 			t.Fatalf("ShareMatches(%q): %v", tt.username, err)
 		}
@@ -590,7 +627,7 @@ func TestShareMatchesGroupIsExact(t *testing.T) {
 	s := newStore(t)
 	ctx := testCtx(t)
 	createUser(t, s, ctx, "sub-1", "alice")
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "group", Grantee: "family"})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "group", Grantee: "family"})
 
 	tests := []struct {
 		name   string
@@ -604,7 +641,7 @@ func TestShareMatchesGroupIsExact(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := s.ShareMatches(ctx, "sub-1", "blog", "alice", tt.groups)
+			got, err := s.ShareMatches(ctx, "sub-1", "alice", "blog", "alice", tt.groups)
 			if err != nil {
 				t.Fatalf("ShareMatches(%v): %v", tt.groups, err)
 			}
@@ -619,7 +656,7 @@ func TestShareMatchesWrongTunnel(t *testing.T) {
 	s := newStore(t)
 	ctx := testCtx(t)
 	createUser(t, s, ctx, "sub-1", "alice")
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob"})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob"})
 
 	tests := []struct {
 		tunnel string
@@ -630,7 +667,7 @@ func TestShareMatchesWrongTunnel(t *testing.T) {
 		{"other", false},
 	}
 	for _, tt := range tests {
-		got, err := s.ShareMatches(ctx, "sub-1", tt.tunnel, "bob", nil)
+		got, err := s.ShareMatches(ctx, "sub-1", "alice", tt.tunnel, "bob", nil)
 		if err != nil {
 			t.Fatalf("ShareMatches(%q): %v", tt.tunnel, err)
 		}
@@ -640,14 +677,41 @@ func TestShareMatchesWrongTunnel(t *testing.T) {
 	}
 }
 
+// A share is keyed by the site, not the tunnel name alone: a share on one of an owner's sites must
+// never admit another with the same tunnel name (invariant 10).
+func TestShareMatchesBySite(t *testing.T) {
+	s := newStore(t)
+	ctx := testCtx(t)
+	createUser(t, s, ctx, "sub-1", "alice")
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob"})
+
+	tests := []struct {
+		handle string
+		want   bool
+	}{
+		{"alice", true},  // the site the share names
+		{"nas", false},   // another of the owner's sites, same tunnel name
+		{"carol", false}, // an unrelated handle
+	}
+	for _, tt := range tests {
+		got, err := s.ShareMatches(ctx, "sub-1", tt.handle, "blog", "bob", nil)
+		if err != nil {
+			t.Fatalf("ShareMatches(%q): %v", tt.handle, err)
+		}
+		if got != tt.want {
+			t.Errorf("ShareMatches(handle %q) = %v, want %v", tt.handle, got, tt.want)
+		}
+	}
+}
+
 func TestShareMatchesError(t *testing.T) {
 	s := newStore(t)
 	ctx := testCtx(t)
 	createUser(t, s, ctx, "sub-1", "alice")
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob"})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob"})
 	s.Close()
 
-	got, err := s.ShareMatches(ctx, "sub-1", "blog", "bob", nil)
+	got, err := s.ShareMatches(ctx, "sub-1", "alice", "blog", "bob", nil)
 	if err == nil {
 		t.Fatalf("ShareMatches on a closed store = %v, nil; want an error", got)
 	}
@@ -853,7 +917,7 @@ func TestSharesByOwnerScanFails(t *testing.T) {
 	s := openStore(t, dbURL)
 	ctx := testCtx(t)
 	createUser(t, s, ctx, "sub-1", "alice")
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob"})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob"})
 	if err := run(dbURL, "alter table shares alter column grantee type bytea using convert_to(grantee, 'UTF8')"); err != nil {
 		t.Fatalf("alter shares.grantee: %v", err)
 	}
@@ -908,15 +972,15 @@ func TestSharesByOwnerRowsError(t *testing.T) {
 	s := openStore(t, dbURL)
 	ctx := testCtx(t)
 	createUser(t, s, ctx, "sub-1", "alice")
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "bob"})
-	putShare(t, s, ctx, "sub-1", Share{Tunnel: "blog", Kind: "user", Grantee: "boom"})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob"})
+	putShare(t, s, ctx, "sub-1", Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "boom"})
 	if err := run(dbURL, "alter table shares rename to shares_base"); err != nil {
 		t.Fatalf("rename shares: %v", err)
 	}
 	if err := run(dbURL, `create function boom() returns text language plpgsql volatile as $$ begin raise exception 'boom'; end $$`); err != nil {
 		t.Fatalf("create boom: %v", err)
 	}
-	if err := run(dbURL, `create view shares as select owner_sub, tunnel, case when grantee = 'boom' then boom() else kind end as kind, grantee, expires_at from shares_base`); err != nil {
+	if err := run(dbURL, `create view shares as select owner_sub, handle, tunnel, case when grantee = 'boom' then boom() else kind end as kind, grantee, expires_at from shares_base`); err != nil {
 		t.Fatalf("create failing view: %v", err)
 	}
 	shares, err := s.SharesByOwner(ctx, "sub-1")

@@ -37,8 +37,8 @@ const usage = `Usage:
   tunnel login [--server HOST]                    log in with your browser
   tunnel login --machine CLIENT_ID [--server HOST]  log in as a machine client (secret from TUNNELS_CLIENT_SECRET)
   tunnel up PORT [--name NAME]                    publish http://127.0.0.1:PORT until you stop it
-  tunnel share [--name NAME] [--group] [--for DURATION] GRANTEE  let someone else reach a tunnel (group shares need the gate to forward groups)
-  tunnel unshare [--name NAME] [--group] GRANTEE  stop sharing a tunnel
+  tunnel share [--group] [--for DURATION] LABEL GRANTEE  let someone else reach a site (group shares need the gate to forward groups)
+  tunnel unshare [--group] LABEL GRANTEE  stop sharing a site
   tunnel list                                     show what you share
   tunnel logout                                   forget the login on this computer
   tunnel version
@@ -294,15 +294,8 @@ func session(ctx context.Context, env Env) (auth.Tokens, bool) {
 	return tok, true
 }
 
-// tunnelLabel is a share's tunnel as a person reads it: the default tunnel has no name.
-func tunnelLabel(tunnel string) string {
-	if tunnel == "" {
-		return "(default)"
-	}
-	return tunnel
-}
-
-// share grants or, when remove is set, removes access to a tunnel.
+// share grants or, when remove is set, removes access to one of the owner's sites, named by its label
+// (<handle> for the default site, <handle>-<name> for a named one).
 func share(ctx context.Context, env Env, args []string, remove bool) int {
 	verb := "share"
 	if remove {
@@ -310,12 +303,11 @@ func share(ctx context.Context, env Env, args []string, remove bool) int {
 	}
 	fs := pflag.NewFlagSet(verb, pflag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	name := fs.String("name", "", "the tunnel's name; none means the default tunnel")
 	group := fs.Bool("group", false, "share with a Pocket ID group instead of a username")
 	lifetime := fs.String("for", "", "how long the share lasts, e.g. 24h or 7d")
-	shape := "[--name NAME] [--group] GRANTEE"
+	shape := "[--group] LABEL GRANTEE"
 	if !remove {
-		shape = "[--name NAME] [--group] [--for DURATION] GRANTEE"
+		shape = "[--group] [--for DURATION] LABEL GRANTEE"
 	}
 	bad := func(format string, a ...any) int {
 		fmt.Fprintf(env.Stderr, format+"\nUsage: tunnel "+verb+" "+shape+"\n", a...)
@@ -327,11 +319,12 @@ func share(ctx context.Context, env Env, args []string, remove bool) int {
 	if remove && fs.Changed("for") {
 		return bad("--for is only for share, not unshare")
 	}
-	if fs.NArg() != 1 {
-		return bad("give the username or group to share with")
+	if fs.NArg() != 2 {
+		return bad("give the site's label and the username or group to share with")
 	}
-	if *name != "" && !names.ValidTunnelName(*name) {
-		return bad("%q is not a tunnel name: use 1 to 42 lowercase letters, digits and inner dashes, other than %q", *name, names.Default)
+	handle, tunnel, ok := names.ParseLabel(fs.Arg(0))
+	if !ok {
+		return bad("%q is not a site label: use <handle> or <handle>-<name>", fs.Arg(0))
 	}
 	var expiresAt time.Time
 	if *lifetime != "" {
@@ -345,7 +338,7 @@ func share(ctx context.Context, env Env, args []string, remove bool) int {
 	if *group {
 		kind = "group"
 	}
-	sh := auth.Share{Tunnel: *name, Kind: kind, Grantee: fs.Arg(0), ExpiresAt: expiresAt}
+	sh := auth.Share{Handle: handle, Tunnel: tunnel, Kind: kind, Grantee: fs.Arg(1), ExpiresAt: expiresAt}
 
 	tok, ok := session(ctx, env)
 	if !ok {
@@ -361,15 +354,16 @@ func share(ctx context.Context, env Env, args []string, remove bool) int {
 		fmt.Fprintln(env.Stderr, err)
 		return 1
 	}
+	label := names.Label(sh.Handle, sh.Tunnel)
 	if remove {
-		fmt.Fprintf(env.Stdout, "Stopped sharing %s with %s\n", tunnelLabel(sh.Tunnel), sh.Grantee)
+		fmt.Fprintf(env.Stdout, "Stopped sharing %s with %s\n", label, sh.Grantee)
 	} else {
-		fmt.Fprintf(env.Stdout, "Shared %s with %s\n", tunnelLabel(sh.Tunnel), sh.Grantee)
+		fmt.Fprintf(env.Stdout, "Shared %s with %s\n", label, sh.Grantee)
 	}
 	return 0
 }
 
-// list prints the shares the owner set on the service.
+// list prints the shares the owner set on the service, each named by its site label.
 func list(ctx context.Context, env Env, args []string) int {
 	if len(args) > 0 {
 		fmt.Fprint(env.Stderr, usage)
@@ -385,7 +379,7 @@ func list(ctx context.Context, env Env, args []string) int {
 		return 1
 	}
 	for _, sh := range shares {
-		fmt.Fprintf(env.Stdout, "%s\t%s\t%s\t%s\n", tunnelLabel(sh.Tunnel), sh.Kind, sh.Grantee, expiryLabel(sh.ExpiresAt))
+		fmt.Fprintf(env.Stdout, "%s\t%s\t%s\t%s\n", names.Label(sh.Handle, sh.Tunnel), sh.Kind, sh.Grantee, expiryLabel(sh.ExpiresAt))
 	}
 	return 0
 }

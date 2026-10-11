@@ -722,7 +722,7 @@ func TestPutShare(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sh := Share{Tunnel: "blog", Kind: "user", Grantee: "bob"}
+	sh := Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob"}
 	if err := PutShare(t.Context(), client(), srv.URL, "tok-123", sh); err != nil {
 		t.Fatalf("PutShare = %v", err)
 	}
@@ -732,7 +732,7 @@ func TestPutShare(t *testing.T) {
 	if gotCT != "application/json" {
 		t.Errorf("Content-Type = %q, want application/json", gotCT)
 	}
-	if got := string(gotBody); got != `{"tunnel":"blog","kind":"user","grantee":"bob"}` {
+	if got := string(gotBody); got != `{"handle":"alice","tunnel":"blog","kind":"user","grantee":"bob"}` {
 		t.Errorf("body = %s", got)
 	}
 
@@ -774,7 +774,7 @@ func TestDeleteShare(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sh := Share{Tunnel: "", Kind: "group", Grantee: "family"}
+	sh := Share{Handle: "alice", Tunnel: "", Kind: "group", Grantee: "family"}
 	if err := DeleteShare(t.Context(), client(), srv.URL, "tok-123", sh); err != nil {
 		t.Fatalf("DeleteShare = %v", err)
 	}
@@ -784,7 +784,7 @@ func TestDeleteShare(t *testing.T) {
 	if gotCT != "application/json" {
 		t.Errorf("Content-Type = %q, want application/json", gotCT)
 	}
-	if got := string(gotBody); got != `{"tunnel":"","kind":"group","grantee":"family"}` {
+	if got := string(gotBody); got != `{"handle":"alice","tunnel":"","kind":"group","grantee":"family"}` {
 		t.Errorf("body = %s", got)
 	}
 
@@ -812,7 +812,7 @@ func TestDeleteShare(t *testing.T) {
 
 func TestListShares(t *testing.T) {
 	var gotMethod, gotPath, gotAuth string
-	status, body := http.StatusOK, `{"shares":[{"tunnel":"","kind":"user","grantee":"bob"},{"tunnel":"blog","kind":"group","grantee":"family"}]}`
+	status, body := http.StatusOK, `{"shares":[{"handle":"alice","tunnel":"","kind":"user","grantee":"bob"},{"handle":"nas","tunnel":"blog","kind":"group","grantee":"family"}]}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod, gotPath, gotAuth = r.Method, r.URL.Path, r.Header.Get("Authorization")
 		w.WriteHeader(status)
@@ -821,7 +821,7 @@ func TestListShares(t *testing.T) {
 	defer srv.Close()
 
 	got, err := ListShares(t.Context(), client(), srv.URL, "tok-123")
-	want := []Share{{Tunnel: "", Kind: "user", Grantee: "bob"}, {Tunnel: "blog", Kind: "group", Grantee: "family"}}
+	want := []Share{{Handle: "alice", Tunnel: "", Kind: "user", Grantee: "bob"}, {Handle: "nas", Tunnel: "blog", Kind: "group", Grantee: "family"}}
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Errorf("ListShares = %+v, %v, want %+v", got, err, want)
 	}
@@ -867,7 +867,7 @@ func TestListShares(t *testing.T) {
 // A share's expiry rides the wire as an RFC3339 time and survives the read.
 func TestListSharesCarriesExpiry(t *testing.T) {
 	expires := time.Date(2035, 1, 2, 3, 4, 5, 0, time.UTC)
-	body := `{"shares":[{"tunnel":"blog","kind":"user","grantee":"bob","expires_at":"` + expires.Format(time.RFC3339) + `"}]}`
+	body := `{"shares":[{"handle":"alice","tunnel":"blog","kind":"user","grantee":"bob","expires_at":"` + expires.Format(time.RFC3339) + `"}]}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		io.WriteString(w, body)
 	}))

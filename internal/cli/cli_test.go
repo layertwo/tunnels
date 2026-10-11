@@ -434,15 +434,15 @@ func TestConfigDirFromTheEnvironment(t *testing.T) {
 func TestShareCommand(t *testing.T) {
 	w := newWorld(t)
 	w.loggedIn()
-	if c := w.main("share", "--name", "blog", "bob"); c != 0 {
+	if c := w.main("share", "alice-blog", "bob"); c != 0 {
 		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
 	}
 	if len(w.shareReq) != 1 {
 		t.Fatalf("%d share requests, want 1", len(w.shareReq))
 	}
 	got := w.shareReq[0]
-	want := recordedShare{method: http.MethodPut, body: `{"tunnel":"blog","kind":"user","grantee":"bob"}`,
-		share: auth.Share{Tunnel: "blog", Kind: "user", Grantee: "bob"}}
+	want := recordedShare{method: http.MethodPut, body: `{"handle":"alice","tunnel":"blog","kind":"user","grantee":"bob"}`,
+		share: auth.Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob"}}
 	if got != want {
 		t.Errorf("request = %+v, want %+v", got, want)
 	}
@@ -451,33 +451,47 @@ func TestShareCommand(t *testing.T) {
 func TestShareGroup(t *testing.T) {
 	w := newWorld(t)
 	w.loggedIn()
-	if c := w.main("share", "--name", "blog", "--group", "family"); c != 0 {
+	if c := w.main("share", "--group", "alice-blog", "family"); c != 0 {
 		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
 	}
-	if len(w.shareReq) != 1 || w.shareReq[0].share.Kind != "group" {
-		t.Errorf("requests = %+v, want one with kind group", w.shareReq)
+	if len(w.shareReq) != 1 || w.shareReq[0].share.Kind != "group" || w.shareReq[0].share.Handle != "alice" {
+		t.Errorf("requests = %+v, want one with the handle and kind group", w.shareReq)
 	}
 }
 
+// A label with no dash names the handle's default site.
 func TestShareDefaultTunnel(t *testing.T) {
 	w := newWorld(t)
 	w.loggedIn()
-	if c := w.main("share", "bob"); c != 0 {
+	if c := w.main("share", "alice", "bob"); c != 0 {
 		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
 	}
-	if len(w.shareReq) != 1 || w.shareReq[0].share.Tunnel != "" {
-		t.Errorf("requests = %+v, want one with an empty tunnel", w.shareReq)
+	if len(w.shareReq) != 1 || w.shareReq[0].share.Tunnel != "" || w.shareReq[0].share.Handle != "alice" {
+		t.Errorf("requests = %+v, want one with handle alice and an empty tunnel", w.shareReq)
+	}
+}
+
+// A machine's site is named by its own label: the handle before the dash is the machine, not the owner.
+func TestShareMachineSite(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	if c := w.main("share", "nas-blog", "bob"); c != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
+	}
+	want := auth.Share{Handle: "nas", Tunnel: "blog", Kind: "user", Grantee: "bob"}
+	if len(w.shareReq) != 1 || w.shareReq[0].share != want {
+		t.Errorf("requests = %+v, want %+v", w.shareReq, want)
 	}
 }
 
 func TestUnshare(t *testing.T) {
 	w := newWorld(t)
 	w.loggedIn()
-	if c := w.main("unshare", "--name", "blog", "bob"); c != 0 {
+	if c := w.main("unshare", "alice-blog", "bob"); c != 0 {
 		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
 	}
-	want := recordedShare{method: http.MethodDelete, body: `{"tunnel":"blog","kind":"user","grantee":"bob"}`,
-		share: auth.Share{Tunnel: "blog", Kind: "user", Grantee: "bob"}}
+	want := recordedShare{method: http.MethodDelete, body: `{"handle":"alice","tunnel":"blog","kind":"user","grantee":"bob"}`,
+		share: auth.Share{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob"}}
 	if len(w.shareReq) != 1 || w.shareReq[0] != want {
 		t.Errorf("requests = %+v, want %+v", w.shareReq, want)
 	}
@@ -487,14 +501,14 @@ func TestListPrints(t *testing.T) {
 	w := newWorld(t)
 	w.loggedIn()
 	w.shares = []auth.Share{
-		{Tunnel: "", Kind: "user", Grantee: "bob"},
-		{Tunnel: "blog", Kind: "group", Grantee: "family"},
+		{Handle: "alice", Tunnel: "", Kind: "user", Grantee: "bob"},
+		{Handle: "nas", Tunnel: "blog", Kind: "group", Grantee: "family"},
 	}
 	if c := w.main("list"); c != 0 {
 		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
 	}
 	out := w.out.String()
-	for _, want := range []string{"(default)", "bob", "blog", "group", "family"} {
+	for _, want := range []string{"alice", "nas-blog", "bob", "group", "family"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout lacks %q:\n%s", want, out)
 		}
@@ -514,7 +528,7 @@ func TestShareForADuration(t *testing.T) {
 			w := newWorld(t)
 			w.loggedIn()
 			before := time.Now()
-			if c := w.main("share", "--for", tt.dur, "bob"); c != 0 {
+			if c := w.main("share", "--for", tt.dur, "alice", "bob"); c != 0 {
 				t.Fatalf("exit %d; stderr:\n%s", c, w.err)
 			}
 			if len(w.shareReq) != 1 {
@@ -533,7 +547,7 @@ func TestShareForRejectsGarbage(t *testing.T) {
 		t.Run(dur, func(t *testing.T) {
 			w := newWorld(t)
 			w.loggedIn()
-			if c := w.main("share", "--for", dur, "bob"); c != 2 {
+			if c := w.main("share", "--for", dur, "alice", "bob"); c != 2 {
 				t.Errorf("exit %d, want 2", c)
 			}
 			if !strings.Contains(w.err.String(), "Usage: tunnel") {
@@ -552,8 +566,8 @@ func TestListShowsExpiry(t *testing.T) {
 	w.loggedIn()
 	expires := time.Now().Add(48 * time.Hour).UTC().Truncate(time.Second)
 	w.shares = []auth.Share{
-		{Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: expires},
-		{Tunnel: "", Kind: "user", Grantee: "carol"},
+		{Handle: "alice", Tunnel: "blog", Kind: "user", Grantee: "bob", ExpiresAt: expires},
+		{Handle: "alice", Tunnel: "", Kind: "user", Grantee: "carol"},
 	}
 	if c := w.main("list"); c != 0 {
 		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
@@ -569,7 +583,7 @@ func TestListShowsExpiry(t *testing.T) {
 
 func TestShareNotLoggedIn(t *testing.T) {
 	w := newWorld(t)
-	if c := w.main("share", "bob"); c != 1 || !strings.Contains(w.err.String(), "run: tunnel login") {
+	if c := w.main("share", "alice", "bob"); c != 1 || !strings.Contains(w.err.String(), "run: tunnel login") {
 		t.Errorf("exit %d, stderr:\n%s", c, w.err)
 	}
 }
@@ -577,13 +591,16 @@ func TestShareNotLoggedIn(t *testing.T) {
 func TestShareArgumentErrors(t *testing.T) {
 	for _, args := range [][]string{
 		{"share"},
-		{"share", "bob", "extra"},
-		{"share", "--name", "blog"},
-		{"share", "--name", "Blog", "bob"},
-		{"share", "--name", "default", "bob"},
+		{"share", "alice"},                        // no grantee
+		{"share", "alice", "bob", "extra"},        // too many
+		{"share", "Blog", "bob"},                  // a label is lowercase
+		{"share", "a_b", "bob"},                   // not a label
+		{"share", "alice-", "bob"},                // a dash with no tunnel name
+		{"share", "alice-default", "bob"},         // "default" is not a tunnel name
 		{"share", "--bogus", "bob"},
 		{"unshare"},
-		{"unshare", "--for", "7d", "bob"},
+		{"unshare", "alice", "bob", "extra"},
+		{"unshare", "--for", "7d", "alice", "bob"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			w := newWorld(t)
@@ -672,8 +689,8 @@ func TestCommandsWithoutAConfigDir(t *testing.T) {
 	}{
 		{"login", []string{"login"}, 1, "no place for the login"},
 		{"up", []string{"up", "3000"}, 1, "no place for the login"},
-		{"share", []string{"share", "bob"}, 1, "no place for the login"},
-		{"unshare", []string{"unshare", "bob"}, 1, "no place for the login"},
+		{"share", []string{"share", "alice", "bob"}, 1, "no place for the login"},
+		{"unshare", []string{"unshare", "alice", "bob"}, 1, "no place for the login"},
 		{"list", []string{"list"}, 1, "no place for the login"},
 		{"logout", []string{"logout"}, 1, "no place for the login"},
 		{"version", []string{"version"}, 0, "tunnel 1.2.3"}, // version never touches the config dir
@@ -900,7 +917,7 @@ func TestShareAPIError(t *testing.T) {
 	w.mu.Lock()
 	w.putStatus = http.StatusForbidden
 	w.mu.Unlock()
-	if c := w.main("share", "bob"); c != 1 || !strings.Contains(w.err.String(), "you do not own that tunnel") {
+	if c := w.main("share", "alice", "bob"); c != 1 || !strings.Contains(w.err.String(), "you do not own that tunnel") {
 		t.Errorf("exit %d, stderr:\n%s", c, w.err)
 	}
 }

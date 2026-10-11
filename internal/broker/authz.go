@@ -19,12 +19,12 @@ type Shares interface {
 	PutShare(ctx context.Context, ownerSub string, sh store.Share) error
 	DeleteShare(ctx context.Context, ownerSub string, sh store.Share) error
 	SharesByOwner(ctx context.Context, ownerSub string) ([]store.Share, error)
-	ShareMatches(ctx context.Context, ownerSub, tunnel, username string, groups []string) (bool, error)
+	ShareMatches(ctx context.Context, ownerSub, handle, tunnel, username string, groups []string) (bool, error)
 }
 
 // ShareMatcher is the part of Shares the authz decision needs: whether a share covers a visitor.
 type ShareMatcher interface {
-	ShareMatches(ctx context.Context, ownerSub, tunnel, username string, groups []string) (bool, error)
+	ShareMatches(ctx context.Context, ownerSub, handle, tunnel, username string, groups []string) (bool, error)
 }
 
 // LookupObserver records how long one store lookup in the /authz decision took; *Metrics implements
@@ -146,7 +146,7 @@ func (a Authz) decide(r *http.Request) outcome {
 			return o
 		}
 		sharesStart := time.Now()
-		shared, err := a.Shares.ShareMatches(ctx, owner.Sub, tunnel, users[0], groupsOf(r))
+		shared, err := a.Shares.ShareMatches(ctx, owner.Sub, handle, tunnel, users[0], groupsOf(r))
 		a.observe("shares", sharesStart)
 		switch {
 		case err != nil:

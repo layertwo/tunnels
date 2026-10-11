@@ -339,14 +339,14 @@ func postLogin(t *testing.T, r *serverRig, token string) reply {
 func TestSharesGet(t *testing.T) {
 	r := newServerRig(t)
 	r.shares.rows = []store.Share{
-		{Tunnel: "", Kind: "user", Grantee: "bob"},
-		{Tunnel: "blog", Kind: "group", Grantee: "family"},
+		{Handle: "alice", Tunnel: "", Kind: "user", Grantee: "bob"},
+		{Handle: "nas", Tunnel: "blog", Kind: "group", Grantee: "family"},
 	}
 	w := r.do("GET", "/api/shares", bearer(r.idp.Issue("sub-alice", mockidp.IssueOpts{})), "")
 	if w.Code != 200 {
 		t.Fatalf("= %d %q, want 200", w.Code, w.Body)
 	}
-	want := `{"shares":[{"tunnel":"","kind":"user","grantee":"bob"},{"tunnel":"blog","kind":"group","grantee":"family"}]}`
+	want := `{"shares":[{"handle":"alice","tunnel":"","kind":"user","grantee":"bob"},{"handle":"nas","tunnel":"blog","kind":"group","grantee":"family"}]}`
 	if strings.TrimSpace(w.Body.String()) != want {
 		t.Errorf("= %s, want %s", w.Body, want)
 	}
