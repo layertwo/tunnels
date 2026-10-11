@@ -266,6 +266,8 @@ fixed **in the same change that enables it**, not after.
   this design only fixes *who a machine is* and *who owns it*.
 - **Machine credential scope** — whether a machine token may call the share API (it should not, once
   capability is modelled).
+- **Hardware-backed keys** — v1 stores the machine's key in a 0600 file; Secure Enclave / TPM 2.0 /
+  PKCS#11 is a follow-up, the same key with a different store.
 - **`install.sh` / live status / frps HA** — unrelated, tracked in `docs/design.md`.
 
 ## Left to the builder
