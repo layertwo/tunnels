@@ -821,6 +821,24 @@ func TestStoreClosedPoolErrors(t *testing.T) {
 	if shares, err := s.SharesByOwner(ctx, "sub-1"); err == nil || shares != nil {
 		t.Errorf("SharesByOwner on a closed store = %v, %v; want nil, error", shares, err)
 	}
+	if err := s.CreateMachine(ctx, Machine{Handle: "nas", OwnerKind: "user", OwnerRef: "sub-1", ClientID: "client-1", CreatedBy: "sub-1"}); err == nil {
+		t.Error("CreateMachine on a closed store succeeded, want an error")
+	}
+	if _, err := s.MachineByHandle(ctx, "nas"); err == nil {
+		t.Error("MachineByHandle on a closed store succeeded, want an error")
+	}
+	if _, err := s.MachineByClientID(ctx, "client-1"); err == nil {
+		t.Error("MachineByClientID on a closed store succeeded, want an error")
+	}
+	if machines, err := s.MachinesByOwner(ctx, "sub-1"); err == nil || machines != nil {
+		t.Errorf("MachinesByOwner on a closed store = %v, %v; want nil, error", machines, err)
+	}
+	if err := s.SetMachineDisabled(ctx, "client-1", true); err == nil {
+		t.Error("SetMachineDisabled on a closed store succeeded, want an error")
+	}
+	if err := s.DeleteMachine(ctx, "client-1"); err == nil {
+		t.Error("DeleteMachine on a closed store succeeded, want an error")
+	}
 	if got := count(t, dbURL, "select count(*) from users"); got != 1 {
 		t.Errorf("users has %d rows after the failed writes, want 1", got)
 	}
@@ -904,5 +922,310 @@ func TestSharesByOwnerRowsError(t *testing.T) {
 	shares, err := s.SharesByOwner(ctx, "sub-1")
 	if err == nil || shares != nil {
 		t.Errorf("SharesByOwner with a failing row = %v, %v; want nil, error", shares, err)
+	}
+}
+
+// createMachine adds a machine owned by a user and returns the stored row.
+func createMachine(t *testing.T, s *Store, ctx context.Context, handle, ownerRef, clientID string) Machine {
+	t.Helper()
+	if err := s.CreateMachine(ctx, Machine{Handle: handle, OwnerKind: "user", OwnerRef: ownerRef, ClientID: clientID, CreatedBy: ownerRef}); err != nil {
+		t.Fatalf("CreateMachine(%q): %v", handle, err)
+	}
+	m, err := s.MachineByHandle(ctx, handle)
+	if err != nil {
+		t.Fatalf("MachineByHandle(%q): %v", handle, err)
+	}
+	return m
+}
+
+// A machine round-trips through both lookups, with the columns the database fills in defaulted.
+func TestCreateMachineAndLookups(t *testing.T) {
+	s := newStore(t)
+	ctx := testCtx(t)
+	m := Machine{Handle: "nas", OwnerKind: "user", OwnerRef: "sub-1", ClientID: "client-123", CreatedBy: "sub-1"}
+	if err := s.CreateMachine(ctx, m); err != nil {
+		t.Fatalf("CreateMachine: %v", err)
+	}
+	byHandle, err := s.MachineByHandle(ctx, "nas")
+	if err != nil {
+		t.Fatalf("MachineByHandle: %v", err)
+	}
+	byClient, err := s.MachineByClientID(ctx, "client-123")
+	if err != nil {
+		t.Fatalf("MachineByClientID: %v", err)
+	}
+	if byHandle != byClient {
+		t.Errorf("MachineByHandle = %+v, MachineByClientID = %+v, want the same row", byHandle, byClient)
+	}
+	if byHandle.ID == "" || byHandle.Handle != "nas" || byHandle.OwnerKind != "user" ||
+		byHandle.OwnerRef != "sub-1" || byHandle.ClientID != "client-123" ||
+		byHandle.Disabled || byHandle.CreatedAt.IsZero() || byHandle.CreatedBy != "sub-1" {
+		t.Errorf("machine = %+v, want the fields it was created with and a generated id and created_at", byHandle)
+	}
+}
+
+// One handle is owned once, whether the earlier claim is another machine or a user.
+func TestCreateMachineHandleTaken(t *testing.T) {
+	dbURL := schemaURL(t)
+	s := openStore(t, dbURL)
+	ctx := testCtx(t)
+	createUser(t, s, ctx, "sub-1", "alice")
+	createMachine(t, s, ctx, "nas", "sub-1", "client-1")
+
+	tests := []struct {
+		name    string
+		machine Machine
+	}{
+		{"another machine's handle", Machine{Handle: "nas", OwnerKind: "user", OwnerRef: "sub-1", ClientID: "client-2", CreatedBy: "sub-1"}},
+		{"a user's handle", Machine{Handle: "alice", OwnerKind: "user", OwnerRef: "sub-1", ClientID: "client-3", CreatedBy: "sub-1"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := s.CreateMachine(ctx, tt.machine); !errors.Is(err, ErrHandleTaken) {
+				t.Errorf("CreateMachine(%q) error = %v, want ErrHandleTaken", tt.machine.Handle, err)
+			}
+		})
+	}
+	if got := count(t, dbURL, "select count(*) from machines"); got != 1 {
+		t.Errorf("machines has %d rows, want 1", got)
+	}
+}
+
+// A machine's handle is refused to a brand-new user, and the user is not created.
+func TestCreateUserHandleTakenByMachine(t *testing.T) {
+	dbURL := schemaURL(t)
+	s := openStore(t, dbURL)
+	ctx := testCtx(t)
+	createMachine(t, s, ctx, "nas", "sub-1", "client-1")
+	if _, err := s.CreateUser(ctx, "sub-2", "nas"); !errors.Is(err, ErrHandleTaken) {
+		t.Fatalf("CreateUser(sub-2, nas) error = %v, want ErrHandleTaken", err)
+	}
+	if _, err := s.UserBySub(ctx, "sub-2"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("UserBySub(sub-2) error = %v, want ErrNotFound", err)
+	}
+	if got := count(t, dbURL, "select count(*) from users"); got != 0 {
+		t.Errorf("users has %d rows, want 0", got)
+	}
+}
+
+// A user's first login and a machine's create racing for one handle leave exactly one owner: the
+// advisory lock serialises them, and the loser reads the winner's row.
+func TestConcurrentMachineAndUserHandle(t *testing.T) {
+	dbURL := schemaURL(t)
+	s := openStore(t, dbURL)
+	ctx := testCtx(t)
+	const rounds = 30
+	for r := range rounds {
+		handle := fmt.Sprintf("shared-%d", r)
+		sub := fmt.Sprintf("sub-%d", r)
+		client := fmt.Sprintf("client-%d", r)
+		var userErr, machineErr error
+		parallel(2, func(i int) {
+			if i == 0 {
+				_, userErr = s.CreateUser(ctx, sub, handle)
+				return
+			}
+			machineErr = s.CreateMachine(ctx, Machine{Handle: handle, OwnerKind: "user", OwnerRef: sub, ClientID: client, CreatedBy: sub})
+		})
+		won := 0
+		if userErr == nil {
+			won++
+		} else if !errors.Is(userErr, ErrHandleTaken) {
+			t.Errorf("round %d: CreateUser error = %v, want nil or ErrHandleTaken", r, userErr)
+		}
+		if machineErr == nil {
+			won++
+		} else if !errors.Is(machineErr, ErrHandleTaken) {
+			t.Errorf("round %d: CreateMachine error = %v, want nil or ErrHandleTaken", r, machineErr)
+		}
+		if won != 1 {
+			t.Errorf("round %d: %d owners of %q, want exactly 1", r, won, handle)
+		}
+	}
+	if got := count(t, dbURL, "select (select count(*) from users) + (select count(*) from machines)"); got != rounds {
+		t.Errorf("owners = %d, want one per round (%d)", got, rounds)
+	}
+}
+
+// The flag flips both ways, list returns only the owner's machines in handle order, and delete
+// removes one and is idempotent.
+func TestMachineDisabledDeleteAndOwnerList(t *testing.T) {
+	dbURL := schemaURL(t)
+	s := openStore(t, dbURL)
+	ctx := testCtx(t)
+	createUser(t, s, ctx, "sub-1", "alice")
+	createUser(t, s, ctx, "sub-2", "carol")
+	createMachine(t, s, ctx, "pi", "sub-1", "client-1")
+	createMachine(t, s, ctx, "nas", "sub-1", "client-2")
+	createMachine(t, s, ctx, "edge", "sub-2", "client-3")
+
+	if err := s.SetMachineDisabled(ctx, "client-1", true); err != nil {
+		t.Fatalf("SetMachineDisabled: %v", err)
+	}
+	if m, err := s.MachineByClientID(ctx, "client-1"); err != nil || !m.Disabled {
+		t.Errorf("MachineByClientID = %+v, %v; want disabled", m, err)
+	}
+	if err := s.SetMachineDisabled(ctx, "client-1", false); err != nil {
+		t.Fatalf("SetMachineDisabled: %v", err)
+	}
+	if m, err := s.MachineByClientID(ctx, "client-1"); err != nil || m.Disabled {
+		t.Errorf("MachineByClientID = %+v, %v; want enabled", m, err)
+	}
+
+	got, err := s.MachinesByOwner(ctx, "sub-1")
+	if err != nil {
+		t.Fatalf("MachinesByOwner: %v", err)
+	}
+	if len(got) != 2 || got[0].Handle != "nas" || got[1].Handle != "pi" {
+		t.Errorf("MachinesByOwner = %+v, want nas then pi", got)
+	}
+
+	if err := s.DeleteMachine(ctx, "client-1"); err != nil {
+		t.Fatalf("DeleteMachine: %v", err)
+	}
+	if _, err := s.MachineByClientID(ctx, "client-1"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("MachineByClientID after delete error = %v, want ErrNotFound", err)
+	}
+	if err := s.DeleteMachine(ctx, "client-1"); err != nil { // deleting what is gone does nothing
+		t.Errorf("second DeleteMachine: %v", err)
+	}
+	if got := count(t, dbURL, "select count(*) from machines"); got != 2 {
+		t.Errorf("machines has %d rows, want 2", got)
+	}
+}
+
+func TestMachineNotFound(t *testing.T) {
+	s := newStore(t)
+	ctx := testCtx(t)
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	tests := []struct {
+		name string
+		call func(context.Context, string) (Machine, error)
+	}{
+		{"MachineByHandle", s.MachineByHandle},
+		{"MachineByClientID", s.MachineByClientID},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name+"/missing", func(t *testing.T) {
+			if _, err := tt.call(ctx, "nobody"); !errors.Is(err, ErrNotFound) {
+				t.Errorf("error = %v, want ErrNotFound", err)
+			}
+		})
+		t.Run(tt.name+"/failure is not a miss", func(t *testing.T) {
+			if _, err := tt.call(cancelled, "nobody"); err == nil || errors.Is(err, ErrNotFound) {
+				t.Errorf("error = %v, want a failure that is not ErrNotFound", err)
+			}
+		})
+	}
+}
+
+// An unreadable users table must fail the handle check, not silently let the handle through.
+func TestMachineHandleCheckFails(t *testing.T) {
+	dbURL := schemaURL(t)
+	s := openStore(t, dbURL)
+	ctx := testCtx(t)
+	if err := run(dbURL, "alter table users rename to users_base"); err != nil {
+		t.Fatalf("rename users: %v", err)
+	}
+	m := Machine{Handle: "nas", OwnerKind: "user", OwnerRef: "sub-1", ClientID: "client-1", CreatedBy: "sub-1"}
+	if err := s.CreateMachine(ctx, m); err == nil {
+		t.Error("CreateMachine with an unreadable users table succeeded, want an error")
+	}
+	if _, err := s.CreateUser(ctx, "sub-1", "alice"); err == nil {
+		t.Error("CreateUser with an unreadable users table succeeded, want an error")
+	}
+}
+
+// While another session holds a handle's advisory lock, a create must fail rather than wait forever.
+func TestMachineHandleLockAborts(t *testing.T) {
+	base := os.Getenv("TEST_DATABASE_URL")
+	if base == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	dbURL := schemaURL(t)
+	s := openStore(t, dbURL)
+	ctx := testCtx(t)
+	holder, err := pgx.Connect(ctx, base)
+	if err != nil {
+		t.Fatalf("connect lock holder: %v", err)
+	}
+	t.Cleanup(func() { holder.Close(context.Background()) })
+	tx, err := holder.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin lock holder: %v", err)
+	}
+	t.Cleanup(func() { tx.Rollback(context.Background()) })
+	if _, err := tx.Exec(ctx, "select pg_advisory_xact_lock(hashtext($1))", "nas"); err != nil {
+		t.Fatalf("hold the handle lock: %v", err)
+	}
+	short, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	m := Machine{Handle: "nas", OwnerKind: "user", OwnerRef: "sub-1", ClientID: "client-1", CreatedBy: "sub-1"}
+	if err := s.CreateMachine(short, m); err == nil {
+		t.Error("CreateMachine while the handle lock is held succeeded, want an error")
+	}
+}
+
+// A failed insert is reported, not swallowed, once the handle checks have passed.
+func TestMachineInsertFails(t *testing.T) {
+	dbURL := schemaURL(t)
+	s := openStore(t, dbURL)
+	ctx := testCtx(t)
+	if err := run(dbURL, "alter table machines add constraint no_nas check (handle <> 'nas')"); err != nil {
+		t.Fatalf("add machines constraint: %v", err)
+	}
+	m := Machine{Handle: "nas", OwnerKind: "user", OwnerRef: "sub-1", ClientID: "client-1", CreatedBy: "sub-1"}
+	if err := s.CreateMachine(ctx, m); err == nil {
+		t.Error("CreateMachine that violates a constraint succeeded, want an error")
+	}
+}
+
+func TestCreateUserInsertFails(t *testing.T) {
+	dbURL := schemaURL(t)
+	s := openStore(t, dbURL)
+	ctx := testCtx(t)
+	if err := run(dbURL, "alter table users add constraint no_bob check (handle <> 'bob')"); err != nil {
+		t.Fatalf("add users constraint: %v", err)
+	}
+	if _, err := s.CreateUser(ctx, "sub-1", "bob"); err == nil {
+		t.Error("CreateUser that violates a constraint succeeded, want an error")
+	}
+}
+
+// An unreadable column makes the query succeed but the row scan fail.
+func TestMachinesByOwnerScanFails(t *testing.T) {
+	dbURL := schemaURL(t)
+	s := openStore(t, dbURL)
+	ctx := testCtx(t)
+	createMachine(t, s, ctx, "nas", "sub-1", "client-1")
+	if err := run(dbURL, "alter table machines alter column client_id type bytea using convert_to(client_id, 'UTF8')"); err != nil {
+		t.Fatalf("alter machines.client_id: %v", err)
+	}
+	machines, err := s.MachinesByOwner(ctx, "sub-1")
+	if err == nil || machines != nil {
+		t.Errorf("MachinesByOwner with an unreadable column = %v, %v; want nil, error", machines, err)
+	}
+}
+
+// A row whose expression raises ends the stream with an error instead of a partial list.
+func TestMachinesByOwnerRowsError(t *testing.T) {
+	dbURL := schemaURL(t)
+	s := openStore(t, dbURL)
+	ctx := testCtx(t)
+	createMachine(t, s, ctx, "nas", "sub-1", "client-1")
+	createMachine(t, s, ctx, "boom", "sub-1", "client-2")
+	if err := run(dbURL, "alter table machines rename to machines_base"); err != nil {
+		t.Fatalf("rename machines: %v", err)
+	}
+	if err := run(dbURL, `create function boom() returns text language plpgsql volatile as $$ begin raise exception 'boom'; end $$`); err != nil {
+		t.Fatalf("create boom: %v", err)
+	}
+	if err := run(dbURL, `create view machines as select id, handle, case when handle = 'boom' then boom() else owner_kind end as owner_kind, owner_ref, client_id, disabled, created_at, created_by from machines_base`); err != nil {
+		t.Fatalf("create failing view: %v", err)
+	}
+	machines, err := s.MachinesByOwner(ctx, "sub-1")
+	if err == nil || machines != nil {
+		t.Errorf("MachinesByOwner with a failing row = %v, %v; want nil, error", machines, err)
 	}
 }
