@@ -375,6 +375,9 @@ func TestAccountBySubject(t *testing.T) {
 		{"machine", "client-abc", nil, []store.Machine{{Handle: "nas", ClientID: "abc"}}, Account{Handle: "nas"}, nil},
 		{"machine, unknown", "client-zzz", nil, nil, Account{}, ErrUnknownMachine},
 		{"machine, disabled", "client-abc", nil, []store.Machine{{Handle: "nas", ClientID: "abc", Disabled: true}}, Account{}, ErrDisabled},
+		{"machine, enabled owner", "client-abc", []store.User{{Sub: "owner", Handle: "alice"}}, []store.Machine{{Handle: "nas", ClientID: "abc", OwnerRef: "owner"}}, Account{Handle: "nas"}, nil},
+		{"machine, disabled owner", "client-abc", []store.User{{Sub: "owner", Handle: "alice", Disabled: true}}, []store.Machine{{Handle: "nas", ClientID: "abc", OwnerRef: "owner"}}, Account{}, ErrDisabled},
+		{"machine, owner row gone", "client-abc", nil, []store.Machine{{Handle: "nas", ClientID: "abc", OwnerRef: "owner"}}, Account{Handle: "nas"}, nil},
 		{"user", "sub-1", []store.User{{Sub: "sub-1", Handle: "alice"}}, nil, Account{Sub: "sub-1", Handle: "alice"}, nil},
 		{"user, unknown", "sub-9", nil, nil, Account{}, store.ErrNotFound},
 	}
@@ -387,6 +390,27 @@ func TestAccountBySubject(t *testing.T) {
 				t.Fatalf("AccountBySubject(%q) = %+v, %v; want %+v, %v", tt.sub, got, err, tt.want, tt.wantErr)
 			}
 		})
+	}
+}
+
+// A store that cannot answer the owner lookup is infrastructure, not the machine's fault; the error is
+// not a refusal, so Login fails closed and a work connection is left to frps.
+func TestAccountBySubjectMachineOwnerLookupFails(t *testing.T) {
+	boom := errors.New("dial tcp: connection refused")
+	users := newUsers()
+	users.bySubErr = boom
+	r, _ := resolver(identity("", ""), users)
+	r.Machines = newMachines(store.Machine{Handle: "nas", ClientID: "abc", OwnerRef: "owner"})
+
+	got, err := r.AccountBySubject(t.Context(), "client-abc")
+	if err == nil || got != (Account{}) {
+		t.Fatalf("AccountBySubject = %+v, %v, want the zero value and an error", got, err)
+	}
+	if !errors.Is(err, boom) {
+		t.Errorf("err = %v, want it to wrap the lookup failure", err)
+	}
+	if _, ok := refusalOf(err); ok {
+		t.Errorf("err = %v is a refusal, want an infrastructure error", err)
 	}
 }
 

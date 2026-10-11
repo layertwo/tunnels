@@ -140,6 +140,15 @@ func (r Resolver) AccountBySubject(ctx context.Context, sub string) (Account, er
 		if m.Disabled {
 			return Account{}, &refusal{ErrDisabled, "this machine is disabled; ask its owner"}
 		}
+		// The design's Publish flow checks the owner is not disabled. A missing owner row is left as it
+		// was: the machine's own row is its revocation lever, and its sites already read as unknown.
+		if owner, err := r.Users.UserBySub(ctx, m.OwnerRef); err != nil {
+			if !errors.Is(err, store.ErrNotFound) {
+				return Account{}, fmt.Errorf("broker: look up machine owner: %w", err)
+			}
+		} else if owner.Disabled {
+			return Account{}, &refusal{ErrDisabled, "this machine's owner is disabled; ask an admin"}
+		}
 		return Account{Handle: m.Handle}, nil
 	}
 	u, err := r.Users.UserBySub(ctx, sub)

@@ -93,14 +93,22 @@ func (s *server) machinesCreate(w http.ResponseWriter, r *http.Request) {
 	err = s.d.Machines.CreateMachine(ctx, store.Machine{Handle: handle, OwnerKind: "user", OwnerRef: acct.Sub, ClientID: clientID, CreatedBy: acct.Sub})
 	switch {
 	case errors.Is(err, store.ErrHandleTaken):
-		_ = s.d.PocketID.DeleteClient(ctx, clientID) // roll back: the row is not there
+		s.rollbackClient(ctx, clientID) // roll back: the row is not there
 		writeJSON(w, http.StatusConflict, errorBody("the handle "+strconv.Quote(handle)+" is taken"))
 	case err != nil:
-		_ = s.d.PocketID.DeleteClient(ctx, clientID)
+		s.rollbackClient(ctx, clientID)
 		s.d.Log.Warn("api/machines: could not store the machine", "err", err)
 		writeJSON(w, http.StatusServiceUnavailable, errorBody("could not create the machine, try again"))
 	default:
 		writeJSON(w, http.StatusCreated, machineJSON{Handle: handle, ClientID: clientID})
+	}
+}
+
+// rollbackClient deletes a client minted for a machine whose row was not written. The orphan can do
+// nothing, but a cleanup that fails is logged rather than silently dropped.
+func (s *server) rollbackClient(ctx context.Context, clientID string) {
+	if err := s.d.PocketID.DeleteClient(ctx, clientID); err != nil {
+		s.d.Log.Warn("api/machines: could not delete a rolled-back client", "err", err)
 	}
 }
 

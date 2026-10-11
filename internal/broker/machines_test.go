@@ -205,6 +205,21 @@ func TestMachinesCreateStoreErrorRollsBack(t *testing.T) {
 	}
 }
 
+// A rollback that cannot delete the just-minted client is logged: an orphan client with no row can do
+// nothing, but a cleanup that silently fails is litter.
+func TestMachinesCreateRollbackFailureIsLogged(t *testing.T) {
+	r := newServerRig(t)
+	r.machines.machines["existing"] = store.Machine{Handle: "nas", OwnerRef: "sub-bob", ClientID: "existing"}
+	r.pocket.deleteErr = errors.New("pocket id is down")
+	w := r.do("POST", "/api/machines", bearer(r.idp.Issue("sub-alice", mockidp.IssueOpts{})), `{"handle":"nas","publicKey":`+goodJWK+`}`)
+	if w.Code != 409 {
+		t.Fatalf("= %d %q, want 409 saying the handle is taken", w.Code, w.Body)
+	}
+	if !strings.Contains(r.logs.String(), "rolled-back client") {
+		t.Errorf("the rollback failure was not logged:\n%s", r.logs)
+	}
+}
+
 func TestMachinesList(t *testing.T) {
 	r := newServerRig(t)
 	r.machines.machines["c1"] = store.Machine{Handle: "nas", OwnerRef: "sub-alice", ClientID: "c1"}

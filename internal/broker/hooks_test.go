@@ -852,10 +852,28 @@ func TestNewWorkConnBindsAMachineToItsOwnHandle(t *testing.T) {
 		t.Errorf("reply = %+v, want allowed for the machine's own control", rep)
 	}
 	// A control connection belonging to somebody else: refused.
-	rep := r.call(t, plugin.OpNewWorkConn, workConnContent(secretToken, "alice"))
 	const want = "token does not belong to this session"
-	if !rep.Reject || rep.RejectReason != want {
+	if rep := r.call(t, plugin.OpNewWorkConn, workConnContent(secretToken, "alice")); !rep.Reject || rep.RejectReason != want {
 		t.Errorf("reply = %+v, want reject with %q", rep, want)
+	}
+
+	// A disabled machine is a definitive refusal: frps may still trust its token until the next Ping,
+	// so the work connection must not fall open onto another control (invariant 2).
+	r.machines.machines["abc"] = store.Machine{Handle: "nas", ClientID: "abc", Disabled: true}
+	if rep := r.call(t, plugin.OpNewWorkConn, workConnContent(secretToken, "alice")); !rep.Reject || rep.RejectReason != want {
+		t.Errorf("disabled machine: reply = %+v, want reject with %q", rep, want)
+	}
+
+	// A deleted machine's subject is unknown: a refusal too, not a fail-open.
+	delete(r.machines.machines, "abc")
+	if rep := r.call(t, plugin.OpNewWorkConn, workConnContent(secretToken, "alice")); !rep.Reject || rep.RejectReason != want {
+		t.Errorf("unknown machine: reply = %+v, want reject with %q", rep, want)
+	}
+
+	// A store that cannot answer is infrastructure, not a refusal: left to frps, as before.
+	r.machines.err = errors.New("dial tcp 10.0.0.5:5432: connect: connection refused")
+	if rep := r.call(t, plugin.OpNewWorkConn, workConnContent(secretToken, "alice")); rep.Reject {
+		t.Errorf("store down: reply = %+v, want allowed", rep)
 	}
 }
 
