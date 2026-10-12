@@ -405,12 +405,18 @@ existing share's handle from its owner's `users.handle`. A machine's site is own
 
 Sharing with the group `tunnels-viewers` means every viewer.
 
-**Configuration** (environment): `SERVICE_HOST`, `SITES_DOMAIN`, `ISSUER`, `API_RESOURCE`,
-`CREATORS_GROUP`, `DATABASE_URL`, `FRPS_DASHBOARD_URL`, `FRPS_DASHBOARD_USER`,
+**Configuration:** the settings come from a TOML configuration file — `--config PATH`, else
+`$BROKER_CONFIG`, else `/etc/tunnels/broker.toml` — one section per feature (`[server]`, `[identity]`,
+`[tunnels]`, `[machines]`, `[metrics]`), and a feature with no section is off (its routes are not
+mounted, so they answer 404); see the
+[broker config design](plans/2026-10-12-tunnels-broker-config-design.md). The environment keeps the
+secrets and overrides a file value. The settings are `SERVICE_HOST`, `SITES_DOMAIN`, `ISSUER`,
+`API_RESOURCE`, `CREATORS_GROUP`, `DATABASE_URL`, `FRPS_DASHBOARD_URL`, `FRPS_DASHBOARD_USER`,
 `FRPS_DASHBOARD_PASSWORD`, `PLUGIN_SECRET`, `MAX_TUNNELS_PER_USER` (5),
 `DEFAULT_BANDWIDTH_LIMIT` (10MB per second, frp's format), `RESERVED_HANDLES`,
 `POCKET_ID_URL`, `POCKET_ID_API_KEY` (the Pocket ID admin API the broker mints a machine's client
-with), `POCKET_ID_API_ID` (the Tunnels API id the minted client is granted access to), `LOG_LEVEL`. Logs are structured JSON for
+with), `POCKET_ID_API_ID` (the Tunnels API id the minted client is granted access to), `LOG_LEVEL`
+(these are the environment-variable names, the override). Logs are structured JSON for
 logins, proxy registrations, denials and share changes, and never contain tokens. Outbound
 requests carry an explicit User-Agent. `DATABASE_URL` comes from the CNPG-generated secret
 `cnpg-tunnels-app` (key `uri`); the rest come from `secrets-broker.sops.yml` and the

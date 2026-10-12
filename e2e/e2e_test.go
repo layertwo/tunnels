@@ -182,6 +182,9 @@ func newStack(t *testing.T, maxTunnels int) *stack {
 		ServiceHost: "tunnels.test", SitesDomain: sites, Issuer: s.mock.URL, APIResource: mockidp.APIResource,
 		CreatorsGroup: "tunnels-creators", CLIClientID: mockidp.ClientID, MinCLIVersion: "0.0.0",
 		PluginSecret: secret, MaxTunnelsPerUser: maxTunnels, BandwidthLimit: "10MB", Reserved: []string{"admin"},
+		// As a real no-file broker: metrics are always mounted, and machines are on only when
+		// POCKET_ID_URL is set — this harness sets none, driving machines through the store and plugin.
+		MachinesEnabled: false, MetricsEnabled: true,
 	}, broker.Deps{IdP: provider, Verifier: provider, Users: users, Machines: users, Shares: users, Frps: s.frps, Log: slog.New(slog.NewJSONHandler(brokerLog, nil))}))
 	t.Cleanup(b.Close)
 	s.url = b.URL

@@ -7,18 +7,20 @@ the conventions that are easy to get wrong.
 
 - **Every new configuration option must be optional.** It can be left unset, or set to a value that
   disables its feature — a missing option is a valid state, never a startup failure. A release must
-  not require new configuration to keep running: with the option unset the service still starts and
-  the endpoint that needs it answers "not configured" (see `noPocketID`/`noSharesStore` in the broker).
+  not require new configuration to keep running: with the option unset the service still starts and the
+  feature's routes are not mounted, so they answer **404** (see `MachinesEnabled`/`MetricsEnabled` in
+  `NewHandler`). The `/api/machines` handlers keep their `noPocketID` 503 guard for the
+  section-on-but-no-PocketID case, and `/api/shares` its `noSharesStore` guard.
 - **Group an option's inputs.** When several variables configure one feature, either all are set or
   none; a half-set group is a startup error naming the variable. Do not let a partial configuration
   read as "feature off".
 - **Secrets come from the environment or a file and never reach a log, an error, or a URL.** The
   broker's own errors name the variable, never its value.
-- **A config file (v0.4.0).** The broker's settings move into a TOML config file — one section per
-  feature (`[server]`, `[identity]`, `[tunnels]`, `[machines]`, `[metrics]`), and **a feature with no
-  section is off**. Secrets stay in the environment, never the file; the environment overrides a file
-  value. See the [broker config design](docs/plans/2026-10-12-tunnels-broker-config-design.md). Not
-  implemented yet.
+- **A config file (v0.4.0).** The broker's settings come from a TOML config file — `--config PATH`, else
+  `BROKER_CONFIG`, else `/etc/tunnels/broker.toml` — one section per feature (`[server]`, `[identity]`,
+  `[tunnels]`, `[machines]`, `[metrics]`), and **a feature with no section is off** (its routes are not
+  mounted, so they answer 404). Secrets stay in the environment, never the file; the environment
+  overrides a file value. See the [broker config design](docs/plans/2026-10-12-tunnels-broker-config-design.md).
 
 ## Code
 
