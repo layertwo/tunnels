@@ -87,3 +87,7 @@ func SiteLabel(host, sitesDomain string) (label string, ok bool) {
 	}
 	return label, true
 }
+
+// SSHLabel returns the label of host under the SSH domain, exactly as SiteLabel
+// does for sites: the two subtrees share the label rules and differ only in domain.
+func SSHLabel(host, sshDomain string) (label string, ok bool) { return SiteLabel(host, sshDomain) }
