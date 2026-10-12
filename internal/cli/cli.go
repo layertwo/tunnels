@@ -240,18 +240,17 @@ func up(ctx context.Context, env Env, args []string) int {
 	go auth.KeepFresh(ctx, s, o, 30*time.Minute, warnRefreshFailed(env.Stderr))
 
 	label := names.Label(tok.Handle, *name)
-	// In ssh mode the bridge chooses its own local port and dials the target, so PORT is the target's.
-	url := "https://" + label + "." + b.SitesDomain
+	shown := "https://" + label + "." + b.SitesDomain
 	if *ssh {
 		// ssh <label> is the ssh_config alias, so the ProxyCommand in its Host block runs; the
 		// HostName (<label>.<ssh_domain>) would be dialled directly, and no sshd is there.
-		url = "ssh " + label
+		shown = "ssh " + label
 	}
 	printed := map[string]bool{}
 	onStatus := func(st tunnel.Status) {
 		switch st.Phase {
 		case "running":
-			fmt.Fprintln(env.Stdout, url)
+			fmt.Fprintln(env.Stdout, shown)
 		case "start error":
 			if printed[st.Err] {
 				return // frp retries; the same answer once is enough
@@ -271,6 +270,7 @@ func up(ctx context.Context, env Env, args []string) int {
 		TokenFile: s.AccessTokenPath(), CAFile: caFile, Version: env.Version,
 	}
 	if *ssh {
+		// In ssh mode the bridge chooses its own local port and dials the target, so PORT is the target's.
 		opts.SSH, opts.SSHTarget, opts.SSHPort, opts.SSHDomain = true, *target, port, b.SSHDomain
 	}
 	err = env.Run(ctx, opts, onStatus)
