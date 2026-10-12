@@ -29,14 +29,7 @@ func Pipe(conn *websocket.Conn, peer io.ReadWriteCloser) error {
 		for {
 			n, err := peer.Read(buf)
 			if n > 0 {
-				w, werr := conn.NextWriter(websocket.BinaryMessage)
-				if werr == nil {
-					_, werr = w.Write(buf[:n])
-					if werr == nil {
-						werr = w.Close()
-					}
-				}
-				if werr != nil {
+				if werr := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); werr != nil {
 					done <- werr
 					return
 				}
