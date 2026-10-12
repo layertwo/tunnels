@@ -301,6 +301,10 @@ func sshConfig(ctx context.Context, env Env, args []string) int {
 		fmt.Fprint(env.Stderr, usageSSHConfig+"\n")
 		return 2
 	}
+	if !validAliasDomain(*aliasDomain) {
+		fmt.Fprintf(env.Stderr, "--alias-domain %q is not an alias domain: use letters, digits, dots and hyphens, like layertwo.lan\n%s\n", *aliasDomain, usageSSHConfig)
+		return 2
+	}
 	s, err := store(env)
 	if err != nil {
 		fmt.Fprintln(env.Stderr, err)
@@ -322,6 +326,19 @@ func sshConfig(ctx context.Context, env Env, args []string) int {
 	}
 	fmt.Fprintf(env.Stdout, "Host *.%s\n\tProxyCommand tunnel dial %%n\n", *aliasDomain)
 	return 0
+}
+
+// validAliasDomain reports whether s is safe to paste into a Host pattern: ASCII letters, digits,
+// dots and hyphens, and no leading or trailing dot. Anything else — a newline above all — would
+// end the Host line and inject arbitrary config.
+func validAliasDomain(s string) bool {
+	if s == "" || strings.HasPrefix(s, ".") || strings.HasSuffix(s, ".") {
+		return false
+	}
+	return !strings.ContainsFunc(s, func(r rune) bool {
+		return !(r == '.' || r == '-' ||
+			r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9')
+	})
 }
 
 // warnRefreshFailed is KeepFresh's onErr for a running tunnel: it says the login could not be
