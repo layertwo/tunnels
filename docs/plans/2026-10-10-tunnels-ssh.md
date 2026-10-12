@@ -14,6 +14,13 @@
 > that file's `[ssh]` section rather than a required `SSH_DOMAIN`. Task 2 was rewritten and the Global
 > Constraints updated; see the [broker config design](2026-10-12-tunnels-broker-config-design.md).
 
+> **Superseded 2026-10-12.** SSH is now published at the one host `ssh.tunnels.layertwo.dev`, named
+> by the request path, so the per-label `<label>.ssh.<SSH_DOMAIN>` shape this plan builds is replaced.
+> Task 1's `SSHLabel(host, sshDomain)`, the Global Constraint on the SSH custom domain, the client
+> config's `customDomains = ["<label>.<SSH_DOMAIN>"]`, the `dial HOST PORT` and `ssh-config
+> [--name NAME]` commands and the `*.ssh.` homelab route below no longer hold; see the
+> [one-host design](2026-10-12-tunnels-ssh-one-host-design.md). Everything else stands.
+
 ## Global Constraints
 
 - Module `github.com/layertwo/tunnels`, `go 1.26.0`, default branch `mainline`, commits `feat(scope): ...`, one pull request per task.
