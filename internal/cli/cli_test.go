@@ -139,7 +139,7 @@ func (w *world) main(args ...string) int { return Main(args, w.env()) }
 func (w *world) loggedIn() auth.Tokens {
 	w.t.Helper()
 	tok := auth.Tokens{AccessToken: w.idp.Issue("sub-alice", mockidp.IssueOpts{}), RefreshToken: w.idp.IssueRefreshToken("sub-alice"),
-		Handle: "alice", Server: w.svc.URL}
+		Handle: "alice", Server: w.svc.URL, SSHDomain: w.sshDomain}
 	if err := (auth.Store{Dir: w.dir}).Save(tok); err != nil {
 		w.t.Fatal(err)
 	}
@@ -1723,16 +1723,18 @@ func TestDialNotLoggedIn(t *testing.T) {
 
 // dial discovers the server only when it must refresh: a fresh token dials with no .well-known
 // request, so a broken one cannot fail a dial that does not refresh; a stale token still surfaces
-// the discovery failure.
+// the discovery failure. The ssh host is checked against the domain stored at login, so a valid
+// dial never needs the bootstrap.
 func TestDialDiscoveryFails(t *testing.T) {
 	w := newWorld(t)
+	w.sshDomain = "ssh.tunnels.test"
 	tok := w.loggedIn()
 	tok.Server = "http://127.0.0.1:1"
 	if err := (auth.Store{Dir: w.dir}).Save(tok); err != nil {
 		t.Fatal(err)
 	}
-	// Fresh: TLS to the host is as far as it gets; no discovery is tried.
-	if c := w.main("dial", "host", "22"); c != 1 || strings.Contains(w.err.String(), "cannot reach") {
+	// Fresh: TLS to the (unresolvable) host is as far as it gets; no discovery is tried.
+	if c := w.main("dial", "alice.ssh.tunnels.test", "22"); c != 1 || strings.Contains(w.err.String(), "cannot reach") {
 		t.Errorf("fresh token: exit %d, stderr:\n%s", c, w.err)
 	}
 
@@ -1742,7 +1744,7 @@ func TestDialDiscoveryFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	w.err = &syncBuffer{}
-	if c := w.main("dial", "host", "22"); c != 1 || !strings.Contains(w.err.String(), "cannot reach http://127.0.0.1:1") {
+	if c := w.main("dial", "alice.ssh.tunnels.test", "22"); c != 1 || !strings.Contains(w.err.String(), "cannot reach http://127.0.0.1:1") {
 		t.Errorf("stale token: exit %d, stderr:\n%s", c, w.err)
 	}
 }
@@ -1750,12 +1752,13 @@ func TestDialDiscoveryFails(t *testing.T) {
 // A stale token is refreshed (which discovers the provider) before the socket is opened.
 func TestDialRefreshesWhenStale(t *testing.T) {
 	w := newWorld(t)
+	w.sshDomain = "ssh.tunnels.test"
 	before := w.loggedIn()
 	before.AccessToken = w.idp.Issue("sub-alice", mockidp.IssueOpts{TTL: -time.Hour})
 	if err := (auth.Store{Dir: w.dir}).Save(before); err != nil {
 		t.Fatal(err)
 	}
-	if c := w.main("dial", "host", "22"); c != 1 {
+	if c := w.main("dial", "alice.ssh.tunnels.test", "22"); c != 1 {
 		t.Errorf("exit %d, want 1", c)
 	}
 	after, err := (auth.Store{Dir: w.dir}).Load()
@@ -1764,24 +1767,47 @@ func TestDialRefreshesWhenStale(t *testing.T) {
 	}
 }
 
+// dial refuses to send the access token to a host that is not one of this service's ssh hosts; a
+// host carrying a port is refused the same way rather than reaching the URL parser.
+func TestDialRefusesForeignHost(t *testing.T) {
+	for _, host := range []string{"evil.example", "alice.other.test", "alice.ssh.tunnels.test:22", "ssh.tunnels.test"} {
+		t.Run(host, func(t *testing.T) {
+			w := newWorld(t)
+			w.sshDomain = "ssh.tunnels.test"
+			w.loggedIn()
+			if c := w.main("dial", host, "22"); c != 2 {
+				t.Errorf("exit %d, want 2", c)
+			}
+			if !strings.Contains(w.err.String(), host) {
+				t.Errorf("stderr does not name the host:\n%s", w.err)
+			}
+			if !strings.Contains(w.err.String(), "Usage: tunnel dial") {
+				t.Errorf("stderr has no dial usage line:\n%s", w.err)
+			}
+		})
+	}
+}
+
 // A directory where the CA bundle belongs makes the rename fail, so dial never opens a socket.
 func TestDialCannotWriteTheCABundle(t *testing.T) {
 	w := newWorld(t)
+	w.sshDomain = "ssh.tunnels.test"
 	w.loggedIn()
 	if err := os.Mkdir(filepath.Join(w.dir, "cacert.pem"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if c := w.main("dial", "host", "22"); c != 1 || !strings.Contains(w.err.String(), "CA bundle") {
+	if c := w.main("dial", "alice.ssh.tunnels.test", "22"); c != 1 || !strings.Contains(w.err.String(), "CA bundle") {
 		t.Errorf("exit %d, stderr:\n%s", c, w.err)
 	}
 }
 
 // The command dials the data route on 443, whatever PORT ssh passed; a host that answers nothing is
-// a connection error, not a crash.
+// a connection error, not a crash. The ssh domain is matched case-insensitively, as the broker does.
 func TestDialUnreachableHost(t *testing.T) {
 	w := newWorld(t)
+	w.sshDomain = "ssh.tunnels.test"
 	w.loggedIn()
-	if c := w.main("dial", "127.0.0.1", "22"); c != 1 {
+	if c := w.main("dial", "Alice.SSH.Tunnels.Test", "22"); c != 1 {
 		t.Errorf("exit %d, want 1", c)
 	}
 	if w.err.String() == "" {

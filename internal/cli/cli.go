@@ -178,7 +178,7 @@ func login(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintln(env.Stderr, err)
 		return 1
 	}
-	tok.Handle, tok.Server = me.Handle, base
+	tok.Handle, tok.Server, tok.SSHDomain = me.Handle, base, b.SSHDomain
 	if err := s.Save(tok); err != nil {
 		fmt.Fprintln(env.Stderr, err)
 		return 1
@@ -386,6 +386,12 @@ func dial(ctx context.Context, env Env, args []string) int {
 	if err != nil {
 		fmt.Fprintln(env.Stderr, err)
 		return 1
+	}
+	// ssh passes %h from ~/.ssh/config, so a mistyped or tampered HostName would otherwise send
+	// the access token to a third party. The login stored the service's ssh domain: a host outside
+	// it, or one carrying a port, is refused here before TLS and before any discovery.
+	if _, ok := names.SSHLabel(host, tok.SSHDomain); !ok {
+		return bad("%q is not an ssh host of this service", host)
 	}
 	// The provider is needed only to refresh, so it is discovered on first use: a fresh token dials
 	// with no .well-known request, and a momentarily broken endpoint cannot fail a dial that does
@@ -676,7 +682,7 @@ func machineCreate(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintln(env.Stderr, err)
 		return 1
 	}
-	_, _, tok, ok := session(ctx, env)
+	_, b, tok, ok := session(ctx, env)
 	if !ok {
 		return 1
 	}
@@ -696,7 +702,7 @@ func machineCreate(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintln(env.Stderr, err)
 		return 1
 	}
-	login := auth.Tokens{ClientID: m.ClientID, MachineKey: keyPath, Handle: m.Handle, Server: tok.Server}
+	login := auth.Tokens{ClientID: m.ClientID, MachineKey: keyPath, Handle: m.Handle, Server: tok.Server, SSHDomain: b.SSHDomain}
 	if err := s.Save(login); err != nil {
 		fmt.Fprintln(env.Stderr, err) // coverage-ignore: session just wrote here, so saving the machine login cannot fail
 		return 1
