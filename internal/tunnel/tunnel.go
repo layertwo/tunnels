@@ -63,6 +63,8 @@ func Build(o Options) (*v1.ClientCommonConfig, []v1.ProxyConfigurer, error) {
 		return nil, nil, errors.New("tunnel: an ssh tunnel needs the ssh domain")
 	case o.SSH && !validTargetHost(o.SSHTarget):
 		return nil, nil, fmt.Errorf("tunnel: %q is not an ssh target: use a bare host, without a port or a scheme", o.SSHTarget)
+	case o.SSH && (o.SSHPort < 1 || o.SSHPort > 65535):
+		return nil, nil, fmt.Errorf("ssh port %d: use a port from 1 to 65535", o.SSHPort)
 	}
 	proxy := map[string]any{
 		"name": cmp.Or(o.Name, names.Default), "type": "http", "localIP": "127.0.0.1", "localPort": o.LocalPort,

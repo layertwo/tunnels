@@ -116,7 +116,7 @@ func TestBuildSSHFields(t *testing.T) {
 
 func TestBuildSSHDefaultTunnel(t *testing.T) {
 	o := opts()
-	o.SSH, o.Name, o.SSHTarget, o.SSHDomain = true, "", "127.0.0.1", "ssh.tunnels.test"
+	o.SSH, o.Name, o.SSHTarget, o.SSHPort, o.SSHDomain = true, "", "127.0.0.1", 22, "ssh.tunnels.test"
 	_, p := build(t, o)
 	if p.Name != "default" || !reflect.DeepEqual(p.CustomDomains, []string{"alice.ssh.tunnels.test"}) {
 		t.Errorf("proxy %q custom domains %v, want default and alice.ssh.tunnels.test", p.Name, p.CustomDomains)
@@ -173,6 +173,12 @@ func TestBuildRefuses(t *testing.T) {
 		{"ssh target with a port", func(o *Options) { o.SSH, o.SSHDomain, o.SSHTarget = true, "ssh.tunnels.test", "192.168.1.5:22" }, "target"},
 		{"ssh target with a scheme", func(o *Options) { o.SSH, o.SSHDomain, o.SSHTarget = true, "ssh.tunnels.test", "http://x" }, "target"},
 		{"ssh without a target", func(o *Options) { o.SSH, o.SSHDomain = true, "ssh.tunnels.test" }, "target"},
+		{"ssh port 0", func(o *Options) {
+			o.SSH, o.SSHDomain, o.SSHTarget, o.SSHPort = true, "ssh.tunnels.test", "127.0.0.1", 0
+		}, "port"},
+		{"ssh port 70000", func(o *Options) {
+			o.SSH, o.SSHDomain, o.SSHTarget, o.SSHPort = true, "ssh.tunnels.test", "127.0.0.1", 70000
+		}, "port"},
 		// frp's own validation runs too: a value only it knows to refuse is refused here, not at connect.
 		{"a protocol frp does not speak", func(o *Options) { o.Protocol = "carrier-pigeon" }, "protocol"},
 	}
