@@ -163,3 +163,18 @@ func TestBridgeStopsWithContext(t *testing.T) {
 		t.Fatal("dialed the bridge after it stopped")
 	}
 }
+
+// TestBridgeBindsLoopbackOnly asserts the listener is loopback: the threat model lets frps reach it
+// over loopback and nothing else.
+func TestBridgeBindsLoopbackOnly(t *testing.T) {
+	b, err := newBridge("127.0.0.1", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+
+	addr := b.ln.Addr().(*net.TCPAddr)
+	if !addr.IP.IsLoopback() {
+		t.Errorf("bridge listens on %s, want a loopback address", addr.IP)
+	}
+}
