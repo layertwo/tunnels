@@ -499,6 +499,22 @@ func TestUpSSHRejectsEmptyTarget(t *testing.T) {
 	}
 }
 
+// --target names the ssh target, so without --ssh it would be silently ignored: refuse it, as share
+// refuses --for on unshare.
+func TestUpRejectsTargetWithoutSSH(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	if c := w.main("up", "22", "--target", "otherhost"); c != 2 {
+		t.Errorf("exit %d, want 2", c)
+	}
+	if !strings.Contains(w.err.String(), "--target is only for up --ssh") {
+		t.Errorf("stderr does not say the flag needs --ssh:\n%s", w.err)
+	}
+	if len(w.runs) != 0 {
+		t.Error("the tunnel was started with an ignored --target")
+	}
+}
+
 // The server has SSH off: publishing an ssh tunnel would be refused, so say so and stop.
 func TestUpSSHServerDisabled(t *testing.T) {
 	w := newWorld(t) // no ssh_domain in the bootstrap document

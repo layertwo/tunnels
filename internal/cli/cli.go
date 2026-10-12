@@ -202,6 +202,9 @@ func up(ctx context.Context, env Env, args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return bad("%v", err)
 	}
+	if fs.Changed("target") && !*ssh {
+		return bad("--target is only for up --ssh, not a site tunnel")
+	}
 	if fs.NArg() != 1 {
 		return bad("give the port to publish")
 	}
