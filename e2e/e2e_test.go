@@ -281,8 +281,8 @@ func (s *stack) upWithFile(t *testing.T, tokenFile, handle, name string) *run {
 	})
 }
 
-// upSSH publishes the ssh target at sshPort as handle's tunnel, reached at <label>.<sshDomain>. Run
-// replaces LocalPort with the loopback bridge's port, so it is left unset.
+// upSSH publishes the ssh target at sshPort as handle's tunnel, reached at /<label>/ on the one ssh
+// host. Run replaces LocalPort with the loopback bridge's port, so it is left unset.
 func (s *stack) upSSH(t *testing.T, token, handle, name string, sshPort int) *run {
 	t.Helper()
 	return s.start(t, tunnel.Options{
@@ -870,9 +870,9 @@ func TestSharing(t *testing.T) {
 	}
 }
 
-// echoListener accepts TCP connections and echoes each line back, standing in for the ssh service
-// the agent's bridge dials.
-func echoListener(t *testing.T) int {
+// greetingListener accepts TCP connections, writes greeting, then echoes each line back; the greeting
+// is what tells one target's bytes from another's.
+func greetingListener(t *testing.T, greeting string) int {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -885,42 +885,64 @@ func echoListener(t *testing.T) int {
 			if err != nil {
 				return
 			}
-			go func() { _, _ = io.Copy(conn, conn); _ = conn.Close() }()
+			go func() {
+				defer conn.Close()
+				if _, err := io.WriteString(conn, greeting); err != nil {
+					return
+				}
+				_, _ = io.Copy(conn, conn)
+			}()
 		}
 	}()
 	return ln.Addr().(*net.TCPAddr).Port
 }
 
-// TestSSHEndToEnd proves the whole ssh path against a real frps: the client's WebSocket handshake
-// reaches frps's vhost port, frps routes it by the ssh Host to alice's agent, the agent's loopback
-// bridge dials the ssh target, and the bytes come back. There is no Traefik in the harness, so the
-// test drives frps's host routing directly, as the site tests do.
+// TestSSHEndToEnd proves the whole ssh path against a real frps: two of one owner's ssh tunnels are
+// published at the one ssh host, and frps routes each request by its location — the client's
+// WebSocket handshake reaches frps's vhost port, frps hands it to the agent whose location the path
+// falls under, the agent's loopback bridge dials that agent's ssh target, and the bytes come back.
+// There is no Traefik in the harness, so the test drives frps's host routing directly, as the site
+// tests do.
 func TestSSHEndToEnd(t *testing.T) {
 	s := newStack(t, 5)
-	echoPort := echoListener(t)
-	s.upSSH(t, s.token("sub-alice"), "alice", "", echoPort).waitPhase(t, "running")
+	defaultPort := greetingListener(t, "default\n")
+	boxPort := greetingListener(t, "box1\n")
+	s.upSSH(t, s.token("sub-alice"), "alice", "", defaultPort).waitPhase(t, "running")
+	s.upSSH(t, s.token("sub-alice"), "alice", "box1", boxPort).waitPhase(t, "running")
 
-	host := "alice." + sshDomain
-	conn, resp, err := (&websocket.Dialer{HandshakeTimeout: 10 * time.Second}).Dial("ws://"+s.vhost+"/", http.Header{"Host": []string{host}})
-	if err != nil {
-		if resp != nil {
-			resp.Body.Close()
+	for _, tt := range []struct{ path, greeting string }{
+		{"/alice/", "default\n"},
+		{"/alice-box1/", "box1\n"},
+	} {
+		conn, resp, err := (&websocket.Dialer{HandshakeTimeout: 10 * time.Second}).Dial("ws://"+s.vhost+tt.path, http.Header{"Host": []string{sshDomain}})
+		if err != nil {
+			if resp != nil {
+				resp.Body.Close()
+			}
+			t.Fatalf("dial %s through frps: %v", tt.path, err)
 		}
-		t.Fatalf("dial %s through frps: %v", host, err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
 
-	// The client half of `tunnel dial`: the pipe's local end is what `ssh` would read and write.
-	local, remote := net.Pipe()
-	defer local.Close()
-	go ws.Pipe(conn, remote)
-
-	_ = local.SetDeadline(time.Now().Add(10 * time.Second))
-	if _, err := local.Write([]byte("hello-ssh\n")); err != nil {
-		t.Fatalf("write to the ssh tunnel: %v", err)
+		// The client half of `tunnel dial`: the pipe's local end is what `ssh` would read and write.
+		local, remote := net.Pipe()
+		go ws.Pipe(conn, remote)
+		_ = local.SetDeadline(time.Now().Add(10 * time.Second))
+		br := bufio.NewReader(local)
+		if line, err := br.ReadString('\n'); err != nil || line != tt.greeting {
+			t.Errorf("%s: the greeting = %q, %v; want %q", tt.path, line, err, tt.greeting)
+		}
+		if _, err := local.Write([]byte("hello-ssh\n")); err != nil {
+			t.Fatalf("write to the ssh tunnel: %v", err)
+		}
+		if line, err := br.ReadString('\n'); err != nil || line != "hello-ssh\n" {
+			t.Errorf("%s: the ssh echo = %q, %v; want %q", tt.path, line, err, "hello-ssh\n")
+		}
+		_ = conn.Close()
+		_ = local.Close()
 	}
-	line, err := bufio.NewReader(local).ReadString('\n')
-	if err != nil || line != "hello-ssh\n" {
-		t.Errorf("the ssh echo = %q, %v; want %q", line, err, "hello-ssh\n")
+	// A path no location matches is reached by no bridge: one owner's traffic must not land on another.
+	if conn, resp, err := (&websocket.Dialer{}).Dial("ws://"+s.vhost+"/alicex/", http.Header{"Host": []string{sshDomain}}); err == nil {
+		resp.Body.Close()
+		_ = conn.Close()
+		t.Error("dialled /alicex/, which no tunnel registered")
 	}
 }

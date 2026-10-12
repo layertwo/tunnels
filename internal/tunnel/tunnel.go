@@ -72,8 +72,9 @@ func Build(o Options) (*v1.ClientCommonConfig, []v1.ProxyConfigurer, error) {
 		"requestHeaders": map[string]any{"set": map[string]string{"x-forwarded-proto": "https"}},
 	}
 	if o.SSH {
-		// frps has one subDomainHost, so the SSH subtree is reached by a custom domain, not a subdomain.
-		proxy["customDomains"] = []any{names.Label(o.Handle, o.Name) + "." + o.SSHDomain}
+		// frps has one subDomainHost, so the SSH subtree is one custom domain told apart by location.
+		proxy["customDomains"] = []any{o.SSHDomain}
+		proxy["locations"] = []any{"/" + names.Label(o.Handle, o.Name) + "/"}
 	} else {
 		proxy["subdomain"] = names.Label(o.Handle, o.Name)
 	}

@@ -156,8 +156,8 @@ func (h *Hooks) newProxy(ctx context.Context, raw json.RawMessage) (plugin.Respo
 		if !ownsProxy(handle, c.ProxyName, c.SubDomain) {
 			return h.reject(ctx, plugin.OpNewProxy, "name "+c.ProxyName+" is not yours", nil, who...), nil
 		}
-	case c.ProxyType == "http" && c.SubDomain == "" && len(c.Locations) == 0 && len(c.CustomDomains) == 1:
-		if !ownsSSHProxy(handle, c.ProxyName, c.CustomDomains[0], h.SSHDomain) {
+	case c.ProxyType == "http" && c.SubDomain == "" && len(c.CustomDomains) == 1 && len(c.Locations) == 1:
+		if !ownsSSHProxy(handle, c.ProxyName, c.CustomDomains[0], c.Locations[0], h.SSHDomain) {
 			return h.reject(ctx, plugin.OpNewProxy, "name "+c.ProxyName+" is not yours", nil, who...), nil
 		}
 	default:
@@ -195,13 +195,12 @@ func ownsProxy(handle, proxy, subdomain string) bool {
 	return ok && subdomain == names.Label(handle, tunnel)
 }
 
-// ownsSSHProxy is ownsProxy for an SSH tunnel: the same name, but the custom domain must be exactly
-// <label>.<sshDomain> with an empty subdomain. sshDomain empty (the feature off) refuses every
-// custom domain. The comparison is exact, so a port, a trailing dot, an extra label, uppercase or
-// another owner's label is refused.
-func ownsSSHProxy(handle, proxy, domain, sshDomain string) bool {
+// ownsSSHProxy is ownsProxy for an SSH tunnel: the same name, published at the one ssh host with the
+// publisher's own label as its location. The location must carry the trailing boundary, or a
+// location /alice would answer for /alicex. sshDomain empty (the feature off) refuses every domain.
+func ownsSSHProxy(handle, proxy, domain, location, sshDomain string) bool {
 	tunnel, ok := proxyTunnel(handle, proxy)
-	return ok && sshDomain != "" && domain == names.Label(handle, tunnel)+"."+sshDomain
+	return ok && sshDomain != "" && domain == sshDomain && location == "/"+names.Label(handle, tunnel)+"/"
 }
 
 func (h *Hooks) closeProxy(ctx context.Context, raw json.RawMessage) (plugin.Response, error) {

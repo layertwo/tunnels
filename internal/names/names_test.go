@@ -148,27 +148,30 @@ func TestSiteLabel(t *testing.T) {
 }
 
 func TestSSHLabel(t *testing.T) {
-	const sshDomain = "ssh.tunnels.test"
 	tests := []struct {
-		host, label string
-		ok          bool
+		path  string
+		label string
+		ok    bool
 	}{
-		{"alice-box1.ssh.tunnels.test", "alice-box1", true},
-		{"Alice-Box1.SSH.Tunnels.Test", "alice-box1", true},
-		{"alice.ssh.tunnels.test", "alice", true},
-		{"alice-box1.ssh.tunnels.test:443", "", false},
-		{"alice-box1.ssh.tunnels.test.", "", false},
-		{"x.alice-box1.ssh.tunnels.test", "", false},
-		{"ssh.tunnels.test", "", false},
-		{"alice.w.tunnels.test", "", false},
-		{"alice.ssh.tunnels.test.evil.com", "", false},
-		{"a.com, b.com", "", false},
+		{"/alice-box1/", "alice-box1", true},
+		{"/alice/", "alice", true},
+		{"/alice-box1/anything", "alice-box1", true},
+		{"/alice-box1", "", false},             // no boundary: frps's location ends in "/"
+		{"alice-box1/", "", false},             // no leading slash
+		{"/alice-box1x/", "alice-box1x", true}, // its own label, and a different route
+		{"/Alice-Box1/", "", false},
+		{"/alice-box1:/", "", false},
+		{"/alice-box1./", "", false},
+		{"/x/", "", false},
+		{"/", "", false},
+		{"//alice/", "", false},
 		{"", "", false},
+		{"/\u212Aelvin/", "", false}, // strings.ToLower would make this "kelvin"
 	}
 	for _, tt := range tests {
-		label, ok := SSHLabel(tt.host, sshDomain)
+		label, ok := SSHLabel(tt.path)
 		if label != tt.label || ok != tt.ok {
-			t.Errorf("SSHLabel(%q) = %q, %v; want %q, %v", tt.host, label, ok, tt.label, tt.ok)
+			t.Errorf("SSHLabel(%q) = %q, %v; want %q, %v", tt.path, label, ok, tt.label, tt.ok)
 		}
 	}
 }
