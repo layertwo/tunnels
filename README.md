@@ -68,8 +68,25 @@ cosign verify ghcr.io/layertwo/tunnels-broker:latest \
 ## Run the broker
 
 The images are `ghcr.io/layertwo/tunnels-broker` and `ghcr.io/layertwo/tunnels-frps` (linux/amd64
-and linux/arm64, distroless, uid 65532). The broker reads its settings from the environment and, when
-one is missing or wrong, refuses to start with an error that names every such variable.
+and linux/arm64, distroless, uid 65532). The broker reads its settings from a TOML configuration file —
+`--config PATH`, else `$BROKER_CONFIG`, else `/etc/tunnels/broker.toml` — and from the environment, and
+when one is missing or wrong, refuses to start with an error that names every such variable.
+
+| Section | Keys |
+|---------|------|
+| `[server]` | `listen_addr`, `log_level` |
+| `[identity]` | `issuer`, `api_resource`, `creators_group`, `cli_client_id`, `min_cli_version`, `username_claim`, `groups_claim` |
+| `[tunnels]` | `service_host`, `sites_domain`, `max_tunnels_per_user`, `bandwidth_limit`, `reserved_handles` |
+| `[machines]` | `enabled`, `pocket_id_url`, `pocket_id_api_id` |
+| `[metrics]` | `enabled` |
+
+A **feature with no section is off when a configuration file is present**: with no `[machines]` the
+`/api/machines` endpoints answer 404, and with no `[metrics]` `GET /metrics` answers 404 (`enabled = false`
+is off the same way). The file is optional — the default path may be absent — and with **no file at all**
+the broker behaves as before: `/metrics` is served and the machine endpoints follow `POCKET_ID_URL`. The
+environment **overrides** a file value and keeps every setting's name; the four
+secrets (`DATABASE_URL`, `POCKET_ID_API_KEY`, `FRPS_DASHBOARD_PASSWORD`, `PLUGIN_SECRET`) come from the
+environment only and must not appear in the file.
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
@@ -80,9 +97,9 @@ one is missing or wrong, refuses to start with an error that names every such va
 | `CREATORS_GROUP` | required | the group whose members may publish |
 | `CLI_CLIENT_ID` | required | the public OIDC client the CLI logs in with (device flow) |
 | `DATABASE_URL` | required | Postgres; the schema is migrated at start |
-| `POCKET_ID_URL` | required | the Pocket ID instance whose admin API mints a machine's client; an http(s) URL without credentials |
-| `POCKET_ID_API_KEY` | required | the admin API key the broker creates machine clients with (admin-grade; rotate it); never logged |
-| `POCKET_ID_API_ID` | required | the Tunnels API a machine's client is granted access to |
+| `POCKET_ID_URL` | required for `[machines]` | the Pocket ID instance whose admin API mints a machine's client; an http(s) URL without credentials |
+| `POCKET_ID_API_KEY` | required for `[machines]` | the admin API key the broker creates machine clients with (admin-grade; rotate it); never logged |
+| `POCKET_ID_API_ID` | required for `[machines]` | the Tunnels API a machine's client is granted access to |
 | `FRPS_DASHBOARD_URL`, `FRPS_DASHBOARD_USER`, `FRPS_DASHBOARD_PASSWORD` | required | frps's dashboard; an http(s) URL without credentials |
 | `PLUGIN_SECRET` | required | 32 or more of `A-Z a-z 0-9 - _`; frps calls `/plugin/<secret>` |
 | `USERNAME_CLAIM`, `GROUPS_CLAIM` | `preferred_username`, `groups` | the userinfo claims for the username and the groups |
@@ -93,9 +110,10 @@ one is missing or wrong, refuses to start with an error that names every such va
 | `LISTEN_ADDR`, `LOG_LEVEL` | `:8080`, `info` | |
 
 It serves `/plugin/<secret>` (frps's HTTP plugin for Login, NewProxy, CloseProxy, Ping and
-NewWorkConn), `/authz` (Traefik's forwardAuth), `GET /api/me`, `GET|POST|DELETE /api/machines`,
-`GET|PUT|DELETE /api/shares`, `GET /.well-known/tunnels.json`,
-`GET /healthz` and `GET /metrics` (Prometheus, with bounded and secret-free labels). frps needs
+NewWorkConn), `/authz` (Traefik's forwardAuth), `GET /api/me`, `GET|POST|DELETE /api/machines` (when
+`[machines]` is on, or with no config file and `POCKET_ID_URL` set), `GET|PUT|DELETE /api/shares`,
+`GET /.well-known/tunnels.json`, `GET /healthz` and `GET /metrics` (Prometheus, with bounded and
+secret-free labels; when `[metrics]` is on, or with no config file). frps needs
 OIDC auth with `additionalScopes = ["HeartBeats", "NewWorkConns"]` and
 the broker as its plugin; the [design](docs/design.md#frps) has its configuration and what the
 deployment must set around it.

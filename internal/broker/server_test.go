@@ -26,6 +26,7 @@ func testConfig(issuer string) Config {
 		UsernameClaim: "preferred_username", GroupsClaim: "groups",
 		CLIClientID: "tunnels-cli", MinCLIVersion: "0.2.0",
 		PocketIDURL: "https://idp.example.com", PocketIDAPIKey: "pocket-key", PocketIDAPIID: "api-1",
+		MachinesEnabled: true, MetricsEnabled: true,
 		PluginSecret: pluginSecret, MaxTunnelsPerUser: 5, BandwidthLimit: "10MB",
 		Reserved: []string{"admin"},
 	}
@@ -34,6 +35,7 @@ func testConfig(issuer string) Config {
 // serverRig is the whole handler over a real idp.Client talking to the mock identity provider.
 type serverRig struct {
 	h        http.Handler
+	d        Deps
 	idp      *mockidp.Server
 	client   *idp.Client
 	users    *fakeUsers
@@ -55,10 +57,11 @@ func newServerRig(t *testing.T) *serverRig {
 		t.Fatal(err)
 	}
 	r := &serverRig{idp: m, client: client, users: newUsers(), machines: newMachines(), pocket: &fakePocketID{clientID: "client-123"}, shares: &fakeShares{}, frps: &fakeFrps{online: map[string]string{}}, cfg: testConfig(m.URL), logs: &bytes.Buffer{}}
-	r.h = NewHandler(r.cfg, Deps{
+	r.d = Deps{
 		IdP: client, Verifier: client, Users: r.users, Machines: r.machines, PocketID: r.pocket, Shares: r.shares, Frps: r.frps,
 		Log: slog.New(slog.NewJSONHandler(r.logs, nil)),
-	})
+	}
+	r.h = NewHandler(r.cfg, r.d)
 	return r
 }
 
@@ -110,6 +113,53 @@ func TestRoutes(t *testing.T) {
 			w := r.do(tt.method, tt.target, tt.hdr, tt.body)
 			if w.Code != tt.code || !strings.Contains(w.Body.String(), tt.contains) {
 				t.Errorf("= %d %q, want %d containing %q", w.Code, w.Body, tt.code, tt.contains)
+			}
+		})
+	}
+}
+
+// A feature's routes are mounted only while it is on. A feature with no section, or enabled = false, is
+// off, so the mux's 404 answers. Nothing else changes: the site and share routes serve either way, and
+// an on [machines] with no Pocket ID client keeps the handlers' noPocketID 503 (see
+// TestMachinesUnconfigured).
+func TestFeatureRoutesMountOnlyWhenEnabled(t *testing.T) {
+	r := newServerRig(t)
+	r.users.users["sub-alice"] = store.User{Sub: "sub-alice", Handle: "alice"}
+	alice := bearer(r.idp.Issue("sub-alice", mockidp.IssueOpts{}))
+	handler := func(machines, metrics bool) http.Handler {
+		cfg := r.cfg
+		cfg.MachinesEnabled, cfg.MetricsEnabled = machines, metrics
+		return NewHandler(cfg, r.d)
+	}
+
+	tests := []struct {
+		name              string
+		machines, metrics bool
+		method, target    string
+		body              string
+		code              int
+	}{
+		{"machines off: create", false, true, "POST", "/api/machines", `{"handle":"nas","publicKey":` + goodJWK + `}`, 404},
+		{"machines off: list", false, true, "GET", "/api/machines", "", 404},
+		{"machines off: delete", false, true, "DELETE", "/api/machines/nas", "", 404},
+		{"machines off: disable", false, true, "PUT", "/api/machines/nas", `{"disabled":true}`, 404},
+		{"machines off leaves metrics on", false, true, "GET", "/metrics", "", 200},
+		{"metrics off: metrics gone", true, false, "GET", "/metrics", "", 404},
+		{"metrics off leaves machines on", true, false, "POST", "/api/machines", `{"handle":"nas","publicKey":` + goodJWK + `}`, 201},
+		{"machines off leaves the site", false, true, "GET", "/api/me", "", 200},
+		{"metrics off leaves the site", true, false, "GET", "/api/me", "", 200},
+		{"machines off leaves shares", false, true, "GET", "/api/shares", "", 200},
+		{"metrics off leaves shares", true, false, "GET", "/api/shares", "", 200},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := handler(tt.machines, tt.metrics)
+			req := httptest.NewRequest(tt.method, tt.target, strings.NewReader(tt.body))
+			req.Header = alice
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if w.Code != tt.code {
+				t.Errorf("%s %s (machines=%v metrics=%v) = %d %q, want %d", tt.method, tt.target, tt.machines, tt.metrics, w.Code, w.Body, tt.code)
 			}
 		})
 	}

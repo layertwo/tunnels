@@ -1,11 +1,15 @@
 // Command broker is the tunnel service's brain: the frps plugin, the access decision behind /authz,
-// and the small API and bootstrap document the CLI uses. Settings come from the environment.
+// and the small API and bootstrap document the CLI uses. Settings come from the environment and,
+// when one is present, a configuration file.
 package main
 
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -24,6 +28,39 @@ import (
 // version is set at build time: -ldflags "-X main.version=v1.2.3".
 var version = "dev"
 
+// defaultConfigPath is used when neither --config nor BROKER_CONFIG names a file. A missing file here is
+// not fatal — the broker runs from the environment alone, as before the file existed.
+const defaultConfigPath = "/etc/tunnels/broker.toml"
+
+// readConfig resolves the configuration file's path (--config, else BROKER_CONFIG, else the default),
+// reads and parses it. Only the default path may be absent; an explicit path must exist, and any
+// read or parse error is fatal. Errors name the path, never a value.
+func readConfig() (*broker.FileConfig, error) {
+	flags := flag.NewFlagSet("broker", flag.ContinueOnError)
+	flags.SetOutput(io.Discard) // the error is logged as JSON by the caller, not printed as usage
+	path := flags.String("config", os.Getenv("BROKER_CONFIG"), "broker configuration file, else $BROKER_CONFIG, else "+defaultConfigPath)
+	if err := flags.Parse(os.Args[1:]); err != nil {
+		return nil, err
+	}
+	explicit := *path != ""
+	if !explicit {
+		*path = defaultConfigPath
+	}
+
+	data, err := os.ReadFile(*path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) && !explicit {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("config %s: %w", *path, err)
+	}
+	file, err := broker.ParseFile(data)
+	if err != nil {
+		return nil, fmt.Errorf("config %s: %w", *path, err)
+	}
+	return file, nil
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--version" {
 		fmt.Println(version)
@@ -38,7 +75,11 @@ func main() {
 }
 
 func run() error {
-	cfg, err := broker.LoadConfig(os.Getenv)
+	file, err := readConfig()
+	if err != nil {
+		return err
+	}
+	cfg, err := broker.LoadConfig(os.Getenv, file)
 	if err != nil {
 		return err
 	}
@@ -59,8 +100,8 @@ func run() error {
 		return err
 	}
 	frps := frpsapi.New(cfg.FrpsDashboardURL, cfg.FrpsDashboardUser, cfg.FrpsDashboardPassword, userAgent)
-	// Machines are optional: with no admin config the broker still serves people, and the machine
-	// endpoints answer "not configured".
+	// Machines are optional: with no admin config the broker still serves people, and with the
+	// feature off the machine routes are not mounted, so they answer 404.
 	var pocket broker.PocketID
 	if cfg.PocketIDURL != "" {
 		pocket = pocketid.New(cfg.PocketIDURL, cfg.PocketIDAPIKey, httpx.Client(userAgent, 10*time.Second))

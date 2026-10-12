@@ -20,8 +20,9 @@ secrets and can override a value.
 ## Goals
 
 - One file holds the broker's whole config — the server, its limits, and each feature.
-- **A feature with no section, or `enabled = false`, is off.** The broker starts; that feature's
-  endpoints answer "not configured" (the existing `noPocketID`/`noSharesStore` shape).
+- **A feature with no section, or `enabled = false`, is off.** The broker starts; that feature's routes
+  are not mounted, so they answer **404** (its handlers keep the `noPocketID` 503 for a section that is
+  on but has no Pocket ID client).
 - **No secret in the file.** The database URL, the Pocket ID API key, the frps dashboard password and
   the plugin secret come from the environment (a mounted Secret).
 - The environment **overrides** a file value, so containers and per-environment deploys work.
@@ -85,8 +86,8 @@ secrets and can override a value.
   enabled = true
   ```
 
-- **Absence is off.** No `[machines]` section, or `enabled = false`, means the machine endpoints are
-  not configured. A disabled section's other keys are ignored.
+- **Absence is off.** No `[machines]` section, or `enabled = false`, means the machine routes are not
+  mounted (404). A disabled section's other keys are ignored.
 - **Secrets are not in the file:** `DATABASE_URL`, `POCKET_ID_API_KEY`, `FRPS_DASHBOARD_PASSWORD`,
   `PLUGIN_SECRET` come from the environment. The file schema has no key for them.
 - **Precedence:** for each setting, an environment variable of the current name overrides the file
@@ -100,8 +101,9 @@ secrets and can override a value.
 the environment overrides; validate as today; build `Config`. A feature whose section is absent leaves
 its dependency `nil` (as `Deps.PocketID` is today when unset).
 
-**A feature off.** Its endpoints answer "not configured" — the pattern `noPocketID`/`noSharesStore`
-already uses; the rest of the broker serves normally.
+**A feature off.** Its routes are not mounted, so they answer **404**; the rest of the broker serves
+normally. (The machine handlers keep the `noPocketID` 503 for a section that is on but has no Pocket ID
+client.)
 
 **Migration.** The homelab's non-secret settings move into a mounted `broker.toml`; the sops Secret
 keeps the four secret values. This is one deploy with the release, and the ordering is the usual one.

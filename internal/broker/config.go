@@ -32,6 +32,11 @@ type Config struct {
 	PocketIDAPIKey string // the admin API key; never logged
 	PocketIDAPIID  string // the Tunnels API a machine's client is granted access to
 
+	// MachinesEnabled and MetricsEnabled are on only when the file has the feature's section and it is
+	// not enabled = false. With no file they keep the environment-only behaviour of before the file.
+	MachinesEnabled bool
+	MetricsEnabled  bool
+
 	FrpsDashboardURL      string
 	FrpsDashboardUser     string
 	FrpsDashboardPassword string
@@ -60,23 +65,31 @@ func badDashboardURL(raw string) bool {
 	return raw != "" && (err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery)
 }
 
-// LoadConfig reads the settings through getenv. It reports every problem at once, by variable name and
-// never with a secret in the text.
-func LoadConfig(getenv func(string) string) (Config, error) {
+// pick returns the environment value when it is set, else the file's value when the key is present (a
+// nil pointer is an absent key), else the built-in default. The environment always wins, so a
+// container or a per-environment deploy can override a file setting.
+func pick(getenv func(string) string, env string, file *string, def string) string {
+	if v := getenv(env); v != "" {
+		return v
+	}
+	if file != nil {
+		return *file
+	}
+	return def
+}
+
+// LoadConfig merges the configuration file (which may be nil) with the environment, the environment
+// winning, and validates the result. It reports every problem at once, by variable name and never with
+// a secret in the text. A feature is on only when the file has its section and it is not enabled =
+// false; a set enabling variable with no section, or an enabled feature missing an input, is an error.
+func LoadConfig(getenv func(string) string, file *FileConfig) (Config, error) {
 	var errs []error
 	bad := func(name, rule string) { errs = append(errs, fmt.Errorf("%s %s", name, rule)) }
-	required := func(name string) string {
-		v := getenv(name)
+	required := func(name, v string) string {
 		if v == "" {
 			bad(name, "is required")
 		}
 		return v
-	}
-	optional := func(name, def string) string {
-		if v := getenv(name); v != "" {
-			return v
-		}
-		return def
 	}
 	host := func(name string, v string) string {
 		if v != "" && !hostRE.MatchString(v) {
@@ -85,50 +98,117 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		return strings.ToLower(v)
 	}
 
-	c := Config{
-		ServiceHost:   host("SERVICE_HOST", required("SERVICE_HOST")),
-		SitesDomain:   host("SITES_DOMAIN", required("SITES_DOMAIN")),
-		Issuer:        required("ISSUER"),
-		APIResource:   required("API_RESOURCE"),
-		CreatorsGroup: required("CREATORS_GROUP"),
-		UsernameClaim: optional("USERNAME_CLAIM", "preferred_username"),
-		GroupsClaim:   optional("GROUPS_CLAIM", "groups"),
-		CLIClientID:   required("CLI_CLIENT_ID"),
-		MinCLIVersion: optional("MIN_CLI_VERSION", "0.0.0"),
-
-		DatabaseURL: required("DATABASE_URL"),
-
-		// The machine-admin config is optional: with none of it set the broker serves people only, and
-		// the machine endpoints answer "not configured". Set all three, or none.
-		PocketIDURL:    optional("POCKET_ID_URL", ""),
-		PocketIDAPIKey: optional("POCKET_ID_API_KEY", ""),
-		PocketIDAPIID:  optional("POCKET_ID_API_ID", ""),
-
-		FrpsDashboardURL:      required("FRPS_DASHBOARD_URL"),
-		FrpsDashboardUser:     required("FRPS_DASHBOARD_USER"),
-		FrpsDashboardPassword: required("FRPS_DASHBOARD_PASSWORD"),
-		PluginSecret:          required("PLUGIN_SECRET"),
-
-		BandwidthLimit: optional("DEFAULT_BANDWIDTH_LIMIT", "10MB"),
-		ListenAddr:     optional("LISTEN_ADDR", ":8080"),
+	// A section is nil when the file or the section is absent; a zero section then has every key nil,
+	// so each setting below reads as "environment, else file, else default".
+	var (
+		server   serverFile
+		identity identityFile
+		tunnels  tunnelsFile
+		machines machinesFile
+	)
+	if file != nil {
+		if file.Server != nil {
+			server = *file.Server
+		}
+		if file.Identity != nil {
+			identity = *file.Identity
+		}
+		if file.Tunnels != nil {
+			tunnels = *file.Tunnels
+		}
+		if file.Machines != nil {
+			machines = *file.Machines
+		}
 	}
+	hasMachines := file != nil && file.Machines != nil
+
+	c := Config{
+		ServiceHost:   host("SERVICE_HOST", required("SERVICE_HOST", pick(getenv, "SERVICE_HOST", tunnels.ServiceHost, ""))),
+		SitesDomain:   host("SITES_DOMAIN", required("SITES_DOMAIN", pick(getenv, "SITES_DOMAIN", tunnels.SitesDomain, ""))),
+		Issuer:        required("ISSUER", pick(getenv, "ISSUER", identity.Issuer, "")),
+		APIResource:   required("API_RESOURCE", pick(getenv, "API_RESOURCE", identity.APIResource, "")),
+		CreatorsGroup: required("CREATORS_GROUP", pick(getenv, "CREATORS_GROUP", identity.CreatorsGroup, "")),
+		UsernameClaim: pick(getenv, "USERNAME_CLAIM", identity.UsernameClaim, "preferred_username"),
+		GroupsClaim:   pick(getenv, "GROUPS_CLAIM", identity.GroupsClaim, "groups"),
+		CLIClientID:   required("CLI_CLIENT_ID", pick(getenv, "CLI_CLIENT_ID", identity.CLIClientID, "")),
+		MinCLIVersion: pick(getenv, "MIN_CLI_VERSION", identity.MinCLIVersion, "0.0.0"),
+
+		// The database URL is a secret: the environment only, never the file.
+		DatabaseURL: required("DATABASE_URL", getenv("DATABASE_URL")),
+
+		// The machine-admin settings. The API key is a secret; the URL and the API id may come from the
+		// file's [machines] section. Whether the feature is on is decided below.
+		PocketIDURL:    pick(getenv, "POCKET_ID_URL", machines.PocketIDURL, ""),
+		PocketIDAPIKey: getenv("POCKET_ID_API_KEY"),
+		PocketIDAPIID:  pick(getenv, "POCKET_ID_API_ID", machines.PocketIDAPIID, ""),
+
+		FrpsDashboardURL:      required("FRPS_DASHBOARD_URL", getenv("FRPS_DASHBOARD_URL")),
+		FrpsDashboardUser:     required("FRPS_DASHBOARD_USER", getenv("FRPS_DASHBOARD_USER")),
+		FrpsDashboardPassword: required("FRPS_DASHBOARD_PASSWORD", getenv("FRPS_DASHBOARD_PASSWORD")),
+		PluginSecret:          required("PLUGIN_SECRET", getenv("PLUGIN_SECRET")),
+
+		BandwidthLimit: pick(getenv, "DEFAULT_BANDWIDTH_LIMIT", tunnels.BandwidthLimit, "10MB"),
+		ListenAddr:     pick(getenv, "LISTEN_ADDR", server.ListenAddr, ":8080"),
+	}
+
+	// A feature is on iff the file has its section and enabled is not false. With no file at all the
+	// broker runs from the environment, exactly as before the file existed.
+	switch {
+	case file == nil:
+		c.MachinesEnabled = c.PocketIDURL != ""
+	case !hasMachines:
+		// POCKET_ID_URL is the non-secret variable that turns machines on. With no section a typo or a
+		// half-migration must be loud, naming both, rather than silently disabling the feature. A
+		// secret alone never enables, so it needs no section.
+		if c.PocketIDURL != "" {
+			bad("POCKET_ID_URL", "is set but the config file has no [machines] section; add one or unset POCKET_ID_URL")
+		}
+	default:
+		c.MachinesEnabled = machines.Enabled == nil || *machines.Enabled
+	}
+	// With no file at all, metrics keep today's behaviour: always mounted. A file turns the feature on
+	// only with a [metrics] section that is not enabled = false.
+	c.MetricsEnabled = file == nil || (file.Metrics != nil && (file.Metrics.Enabled == nil || *file.Metrics.Enabled))
 
 	// The credentials are separate variables; none in the URL, which would also end up in errors and logs.
 	if badDashboardURL(c.FrpsDashboardURL) {
 		bad("FRPS_DASHBOARD_URL", "must be an http or https URL with a host and nothing else: no credentials, query or fragment") // not repeated: it may hold a password
 	}
-	if badDashboardURL(c.PocketIDURL) {
+	// A disabled [machines] ignores its other keys, so a malformed URL is not a startup error. The URL
+	// is still validated whenever the feature is on, from either source.
+	if c.MachinesEnabled && badDashboardURL(c.PocketIDURL) {
 		bad("POCKET_ID_URL", "must be an http or https URL with a host and nothing else: no credentials, query or fragment")
 	}
-	// The machine-admin config is all-or-nothing: a half-set one is a mistake, not "machines off".
-	if machines := c.PocketIDURL != ""; machines != (c.PocketIDAPIKey != "") || machines != (c.PocketIDAPIID != "") {
-		bad("POCKET_ID_URL", "must be set with POCKET_ID_API_KEY and POCKET_ID_API_ID, or all three left unset")
+	if file == nil {
+		// With no file, the machine-admin config is the old all-or-nothing environment group: a half-set
+		// one is a mistake, not "machines off".
+		if on := c.PocketIDURL != ""; on != (c.PocketIDAPIKey != "") || on != (c.PocketIDAPIID != "") {
+			bad("POCKET_ID_URL", "must be set with POCKET_ID_API_KEY and POCKET_ID_API_ID, or all three left unset")
+		}
+	} else if c.MachinesEnabled {
+		// An enabled feature is missing a required input: name the environment variable that supplies it.
+		for _, in := range []struct{ name, v string }{
+			{"POCKET_ID_URL", c.PocketIDURL},
+			{"POCKET_ID_API_KEY", c.PocketIDAPIKey},
+			{"POCKET_ID_API_ID", c.PocketIDAPIID},
+		} {
+			if in.v == "" {
+				bad(in.name, "is required when [machines] is enabled")
+			}
+		}
 	}
 	if c.PluginSecret != "" && !secretRE.MatchString(c.PluginSecret) {
 		bad("PLUGIN_SECRET", `must be at least 32 characters from A-Z, a-z, 0-9, "-" and "_"`)
 	}
 
-	n, err := strconv.Atoi(optional("MAX_TUNNELS_PER_USER", "5"))
+	maxRaw := getenv("MAX_TUNNELS_PER_USER")
+	if maxRaw == "" && tunnels.MaxTunnelsPerUser != nil {
+		maxRaw = strconv.Itoa(*tunnels.MaxTunnelsPerUser)
+	}
+	if maxRaw == "" {
+		maxRaw = "5"
+	}
+	n, err := strconv.Atoi(maxRaw)
 	if err != nil || n < 1 {
 		bad("MAX_TUNNELS_PER_USER", "must be a whole number, 1 or more")
 	}
@@ -139,7 +219,16 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		bad("DEFAULT_BANDWIDTH_LIMIT", "must be a positive number of KB or MB, such as 10MB")
 	}
 
-	for _, h := range strings.Split(optional("RESERVED_HANDLES", "admin,root,support,security"), ",") {
+	var handles []string
+	switch {
+	case getenv("RESERVED_HANDLES") != "":
+		handles = strings.Split(getenv("RESERVED_HANDLES"), ",")
+	case tunnels.ReservedHandles != nil:
+		handles = tunnels.ReservedHandles
+	default:
+		handles = []string{"admin", "root", "support", "security"}
+	}
+	for _, h := range handles {
 		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
 			c.Reserved = append(c.Reserved, h)
 		}
@@ -148,7 +237,7 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	if _, _, err := net.SplitHostPort(c.ListenAddr); err != nil {
 		bad("LISTEN_ADDR", "must be host:port, such as :8080")
 	}
-	if err := c.LogLevel.UnmarshalText([]byte(optional("LOG_LEVEL", "info"))); err != nil {
+	if err := c.LogLevel.UnmarshalText([]byte(pick(getenv, "LOG_LEVEL", server.LogLevel, "info"))); err != nil {
 		bad("LOG_LEVEL", "must be debug, info, warn or error")
 	}
 
