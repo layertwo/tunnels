@@ -627,8 +627,9 @@ All of them fail closed.
   scrape plus NetworkPolicy).
 - **Later:** SSH, a web UI, live tunnel status, frps HA by client fan-out. **v0.4.0** also moves the
   broker's settings into a configuration file — one section per feature, and a feature with no section
-  is **off** (see the [broker config design](plans/2026-10-12-tunnels-broker-config-design.md)). The
-  environment keeps the secrets and overrides a file value.
+  is **off** when a file is present (with no file, behaviour is unchanged) (see the [broker config
+  design](plans/2026-10-12-tunnels-broker-config-design.md)). The environment keeps the secrets and
+  overrides a file value.
 
 ## Verification
 
