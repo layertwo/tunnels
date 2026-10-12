@@ -15,9 +15,9 @@ case, and it has to be 2 to 20 letters and digits. Download the archive for your
 tunnel login                    # shows a URL and a code to approve in your browser
 tunnel up 3000                  # https://<handle>.w.tunnels.layertwo.dev serves http://127.0.0.1:3000
 tunnel up 3000 --name blog      # https://<handle>-blog.w.tunnels.layertwo.dev
-tunnel up 22 --ssh              # publishes your ssh server on 127.0.0.1:22 as <handle>.ssh.tunnels.layertwo.dev
-tunnel ssh-config --name box1   # prints the ~/.ssh/config block; paste it, then ssh <handle>-box1
-tunnel dial HOST PORT           # the ProxyCommand that block runs; ssh runs it, you do not
+tunnel up 22 --ssh              # publishes your ssh server on 127.0.0.1:22 as alice.layertwo.lan
+tunnel ssh-config --alias-domain layertwo.lan   # prints the ~/.ssh/config block; paste it, then ssh alice.layertwo.lan
+tunnel dial NAME                # the ProxyCommand that block runs; ssh runs it, you do not
 tunnel share <label> <grantee>  # lets a user or --group reach one site, named by its label
 tunnel share --for 7d <label> <grantee>   # the share ends after a duration (7d, 24h, ...)
 tunnel unshare <label> <grantee>          # stops sharing it
@@ -39,11 +39,12 @@ A site's label is `<handle>` for the default tunnel, `<handle>-<name>` for a nam
 
 `tunnel up PORT --ssh` publishes an SSH server instead of a site: PORT is the **target's** SSH port,
 and `--target HOST` (default `127.0.0.1`) names the host the agent dials — a bare host, with no port
-or scheme. The tunnel serves `<label>.ssh.tunnels.layertwo.dev`. Paste the block
-`tunnel ssh-config [--name NAME]` prints into `~/.ssh/config`, then `ssh <label>` (for `--name box1`,
-`ssh <handle>-box1`). `tunnel dial HOST PORT` is that block's `ProxyCommand`: ssh runs it once per
-connection, it presents your Pocket ID token, and it pipes the terminal. An SSH tunnel is owner-only,
-and the server has to have SSH enabled (its `[ssh]` section).
+or scheme. Every ssh tunnel shares one `~/.ssh/config` block: `tunnel ssh-config --alias-domain
+DOMAIN` prints it, and it routes `*.<DOMAIN>` through `tunnel dial`, so `ssh <label>.<DOMAIN>`
+reaches the tunnel named `<label>` (`--name box1` gives `ssh <handle>-box1.<DOMAIN>`). `tunnel dial
+NAME` is that block's `ProxyCommand`: ssh runs it once per connection, it presents your Pocket ID
+token, and it pipes the terminal. An SSH tunnel is owner-only, and the server has to have SSH
+enabled (its `[ssh]` section).
 
 `--group` shares take effect once the site gate forwards the visitor's groups (a deferred change);
 user shares work today.
