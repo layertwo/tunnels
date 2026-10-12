@@ -458,18 +458,13 @@ func dial(ctx context.Context, env Env, args []string) int {
 	return dialStream(ctx, env, d, "wss://"+host+":443/", s, resolve, tok)
 }
 
-// wsDial opens the WebSocket; *websocket.Dialer is the real one.
-type wsDial interface {
-	DialContext(ctx context.Context, urlStr string, requestHeader http.Header) (*websocket.Conn, *http.Response, error)
-}
-
 // oidcSource resolves the identity provider a token refresh needs. dial's discovers the service
 // on first use, so a dial that does not refresh makes no discovery request.
 type oidcSource func(context.Context) (auth.OIDC, error)
 
 // dialStream opens the WebSocket to url presenting the login, then pumps it to this process's stdin
 // and stdout. On a 401 handshake it refreshes the login once and retries.
-func dialStream(ctx context.Context, env Env, d wsDial, url string, s auth.Store, src oidcSource, tok auth.Tokens) int {
+func dialStream(ctx context.Context, env Env, d *websocket.Dialer, url string, s auth.Store, src oidcSource, tok auth.Tokens) int {
 	token, err := dialToken(ctx, s, src, tok)
 	if err != nil {
 		refreshFailed(env, err)
@@ -708,7 +703,7 @@ func machineCreate(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintln(env.Stderr, err)
 		return 1
 	}
-	_, b, tok, ok := session(ctx, env)
+	_, _, tok, ok := session(ctx, env)
 	if !ok {
 		return 1
 	}
@@ -728,7 +723,7 @@ func machineCreate(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintln(env.Stderr, err)
 		return 1
 	}
-	login := auth.Tokens{ClientID: m.ClientID, MachineKey: keyPath, Handle: m.Handle, Server: tok.Server, SSHDomain: b.SSHDomain}
+	login := auth.Tokens{ClientID: m.ClientID, MachineKey: keyPath, Handle: m.Handle, Server: tok.Server}
 	if err := s.Save(login); err != nil {
 		fmt.Fprintln(env.Stderr, err) // coverage-ignore: session just wrote here, so saving the machine login cannot fail
 		return 1
