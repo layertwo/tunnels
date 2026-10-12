@@ -407,8 +407,9 @@ Sharing with the group `tunnels-viewers` means every viewer.
 
 **Configuration:** the settings come from a TOML configuration file — `--config PATH`, else
 `$BROKER_CONFIG`, else `/etc/tunnels/broker.toml` — one section per feature (`[server]`, `[identity]`,
-`[tunnels]`, `[machines]`, `[metrics]`), and a feature with no section is off (its routes are not
-mounted, so they answer 404); see the
+`[tunnels]`, `[machines]`, `[metrics]`), and, when a file is present, a feature with no section is off
+(its routes are not mounted, so they answer 404), while with no file at all the broker behaves as
+before (`/metrics` served, machines follow `POCKET_ID_URL`); see the
 [broker config design](plans/2026-10-12-tunnels-broker-config-design.md). The environment keeps the
 secrets and overrides a file value. The settings are `SERVICE_HOST`, `SITES_DOMAIN`, `ISSUER`,
 `API_RESOURCE`, `CREATORS_GROUP`, `DATABASE_URL`, `FRPS_DASHBOARD_URL`, `FRPS_DASHBOARD_USER`,
