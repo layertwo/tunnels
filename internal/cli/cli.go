@@ -240,7 +240,9 @@ func up(ctx context.Context, env Env, args []string) int {
 	// In ssh mode the bridge chooses its own local port and dials the target, so PORT is the target's.
 	url := "https://" + label + "." + b.SitesDomain
 	if *ssh {
-		url = "ssh " + label + "." + b.SSHDomain
+		// ssh <label> is the ssh_config alias, so the ProxyCommand in its Host block runs; the
+		// HostName (<label>.<ssh_domain>) would be dialled directly, and no sshd is there.
+		url = "ssh " + label
 	}
 	printed := map[string]bool{}
 	onStatus := func(st tunnel.Status) {

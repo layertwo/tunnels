@@ -415,7 +415,7 @@ func TestUpDefaultTunnel(t *testing.T) {
 }
 
 // In ssh mode PORT is the port on the target, --target picks the target host, and the print is the
-// ssh host rather than a site URL.
+// ssh_config alias, which is what the user types, rather than a site URL.
 func TestUpSSHPassesOptions(t *testing.T) {
 	w := newWorld(t)
 	w.loggedIn()
@@ -434,8 +434,8 @@ func TestUpSSHPassesOptions(t *testing.T) {
 	if !o.SSH || o.SSHTarget != "127.0.0.1" || o.SSHPort != 22 || o.SSHDomain != "ssh.tunnels.test" {
 		t.Errorf("options = %+v, want the ssh fields", o)
 	}
-	if !strings.Contains(w.out.String(), "ssh alice-box1.ssh.tunnels.test") {
-		t.Errorf("stdout lacks the ssh host:\n%s", w.out)
+	if !strings.Contains(w.out.String(), "ssh alice-box1\n") {
+		t.Errorf("stdout lacks the ssh alias:\n%s", w.out)
 	}
 }
 
