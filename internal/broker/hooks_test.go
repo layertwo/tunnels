@@ -281,6 +281,11 @@ func TestNewProxy(t *testing.T) {
 	typ := func(s string) mod { return func(c *plugin.NewProxyContent) { c.ProxyType = s } }
 	domains := func(d ...string) mod { return func(c *plugin.NewProxyContent) { c.CustomDomains = d } }
 	locations := func(p ...string) mod { return func(c *plugin.NewProxyContent) { c.Locations = p } }
+	sshAt := func(location string) mod {
+		return func(c *plugin.NewProxyContent) {
+			c.CustomDomains, c.Locations = []string{sshDomain}, []string{location}
+		}
+	}
 	name42 := strings.Repeat("b", 42)
 	tests := []struct {
 		name        string
@@ -343,37 +348,50 @@ func TestNewProxy(t *testing.T) {
 		{name: "locations", handle: "alice", proxy: "alice.default", sub: "alice", reason: "only plain http and ssh tunnels are allowed",
 			mod: locations("/admin")},
 
-		// An ssh tunnel is an ordinary http proxy whose one custom domain is <label>.<ssh domain>
-		// with an empty subdomain; any other custom domain is refused.
+		// An ssh tunnel is an ordinary http proxy published at the one ssh host with the publisher's
+		// own label as its only location; the location must carry the trailing boundary, or a location
+		// /alice would answer for /alicex.
 		{name: "ssh tunnel", handle: "alice", proxy: "alice.blog", sub: "", count: 1, wantCounted: true,
-			mod: domains("alice-blog.ssh.tunnels.test")},
+			mod: sshAt("/alice-blog/")},
 		{name: "ssh default tunnel", handle: "alice", proxy: "alice.default", sub: "", wantCounted: true,
-			mod: domains("alice.ssh.tunnels.test")},
-		{name: "ssh tunnel of another owner", handle: "alice", proxy: "alice.blog", sub: "",
-			mod: domains("bob-blog.ssh.tunnels.test"), reason: "name alice.blog is not yours"},
-		{name: "ssh tunnel under the sites domain", handle: "alice", proxy: "alice.blog", sub: "",
-			mod: domains("alice-blog.w.tunnels.test"), reason: "name alice.blog is not yours"},
-		{name: "ssh tunnel with an extra label", handle: "alice", proxy: "alice.blog", sub: "",
-			mod: domains("alice-blog.extra.ssh.tunnels.test"), reason: "name alice.blog is not yours"},
-		{name: "ssh domain with a port", handle: "alice", proxy: "alice.blog", sub: "",
-			mod: domains("alice-blog.ssh.tunnels.test:443"), reason: "name alice.blog is not yours"},
-		{name: "ssh domain with a trailing dot", handle: "alice", proxy: "alice.blog", sub: "",
-			mod: domains("alice-blog.ssh.tunnels.test."), reason: "name alice.blog is not yours"},
-		{name: "ssh domain in capitals", handle: "alice", proxy: "alice.blog", sub: "",
-			mod: domains("ALICE-BLOG.ssh.tunnels.test"), reason: "name alice.blog is not yours"},
-		{name: "ssh proxy of another owner", handle: "alice", proxy: "bob.blog", sub: "",
-			mod: domains("bob-blog.ssh.tunnels.test"), reason: "name bob.blog is not yours"},
-		{name: "two custom domains", handle: "alice", proxy: "alice.blog", sub: "",
-			mod: domains("alice-blog.ssh.tunnels.test", "alice-blog.ssh.tunnels.test"), reason: "only plain http and ssh tunnels are allowed"},
-		{name: "custom domain with a label", handle: "alice", proxy: "alice.blog", sub: "alice-blog",
-			mod: domains("alice-blog.ssh.tunnels.test"), reason: "only plain http and ssh tunnels are allowed"},
-		{name: "custom domain with locations", handle: "alice", proxy: "alice.blog", sub: "",
+			mod: sshAt("/alice/")},
+		{name: "ssh location of another owner", handle: "alice", proxy: "alice.blog", sub: "",
+			mod: sshAt("/bob-blog/"), reason: "name alice.blog is not yours"},
+		// Beyond the brief: nothing above reaches ownsSSHProxy with a domain other than the one ssh
+		// host, so without this row the comparison that keeps a publisher off any other host — another
+		// owner's site host included — could be deleted and the table would still pass. The value is
+		// the old per-label host, so this also pins the refusal a live old-shape agent gets.
+		{name: "ssh location under another host", handle: "alice", proxy: "alice.blog", sub: "",
 			mod: func(c *plugin.NewProxyContent) {
-				c.CustomDomains, c.Locations = []string{"alice-blog.ssh.tunnels.test"}, []string{"/admin"}
+				c.CustomDomains, c.Locations = []string{"alice-blog." + sshDomain}, []string{"/alice-blog/"}
+			},
+			reason: "name alice.blog is not yours"},
+		{name: "ssh location without the boundary", handle: "alice", proxy: "alice.blog", sub: "",
+			mod: sshAt("/alice-blog"), reason: "name alice.blog is not yours"},
+		{name: "ssh location with a trailing segment", handle: "alice", proxy: "alice.blog", sub: "",
+			mod: sshAt("/alice-blog/extra"), reason: "name alice.blog is not yours"},
+		{name: "ssh location in capitals", handle: "alice", proxy: "alice.blog", sub: "",
+			mod: sshAt("/ALICE-BLOG/"), reason: "name alice.blog is not yours"},
+		{name: "ssh default tunnel with a name's location", handle: "alice", proxy: "alice.default", sub: "",
+			mod: sshAt("/alice-blog/"), reason: "name alice.default is not yours"},
+		{name: "ssh proxy of another owner", handle: "alice", proxy: "bob.blog", sub: "",
+			mod: sshAt("/bob-blog/"), reason: "name bob.blog is not yours"},
+		{name: "ssh host with a subdomain", handle: "alice", proxy: "alice.blog", sub: "alice-blog",
+			mod: sshAt("/alice-blog/"), reason: "only plain http and ssh tunnels are allowed"},
+		{name: "ssh with two locations", handle: "alice", proxy: "alice.blog", sub: "",
+			mod: func(c *plugin.NewProxyContent) {
+				c.CustomDomains, c.Locations = []string{sshDomain}, []string{"/alice-blog/", "/alice/"}
 			},
 			reason: "only plain http and ssh tunnels are allowed"},
-		{name: "custom domain with ssh off", handle: "alice", proxy: "alice.blog", sub: "",
-			mod: domains("alice-blog.ssh.tunnels.test"), sshOff: true, reason: "name alice.blog is not yours"},
+		{name: "ssh with no location", handle: "alice", proxy: "alice.blog", sub: "",
+			mod: domains(sshDomain), reason: "only plain http and ssh tunnels are allowed"},
+		{name: "ssh with two custom domains", handle: "alice", proxy: "alice.blog", sub: "",
+			mod: func(c *plugin.NewProxyContent) {
+				c.CustomDomains, c.Locations = []string{sshDomain, sshDomain}, []string{"/alice-blog/"}
+			},
+			reason: "only plain http and ssh tunnels are allowed"},
+		{name: "ssh host with a label", handle: "alice", proxy: "alice.blog", sub: "",
+			mod: sshAt("/alice-blog/"), sshOff: true, reason: "name alice.blog is not yours"},
 
 		{name: "at the limit", handle: "alice", proxy: "alice.default", sub: "alice", count: 5, reason: "tunnel limit of 5 reached", wantCounted: true},
 		{name: "over the limit", handle: "alice", proxy: "alice.default", sub: "alice", count: 9, reason: "tunnel limit of 5 reached", wantCounted: true},
