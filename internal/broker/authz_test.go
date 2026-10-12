@@ -633,6 +633,17 @@ func TestAuthzObservesPhases(t *testing.T) {
 			t.Errorf("phase %d duration = %v, want non-negative", i, d)
 		}
 	}
+
+	// An SSH decision times its owner lookup too, under the same phase name.
+	r, _ = newSSHRig()
+	m = &fakeLookups{}
+	r.authz.Metrics = m
+	if w := r.serve(http.MethodGet, sshRequest("Bearer good")); w.Code != http.StatusOK {
+		t.Fatalf("ssh = %d, want 200", w.Code)
+	}
+	if !reflect.DeepEqual(m.phases, []string{"owner"}) {
+		t.Errorf("ssh phases = %q, want [owner]", m.phases)
+	}
 }
 
 func TestGroupsOf(t *testing.T) {
@@ -906,5 +917,22 @@ func TestDecideSSHRejectsAnUnparseableLabel(t *testing.T) {
 	o := r.authz.decideSSH(httptest.NewRequest(http.MethodGet, "/authz", nil), "not_a_label")
 	if o.allow || o.status != http.StatusForbidden {
 		t.Errorf("outcome = %+v, want a 403 deny", o)
+	}
+}
+
+// Deps is a public seam: a broker built without a token verifier (a nil Verifier) must answer 503 for
+// an SSH host, not panic on the dereference. Exercised through the real handler.
+func TestSSHNilVerifierIs503(t *testing.T) {
+	r := newServerRig(t)
+	r.cfg.SSHDomain = sshDomain
+	r.d.Verifier = nil
+	h := NewHandler(r.cfg, r.d)
+
+	req := httptest.NewRequest(http.MethodGet, "/authz", nil)
+	req.Header = sshRequest("Bearer good")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable || w.Body.Len() != 0 {
+		t.Errorf("= %d %q, want an empty 503 without a token verifier", w.Code, w.Body)
 	}
 }

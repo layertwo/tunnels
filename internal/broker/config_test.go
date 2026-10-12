@@ -509,12 +509,22 @@ func TestLoadConfigSSH(t *testing.T) {
 		v["SSH_DOMAIN"] = "ssh.env.test"
 		return v
 	}
+	// The same string the sites domain carries: the anti-goal is a config that silently turns the
+	// feature off, so this must be a startup error rather than a broker whose SSH routes never fire.
+	sameAsSites := sshVars()
+	sameAsSites["SSH_DOMAIN"] = sameAsSites["SITES_DOMAIN"]
+	// Both domains set, from the file and the environment, but different: the load must succeed.
+	different := sshVars()
+	delete(different, "SITES_DOMAIN")
+	different["SSH_DOMAIN"] = "ssh.env.test"
+	differentFile := &FileConfig{Tunnels: &tunnelsFile{SitesDomain: ptr("w.file.test")}, SSH: &sshFile{Domain: ptr("ssh.tunnels.test")}}
 	tests := []struct {
 		name, want, wantErr string
 		vars                map[string]string
 		file                *FileConfig
 	}{
 		{"the section supplies the domain", "ssh.tunnels.test", "", sshVars(), &FileConfig{SSH: &sshFile{Domain: ptr("ssh.tunnels.test")}}},
+		{"a differing domain still loads", "ssh.env.test", "", different, differentFile},
 		{"the environment wins over the section", "ssh.env.test", "", withEnv(), &FileConfig{SSH: &sshFile{Domain: ptr("ssh.tunnels.test")}}},
 		{"uppercase normalises to lower", "ssh.tunnels.test", "", sshVars(), &FileConfig{SSH: &sshFile{Domain: ptr("SSH.Tunnels.Test")}}},
 		{"no section and no variable is off", "", "", sshVars(), &FileConfig{Server: &serverFile{}}},
@@ -523,6 +533,7 @@ func TestLoadConfigSSH(t *testing.T) {
 		{"a section with a port is refused", "", "SSH_DOMAIN", sshVars(), &FileConfig{SSH: &sshFile{Domain: ptr("ssh.tunnels.test:443")}}},
 		{"a section with a trailing dot is refused", "", "SSH_DOMAIN", sshVars(), &FileConfig{SSH: &sshFile{Domain: ptr("ssh.tunnels.test.")}}},
 		{"an enabled section needs a domain", "", "SSH_DOMAIN", sshVars(), &FileConfig{SSH: &sshFile{Enabled: ptr(true)}}},
+		{"equal to the sites domain is refused", "", "SSH_DOMAIN", sameAsSites, &FileConfig{SSH: &sshFile{Domain: ptr("w.tunnels.layertwo.dev")}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

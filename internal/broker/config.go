@@ -195,6 +195,11 @@ func LoadConfig(getenv func(string) string, file *FileConfig) (Config, error) {
 	if sshOn {
 		c.SSHDomain = host("SSH_DOMAIN", required("SSH_DOMAIN", pick(getenv, "SSH_DOMAIN", ssh.Domain, "")))
 	}
+	// With the two domains equal decide's site-first dispatch claims every SSH host, so the feature
+	// would be silently dead: refuse the pair rather than start a broker whose SSH routes never fire.
+	if c.SSHDomain != "" && c.SSHDomain == c.SitesDomain {
+		bad("SSH_DOMAIN", "must differ from SITES_DOMAIN")
+	}
 
 	// The credentials are separate variables; none in the URL, which would also end up in errors and logs.
 	if badDashboardURL(c.FrpsDashboardURL) {

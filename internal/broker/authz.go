@@ -202,6 +202,11 @@ func (a Authz) decideSSH(r *http.Request, label string) outcome {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), a.timeout())
 	defer cancel()
+	// A broker built without a token verifier (a bare Deps) must answer 503, not panic.
+	if a.Verifier == nil {
+		o.reason, o.err, o.status = "verify", errors.New("authz: no token verifier"), http.StatusServiceUnavailable
+		return o
+	}
 	sub, err := a.Verifier.VerifyAccessToken(ctx, token)
 	if err != nil {
 		o.status = http.StatusServiceUnavailable
@@ -213,7 +218,9 @@ func (a Authz) decideSSH(r *http.Request, label string) outcome {
 		return o
 	}
 	o.sub = sub
+	ownerStart := time.Now()
 	owner, err := a.Users.UserByHandle(ctx, handle)
+	a.observe("owner", ownerStart)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		o.reason = "unknown_owner"
