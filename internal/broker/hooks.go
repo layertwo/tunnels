@@ -35,7 +35,7 @@ type Hooks struct {
 	Resolver          Resolver
 	Frps              Frps
 	Secret            string        // the last path element frps is configured with; empty refuses everything
-	SSHDomain         string        // the domain SSH tunnels live under; empty accepts no custom domain
+	SSHDomain         string        // the one host every SSH tunnel is published at; empty accepts no custom domain
 	MaxTunnelsPerUser int           // proxies one user may have online
 	BandwidthLimit    string        // applied to every proxy, in "server" mode
 	Timeout           time.Duration // for one decision; zero means 8 s
@@ -137,8 +137,8 @@ func (h *Hooks) login(ctx context.Context, raw json.RawMessage) (plugin.Response
 	return h.accept(ctx, plugin.OpLogin, c, who...), nil
 }
 
-// newProxy lets through plain http tunnels the user owns, and ssh tunnels under the configured
-// domain, up to the limit.
+// newProxy lets through plain http tunnels the user owns, and ssh tunnels at the one configured
+// host, up to the limit.
 func (h *Hooks) newProxy(ctx context.Context, raw json.RawMessage) (plugin.Response, error) {
 	var c plugin.NewProxyContent
 	if err := json.Unmarshal(raw, &c); err != nil {

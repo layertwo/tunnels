@@ -38,7 +38,7 @@ type Options struct {
 	SSH       bool   // publish an SSH service instead of a site
 	SSHTarget string // the SSH host to dial; a bare host, no port and no scheme
 	SSHPort   int    // the SSH host's port
-	SSHDomain string // the domain SSH tunnels live under; empty means the feature is off
+	SSHDomain string // the one host every SSH tunnel is published at; empty means the feature is off
 
 	HeartbeatInterval int // seconds; 0 means 30
 
