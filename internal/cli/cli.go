@@ -37,6 +37,7 @@ const usage = `Usage:
   tunnel login [--server HOST]                    log in with your browser
   tunnel up PORT [--name NAME]                    publish http://127.0.0.1:PORT until you stop it
   tunnel up PORT --ssh [--target HOST] [--name NAME]  publish an ssh service on HOST at PORT
+  tunnel ssh-config [--name NAME]                 print an ssh_config block for an ssh tunnel
   tunnel share [--group] [--for DURATION] LABEL GRANTEE  let someone else reach a site (group shares need the gate to forward groups)
   tunnel unshare [--group] LABEL GRANTEE  stop sharing a site
   tunnel list                                     show what you share
@@ -77,6 +78,8 @@ func Main(args []string, env Env) int {
 		return share(ctx, env, rest, true)
 	case "list":
 		return list(ctx, env, rest)
+	case "ssh-config":
+		return sshConfig(ctx, env, rest)
 	case "machine":
 		return machine(ctx, env, rest)
 	case "logout", "version":
@@ -251,6 +254,43 @@ func up(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintln(env.Stderr, err)
 		return 1
 	}
+	return 0
+}
+
+// sshConfig prints the ssh_config Host block for one of the owner's ssh tunnels. It needs only the
+// stored handle and the service's ssh domain, so it sends no token.
+func sshConfig(ctx context.Context, env Env, args []string) int {
+	fs := pflag.NewFlagSet("ssh-config", pflag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	name := fs.String("name", "", "the tunnel's name; none configures the default tunnel")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
+		if err != nil {
+			fmt.Fprintln(env.Stderr, err)
+		}
+		fmt.Fprint(env.Stderr, usage)
+		return 2
+	}
+	s, err := store(env)
+	if err != nil {
+		fmt.Fprintln(env.Stderr, err)
+		return 1
+	}
+	tok, err := s.Load()
+	if err != nil {
+		fmt.Fprintln(env.Stderr, err)
+		return 1
+	}
+	b, err := auth.Discover(ctx, env.HTTP, tok.Server)
+	if err != nil {
+		fmt.Fprintf(env.Stderr, "cannot reach %s: %v\n", tok.Server, err)
+		return 1
+	}
+	if b.SSHDomain == "" {
+		fmt.Fprintln(env.Stderr, "this server has ssh disabled")
+		return 2
+	}
+	label := names.Label(tok.Handle, *name)
+	fmt.Fprintf(env.Stdout, "Host %s\n\tHostName %s.%s\n\tProxyCommand tunnel dial %%h %%p\n", label, label, b.SSHDomain)
 	return 0
 }
 

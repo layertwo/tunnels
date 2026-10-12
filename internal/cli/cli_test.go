@@ -511,6 +511,71 @@ func TestUpSSHServerDisabled(t *testing.T) {
 	}
 }
 
+// ---- ssh-config
+
+// ssh-config prints the exact block to paste into ~/.ssh/config, for the named tunnel's label and the
+// server's ssh domain.
+func TestSSHConfigPrintsBlock(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	w.sshDomain = "ssh.tunnels.test"
+	if c := w.main("ssh-config", "--name", "box1"); c != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
+	}
+	want := "Host alice-box1\n\tHostName alice-box1.ssh.tunnels.test\n\tProxyCommand tunnel dial %h %p\n"
+	if got := w.out.String(); got != want {
+		t.Errorf("stdout = %q, want %q", got, want)
+	}
+}
+
+func TestSSHConfigNotLoggedIn(t *testing.T) {
+	w := newWorld(t)
+	if c := w.main("ssh-config", "--name", "box1"); c != 1 || !strings.Contains(w.err.String(), "tunnel login") {
+		t.Errorf("exit %d, stderr:\n%s", c, w.err)
+	}
+}
+
+// The server has SSH off: a block would point at a host that cannot work, so say so and print nothing.
+func TestSSHConfigServerDisabled(t *testing.T) {
+	w := newWorld(t) // no ssh_domain in the bootstrap document
+	w.loggedIn()
+	if c := w.main("ssh-config", "--name", "box1"); c != 2 {
+		t.Errorf("exit %d, want 2", c)
+	}
+	if !strings.Contains(w.err.String(), "ssh disabled") {
+		t.Errorf("stderr does not say ssh is disabled:\n%s", w.err)
+	}
+	if w.out.String() != "" {
+		t.Errorf("stdout is not empty:\n%s", w.out)
+	}
+}
+
+// ssh-config still discovers the server, so a stored login whose service is gone fails like the rest.
+func TestSSHConfigDiscoveryFails(t *testing.T) {
+	w := newWorld(t)
+	tok := w.loggedIn()
+	tok.Server = "http://127.0.0.1:1"
+	if err := (auth.Store{Dir: w.dir}).Save(tok); err != nil {
+		t.Fatal(err)
+	}
+	if c := w.main("ssh-config"); c != 1 || !strings.Contains(w.err.String(), "cannot reach http://127.0.0.1:1") {
+		t.Errorf("exit %d, stderr:\n%s", c, w.err)
+	}
+}
+
+func TestSSHConfigArgumentErrors(t *testing.T) {
+	for _, args := range [][]string{{"ssh-config", "extra"}, {"ssh-config", "--bogus"}} {
+		w := newWorld(t)
+		w.loggedIn()
+		if c := w.main(args...); c != 2 {
+			t.Errorf("%q: exit %d, want 2", args, c)
+		}
+		if !strings.Contains(w.err.String(), "Usage") {
+			t.Errorf("%q: no usage on stderr:\n%s", args, w.err)
+		}
+	}
+}
+
 // After a crash the old tunnel still counts until frps notices; say so next to the broker's answer.
 func TestUpTunnelLimitHint(t *testing.T) {
 	w := newWorld(t)
@@ -911,6 +976,7 @@ func TestCommandsWithoutAConfigDir(t *testing.T) {
 	}{
 		{"login", []string{"login"}, 1, "no place for the login"},
 		{"up", []string{"up", "3000"}, 1, "no place for the login"},
+		{"ssh-config", []string{"ssh-config"}, 1, "no place for the login"},
 		{"share", []string{"share", "alice", "bob"}, 1, "no place for the login"},
 		{"unshare", []string{"unshare", "alice", "bob"}, 1, "no place for the login"},
 		{"list", []string{"list"}, 1, "no place for the login"},
