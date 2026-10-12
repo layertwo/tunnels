@@ -35,6 +35,11 @@ type Options struct {
 	TokenFile string // the access token; frp reads it again for every login, ping and work connection
 	CAFile    string // the roots that verify the server; frp verifies nothing without one
 
+	SSH       bool   // publish an SSH service instead of a site
+	SSHTarget string // the SSH host to dial; a bare host, no port and no scheme
+	SSHPort   int    // the SSH host's port
+	SSHDomain string // the domain SSH tunnels live under; empty means the feature is off
+
 	HeartbeatInterval int // seconds; 0 means 30
 
 	Version string // the CLI's own; the login carries it to the broker, which logs it
@@ -54,6 +59,23 @@ func Build(o Options) (*v1.ClientCommonConfig, []v1.ProxyConfigurer, error) {
 		return nil, nil, errors.New("tunnel: no token file")
 	case o.Protocol == "wss" && o.CAFile == "":
 		return nil, nil, errors.New("tunnel: wss needs a CA file, otherwise frp does not check the server's certificate")
+	case o.SSH && o.SSHDomain == "":
+		return nil, nil, errors.New("tunnel: an ssh tunnel needs the ssh domain")
+	case o.SSH && !validTargetHost(o.SSHTarget):
+		return nil, nil, fmt.Errorf("tunnel: %q is not an ssh target: use a bare host, without a port or a scheme", o.SSHTarget)
+	case o.SSH && (o.SSHPort < 1 || o.SSHPort > 65535):
+		return nil, nil, fmt.Errorf("ssh port %d: use a port from 1 to 65535", o.SSHPort)
+	}
+	proxy := map[string]any{
+		"name": cmp.Or(o.Name, names.Default), "type": "http", "localIP": "127.0.0.1", "localPort": o.LocalPort,
+		// frps sets x-forwarded-proto to http for the last hop; the visitor came over https.
+		"requestHeaders": map[string]any{"set": map[string]string{"x-forwarded-proto": "https"}},
+	}
+	if o.SSH {
+		// frps has one subDomainHost, so the SSH subtree is reached by a custom domain, not a subdomain.
+		proxy["customDomains"] = []any{names.Label(o.Handle, o.Name) + "." + o.SSHDomain}
+	} else {
+		proxy["subdomain"] = names.Label(o.Handle, o.Name)
 	}
 	raw, err := json.Marshal(map[string]any{
 		"serverAddr": o.ServerHost,
@@ -71,12 +93,7 @@ func Build(o Options) (*v1.ClientCommonConfig, []v1.ProxyConfigurer, error) {
 			"additionalScopes": []string{"HeartBeats", "NewWorkConns"},
 			"oidc":             map[string]any{"tokenSource": map[string]any{"type": "file", "file": map[string]any{"path": o.TokenFile}}},
 		},
-		"proxies": []any{map[string]any{
-			"name": cmp.Or(o.Name, names.Default), "type": "http", "localIP": "127.0.0.1", "localPort": o.LocalPort,
-			"subdomain": names.Label(o.Handle, o.Name),
-			// frps sets x-forwarded-proto to http for the last hop; the visitor came over https.
-			"requestHeaders": map[string]any{"set": map[string]string{"x-forwarded-proto": "https"}},
-		}},
+		"proxies": []any{proxy},
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("tunnel: %w", err) // coverage-ignore: the map above holds only strings, ints and maps, which always marshal
@@ -100,6 +117,11 @@ func Build(o Options) (*v1.ClientCommonConfig, []v1.ProxyConfigurer, error) {
 	return &cfg.ClientCommonConfig, proxies, nil
 }
 
+// validTargetHost reports whether target is a bare SSH host: not empty and without a port or a scheme.
+func validTargetHost(target string) bool {
+	return target != "" && !strings.ContainsAny(target, ":/")
+}
+
 // Status is the tunnel as frp sees it. Phase is frp's ("wait start", "running", "start error",
 // "closed", ...), and Err why a start failed: the service's own sentence when it refused the tunnel.
 type Status struct{ Phase, Err string }
@@ -113,6 +135,15 @@ const loginFailExitNote = ". With loginFailExit enabled, no additional retries w
 // onStatus (which may be nil). Once the first login has worked frp reconnects by itself; a first
 // login that fails ends Run with the reason. Run returns nil when ctx ends.
 func Run(ctx context.Context, o Options, onStatus func(Status)) error {
+	if o.SSH {
+		b, err := newBridge(o.SSHTarget, o.SSHPort)
+		if err != nil {
+			return fmt.Errorf("tunnel: listen for the ssh bridge: %w", err) // coverage-ignore: a loopback listen on an ephemeral port cannot fail
+		}
+		defer func() { _ = b.Close() }()
+		o.LocalPort = b.Port()
+		go b.Serve(ctx)
+	}
 	common, proxies, err := Build(o)
 	if err != nil {
 		return err

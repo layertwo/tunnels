@@ -91,6 +91,38 @@ func TestBuildDefaultTunnel(t *testing.T) {
 	}
 }
 
+func TestBuildSSHFields(t *testing.T) {
+	o := opts()
+	o.SSH, o.SSHTarget, o.SSHPort, o.SSHDomain = true, "127.0.0.1", 22, "ssh.tunnels.test"
+	o.LocalPort = 5000
+	_, p := build(t, o)
+
+	if p.Name != "blog" || p.Type != "http" {
+		t.Errorf("proxy %q type %q, want blog and http", p.Name, p.Type)
+	}
+	if !reflect.DeepEqual(p.CustomDomains, []string{"alice-blog.ssh.tunnels.test"}) {
+		t.Errorf("custom domains = %v, want the one ssh host", p.CustomDomains)
+	}
+	if p.SubDomain != "" {
+		t.Errorf("subdomain = %q, want empty: an ssh tunnel has a custom domain, not a site subdomain", p.SubDomain)
+	}
+	if p.LocalIP != "127.0.0.1" || p.LocalPort != 5000 {
+		t.Errorf("proxy to %s:%d, want the bridge on 127.0.0.1:5000", p.LocalIP, p.LocalPort)
+	}
+	if got := p.RequestHeaders.Set["x-forwarded-proto"]; got != "https" {
+		t.Errorf("x-forwarded-proto = %q, want https", got)
+	}
+}
+
+func TestBuildSSHDefaultTunnel(t *testing.T) {
+	o := opts()
+	o.SSH, o.Name, o.SSHTarget, o.SSHPort, o.SSHDomain = true, "", "127.0.0.1", 22, "ssh.tunnels.test"
+	_, p := build(t, o)
+	if p.Name != "default" || !reflect.DeepEqual(p.CustomDomains, []string{"alice.ssh.tunnels.test"}) {
+		t.Errorf("proxy %q custom domains %v, want default and alice.ssh.tunnels.test", p.Name, p.CustomDomains)
+	}
+}
+
 func TestBuildHeartbeat(t *testing.T) {
 	o := opts()
 	o.HeartbeatInterval = 1
@@ -137,6 +169,16 @@ func TestBuildRefuses(t *testing.T) {
 		{"a handle with a capital", func(o *Options) { o.Handle = "Alice" }, "tunnel login"},
 		{"a handle with a dash", func(o *Options) { o.Handle = "a-b" }, "tunnel login"},
 		{"no token file", func(o *Options) { o.TokenFile = "" }, "token"},
+		{"ssh without a domain", func(o *Options) { o.SSH = true }, "domain"},
+		{"ssh target with a port", func(o *Options) { o.SSH, o.SSHDomain, o.SSHTarget = true, "ssh.tunnels.test", "192.168.1.5:22" }, "target"},
+		{"ssh target with a scheme", func(o *Options) { o.SSH, o.SSHDomain, o.SSHTarget = true, "ssh.tunnels.test", "http://x" }, "target"},
+		{"ssh without a target", func(o *Options) { o.SSH, o.SSHDomain = true, "ssh.tunnels.test" }, "target"},
+		{"ssh port 0", func(o *Options) {
+			o.SSH, o.SSHDomain, o.SSHTarget, o.SSHPort = true, "ssh.tunnels.test", "127.0.0.1", 0
+		}, "port"},
+		{"ssh port 70000", func(o *Options) {
+			o.SSH, o.SSHDomain, o.SSHTarget, o.SSHPort = true, "ssh.tunnels.test", "127.0.0.1", 70000
+		}, "port"},
 		// frp's own validation runs too: a value only it knows to refuse is refused here, not at connect.
 		{"a protocol frp does not speak", func(o *Options) { o.Protocol = "carrier-pigeon" }, "protocol"},
 	}
@@ -361,6 +403,22 @@ func TestRunFirstLoginFails(t *testing.T) {
 	case s := <-reported:
 		t.Errorf("reported %+v for a login that never reached the proxy", s)
 	default:
+	}
+}
+
+// An ssh tunnel starts the loopback bridge and builds the proxy against the bridge's port: LocalPort
+// is 0 here, which Build refuses, so reaching the login is proof Run replaced it before Build.
+func TestRunSSHStartsTheBridge(t *testing.T) {
+	o := opts()
+	o.ServerHost, o.ServerPort, o.Protocol, o.CAFile = "127.0.0.1", 1, "tcp", ""
+	o.TokenFile = filepath.Join(t.TempDir(), "access-token")
+	if err := os.WriteFile(o.TokenFile, []byte("tok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o.LocalPort = 0
+	o.SSH, o.SSHTarget, o.SSHPort, o.SSHDomain = true, "127.0.0.1", 22, "ssh.tunnels.test"
+	if err := Run(t.Context(), o, nil); err == nil || !strings.Contains(err.Error(), "refused") {
+		t.Errorf("Run = %v, want the connection error: the bridge's port should have replaced LocalPort", err)
 	}
 }
 
