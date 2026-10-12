@@ -64,6 +64,8 @@ const usageMachine = "Usage: tunnel machine create NAME | list | remove NAME"
 
 const usageDial = "Usage: tunnel dial HOST PORT"
 
+const usageSSHConfig = "Usage: tunnel ssh-config [--name NAME]"
+
 // Main runs the command in args and returns the exit code: 0 done, 1 failed, 2 used wrongly.
 func Main(args []string, env Env) int {
 	if env.HTTP == nil {
@@ -288,7 +290,7 @@ func sshConfig(ctx context.Context, env Env, args []string) int {
 		return 2
 	}
 	if *name != "" && !names.ValidTunnelName(*name) {
-		fmt.Fprintf(env.Stderr, "%q is not a tunnel name: use 1 to 42 lowercase letters, digits and inner dashes, other than %q\n%s\n", *name, names.Default, usageUp)
+		fmt.Fprintf(env.Stderr, "%q is not a tunnel name: use 1 to 42 lowercase letters, digits and inner dashes, other than %q\n%s\n", *name, names.Default, usageSSHConfig)
 		return 2
 	}
 	s, err := store(env)
