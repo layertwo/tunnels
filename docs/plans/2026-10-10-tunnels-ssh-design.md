@@ -94,7 +94,7 @@ client with an HTML login page).
 | 4 | The SSH subtree uses frp **custom domains** under `*.ssh.tunnels.layertwo.dev`. | One `subDomainHost`; the SSH subtree must be separate from `w.`. |
 | 5 | SSH shares the tunnel-name namespace with HTTP tunnels (`<handle>.<name>`). | frp proxy names are unique per server; a name is one tunnel. |
 | 6 | `--target` may name another address the machine can reach; the broker cannot and does not enforce the dial target. | Only the publisher chooses it, and it already runs code on its own machine; a visitor never influences it. |
-| 7 | v1 is **owner-only**; SSH inherits sharing when phase 2 lands. | The `shares` table does not exist yet, and `/authz` is owner-only today. |
+| 7 | v1 is **owner-only**; SSH inherits sharing when a later phase wires it in. | The `shares` table has shipped for sites, but `decideSSH` consults only the owner and `/authz` is owner-only for SSH today. |
 | 8 | **Machine clients (`client_credentials`) stay phase 3**; v1 uses Pocket ID refresh tokens (30-day window). | A box idle more than 30 days re-logs in once; the never-a-passkey path is phase 3. |
 | 9 | SSH is configured by the broker's **`[ssh]` section**, never by a required variable (amended 2026-10-12). | The config-file convention: a feature with no section is off, and a release must not require new configuration. |
 
@@ -123,7 +123,7 @@ Host alice-box1
 1. `ssh alice-box1` runs `tunnel dial alice-box1.ssh.tunnels.layertwo.dev 22`.
 2. The CLI loads its access token, opens TLS to the host, sends an HTTP upgrade with
    `Authorization: Bearer <access token>`, then pipes stdin/stdout.
-3. Traefik `forwardAuth` → broker: verify the token (JWKS), authorize (owner or share), allow.
+3. Traefik `forwardAuth` → broker: verify the token (JWKS), authorize (owner only), allow.
 4. frps routes by `Host` to the agent's bridge, which dials the target. Bytes flow.
 
 `tunnel ssh-config [--name NAME]` prints the `Host` block, so the user does not hand-edit.
@@ -132,8 +132,11 @@ Host alice-box1
 
 | Caller | Credential | Verified by | Route chain |
 |--------|-----------|-------------|-------------|
-| `tunnel dial` | Pocket ID access token | broker (JWKS) + owner/share | strip-identity → forwardAuth → broker |
+| `tunnel dial` | Pocket ID access token | broker (JWKS) + owner only | strip-identity → forwardAuth → broker |
 | Anyone else | — | 403 | |
+
+An SSH share is not yet honored: sharing has shipped for sites, but `decideSSH` consults only the
+owner, so a share on an SSH host admits nobody.
 
 ## Token lifetimes
 
@@ -207,10 +210,10 @@ certain is done in Pocket ID (see `docs/design.md`).
 | Threat | Control |
 |--------|---------|
 | Bearer client smuggled through the browser gate | the `*.ssh.` route runs `forwardAuth` only; the OIDC plugin is never in that chain |
-| Stolen or forged token | frps/broker verify signature, issuer, expiry and audience; the owner/share check runs per connection |
+| Stolen or forged token | frps/broker verify signature, issuer, expiry and audience; the owner check runs per connection |
 | Arbitrary `(host, port)` dialed | the target is chosen by the **publisher only**, never a visitor. frp exposes no field for the broker to constrain the dial, so this is trust-by-ownership, not a server guarantee: the publisher already runs code on its own machine. The server enforces the tunnel's *name and domain*, not the dial target. |
 | Cluster compromise yields shells | v1 has no cluster-side shell component |
-| Revoked user keeps access | short-lived access tokens and the per-connection owner/share check |
+| Revoked user keeps access | short-lived access tokens and the per-connection owner check |
 | Target port exposed | the bridge binds loopback only; frps's vhost port is internal and Traefik is the only ingress |
 
 ## Failure modes
@@ -225,9 +228,9 @@ certain is done in Pocket ID (see `docs/design.md`).
 ## Testing
 
 - Unit: label/domain rules for the SSH subtree; `NewProxy` accepting only the owner's SSH custom
-  domain; `/authz` bearer matrix (owner, share, bad token, wrong host, default deny).
+  domain; `/authz` bearer matrix (owner, bad token, wrong host, default deny).
 - Integration/e2e: a real frps, an agent bridge, and a client that opens the WebSocket and checks an
-  echo through to a local listener; a refused cross-user case.
+  echo through to a local listener; the refusal matrix is unit-tested only.
 - Manual smoke: `ssh box1` through `tunnel dial`.
 
 ## Deferred: web terminal

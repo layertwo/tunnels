@@ -20,8 +20,8 @@ the conventions that are easy to get wrong.
   `BROKER_CONFIG`, else `/etc/tunnels/broker.toml` — one section per feature (`[server]`, `[identity]`,
   `[tunnels]`, `[machines]`, `[ssh]`, `[metrics]`), and **a feature with no section is off** when a file is
   present (its routes are not mounted, so they answer 404); with **no file** the broker behaves as
-  before (`/metrics` served, machines follow `POCKET_ID_URL`). Secrets stay in the environment, never
-  the file; the environment overrides a file value. See the [broker config
+  before (`/metrics` served, machines follow `POCKET_ID_URL`, SSH follows `SSH_DOMAIN`). Secrets stay in
+  the environment, never the file; the environment overrides a file value. See the [broker config
   design](docs/plans/2026-10-12-tunnels-broker-config-design.md).
 
 ## Code
