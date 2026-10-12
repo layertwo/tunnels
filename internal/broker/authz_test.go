@@ -793,11 +793,12 @@ func newSSHRig() (*authzRig, *fakeVerifier) {
 	return r, v
 }
 
-// sshRequest is what Traefik's forwardAuth sends for a terminal dialing alice's SSH tunnel: a bearer
-// token and no identity headers (the OIDC plugin is not in that route).
+// sshRequest is what Traefik's forwardAuth sends for a terminal dialing an SSH tunnel: a bearer
+// token, the one SSH host, and the tunnel's label as the first segment of the request path.
 func sshRequest(auth string) http.Header {
 	h := http.Header{}
-	h.Set("X-Forwarded-Host", "alice-box1."+sshDomain)
+	h.Set("X-Forwarded-Host", sshDomain)
+	h.Set("X-Forwarded-Uri", "/alice-box1/")
 	if auth != "" {
 		h.Set("Authorization", auth)
 	}
@@ -806,8 +807,8 @@ func sshRequest(auth string) http.Header {
 
 func TestSSHOwnerAllowed(t *testing.T) {
 	const token = "Distinctive-SSH-Token"
-	// The SSH host is normalised exactly like a site label: an uppercase host is the same host.
-	for _, host := range []string{"alice-box1." + sshDomain, "Alice-Box1.SSH.Tunnels.Test"} {
+	// The one SSH host is matched case-insensitively: an uppercase host is the same host.
+	for _, host := range []string{sshDomain, "SSH.Tunnels.Test"} {
 		r, v := newSSHRig()
 		h := sshRequest("Bearer " + token)
 		h.Set("X-Forwarded-Host", host)
@@ -834,7 +835,7 @@ func TestSSHOwnerAllowed(t *testing.T) {
 func TestSSHMachineOwnerAllowed(t *testing.T) {
 	r, _ := newSSHRig()
 	h := sshRequest("Bearer good")
-	h.Set("X-Forwarded-Host", "nas-box1."+sshDomain)
+	h.Set("X-Forwarded-Uri", "/nas-box1/")
 	w := r.serve(http.MethodGet, h)
 	if w.Code != http.StatusOK || w.Body.Len() != 0 {
 		t.Errorf("= %d %q, want 200 for the machine's owner", w.Code, w.Body)
@@ -856,26 +857,32 @@ func TestSSHDenied(t *testing.T) {
 		{"malformed authorization", func(_ *authzRig, _ *fakeVerifier, h http.Header) { h.Set("Authorization", "good") }, http.StatusUnauthorized, 0, false},
 		{"invalid token", func(_ *authzRig, v *fakeVerifier, _ http.Header) { v.err = idp.ErrInvalidToken }, http.StatusUnauthorized, 0, true},
 		{"not the owner", func(_ *authzRig, v *fakeVerifier, _ http.Header) { v.sub = "sub-bob" }, http.StatusForbidden, 1, true},
-		{"unknown owner", func(_ *authzRig, _ *fakeVerifier, h http.Header) { h.Set("X-Forwarded-Host", "carol-box1."+sshDomain) }, http.StatusForbidden, 1, true},
+		{"unknown owner", func(_ *authzRig, _ *fakeVerifier, h http.Header) { h.Set("X-Forwarded-Uri", "/carol-box1/") }, http.StatusForbidden, 1, true},
 		{"disabled owner", func(_ *authzRig, v *fakeVerifier, h http.Header) {
 			v.sub = "sub-dave"
-			h.Set("X-Forwarded-Host", "dave-box1."+sshDomain)
+			h.Set("X-Forwarded-Uri", "/dave-box1/")
 		}, http.StatusForbidden, 1, true},
 		{"verifier infrastructure error", func(_ *authzRig, v *fakeVerifier, _ http.Header) { v.err = errors.New("jwks: connection refused") }, http.StatusServiceUnavailable, 0, true},
 		{"owner store error", func(r *authzRig, _ *fakeVerifier, _ http.Header) {
 			r.users.byHandleErr = errors.New("connection refused")
 		}, http.StatusServiceUnavailable, 1, true},
 		{"port", func(_ *authzRig, _ *fakeVerifier, h http.Header) {
-			h.Set("X-Forwarded-Host", "alice-box1."+sshDomain+":443")
+			h.Set("X-Forwarded-Uri", "/alice-box1:443/")
 		}, http.StatusForbidden, 0, false},
 		{"trailing dot", func(_ *authzRig, _ *fakeVerifier, h http.Header) {
-			h.Set("X-Forwarded-Host", "alice-box1."+sshDomain+".")
+			h.Set("X-Forwarded-Uri", "/alice-box1./")
 		}, http.StatusForbidden, 0, false},
 		{"extra label", func(_ *authzRig, _ *fakeVerifier, h http.Header) {
-			h.Set("X-Forwarded-Host", "x.alice-box1."+sshDomain)
+			h.Set("X-Forwarded-Uri", "/x/alice-box1/")
 		}, http.StatusForbidden, 0, false},
-		{"two host lines", func(_ *authzRig, _ *fakeVerifier, h http.Header) {
-			h["X-Forwarded-Host"] = []string{"alice-box1." + sshDomain, "alice-box1." + sshDomain}
+		{"the ssh host with a repeated request path", func(_ *authzRig, _ *fakeVerifier, h http.Header) {
+			h["X-Forwarded-Uri"] = []string{"/alice-box1/", "/alice-box1/"}
+		}, http.StatusForbidden, 0, false},
+		{"the ssh host with no request path", func(_ *authzRig, _ *fakeVerifier, h http.Header) {
+			h.Del("X-Forwarded-Uri")
+		}, http.StatusForbidden, 0, false},
+		{"a path with no label boundary", func(_ *authzRig, _ *fakeVerifier, h http.Header) {
+			h.Set("X-Forwarded-Uri", "/alice-box1")
 		}, http.StatusForbidden, 0, false},
 		// The two modes must not cross-talk: identity headers never authorize an SSH host, and a
 		// bearer token never authorizes a site host.

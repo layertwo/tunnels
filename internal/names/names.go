@@ -88,6 +88,21 @@ func SiteLabel(host, sitesDomain string) (label string, ok bool) {
 	return label, true
 }
 
-// SSHLabel returns the label of host under the SSH domain, exactly as SiteLabel
-// does for sites: the two subtrees share the label rules and differ only in domain.
-func SSHLabel(host, sshDomain string) (label string, ok bool) { return SiteLabel(host, sshDomain) }
+// SSHLabel returns the tunnel label an SSH request's path names: the first segment after the
+// leading "/", which must end in a "/". That boundary is what frps's /<label>/ location routes
+// on — a path without it would not have reached the tunnel, so it is refused. The segment is
+// compared case-sensitively, as frp's locations are, and must be a label ParseLabel accepts.
+func SSHLabel(path string) (label string, ok bool) {
+	rest, ok := strings.CutPrefix(path, "/")
+	if !ok {
+		return "", false
+	}
+	segment, _, bounded := strings.Cut(rest, "/")
+	if !bounded {
+		return "", false
+	}
+	if _, _, valid := ParseLabel(segment); !valid {
+		return "", false
+	}
+	return segment, true
+}
