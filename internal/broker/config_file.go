@@ -72,6 +72,8 @@ var secretKeys = map[string]bool{
 // ParseFile decodes a TOML document. It is strict: an unknown key or section (a typo like `[machine]`),
 // or a key naming a secret, is an error naming the key and never its value. A missing section is nil.
 func ParseFile(data []byte) (*FileConfig, error) {
+	// Decode loosely first: findSecret must also see sections and array-of-tables the strict decoder
+	// rejects, so a key under one is still named as a secret rather than as an unknown key.
 	var raw map[string]any
 	if err := toml.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("config file: %w", err)

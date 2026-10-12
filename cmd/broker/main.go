@@ -103,7 +103,7 @@ func run() error {
 	// Machines are optional: with no admin config the broker still serves people, and with the
 	// feature off the machine routes are not mounted, so they answer 404.
 	var pocket broker.PocketID
-	if cfg.PocketIDURL != "" {
+	if cfg.MachinesEnabled {
 		pocket = pocketid.New(cfg.PocketIDURL, cfg.PocketIDAPIKey, httpx.Client(userAgent, 10*time.Second))
 	}
 
