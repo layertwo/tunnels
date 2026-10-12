@@ -414,8 +414,8 @@ func TestUpDefaultTunnel(t *testing.T) {
 	}
 }
 
-// In ssh mode PORT is the port on the target, --target picks the target host, and the print is the
-// ssh_config alias, which is what the user types, rather than a site URL.
+// In ssh mode PORT is the port on the target, --target picks the target host, and the print names
+// the tunnel and points at the ssh_config block, rather than a site URL.
 func TestUpSSHPassesOptions(t *testing.T) {
 	w := newWorld(t)
 	w.loggedIn()
@@ -434,8 +434,8 @@ func TestUpSSHPassesOptions(t *testing.T) {
 	if !o.SSH || o.SSHTarget != "127.0.0.1" || o.SSHPort != 22 || o.SSHDomain != "ssh.tunnels.test" {
 		t.Errorf("options = %+v, want the ssh fields", o)
 	}
-	if !strings.Contains(w.out.String(), "ssh alice-box1\n") {
-		t.Errorf("stdout lacks the ssh alias:\n%s", w.out)
+	if !strings.Contains(w.out.String(), "alice-box1") || !strings.Contains(w.out.String(), "tunnel ssh-config") {
+		t.Errorf("up --ssh did not point at the ssh_config block:\n%s", w.out)
 	}
 }
 
@@ -532,18 +532,16 @@ func TestUpSSHServerDisabled(t *testing.T) {
 
 // ---- ssh-config
 
-// ssh-config prints the exact block to paste into ~/.ssh/config, for the named tunnel's label and,
-// with no --name, for the default tunnel's.
+// ssh-config prints the exact block to paste into ~/.ssh/config: every ssh tunnel shares one alias
+// domain, and %n is the name ssh was asked for, before any HostName substitution.
 func TestSSHConfigPrintsBlock(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		args []string
 		want string
 	}{
-		{"named", []string{"ssh-config", "--name", "box1"},
-			"Host alice-box1\n\tHostName alice-box1.ssh.tunnels.test\n\tProxyCommand tunnel dial %h %p\n"},
-		{"default", []string{"ssh-config"},
-			"Host alice\n\tHostName alice.ssh.tunnels.test\n\tProxyCommand tunnel dial %h %p\n"},
+		{"an alias domain", []string{"ssh-config", "--alias-domain", "layertwo.lan"},
+			"Host *.layertwo.lan\n\tProxyCommand tunnel dial %n\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := newWorld(t)
@@ -559,30 +557,9 @@ func TestSSHConfigPrintsBlock(t *testing.T) {
 	}
 }
 
-// A --name the broker would refuse is refused here, like up does: the block is pasted into
-// ~/.ssh/config, so a newline in the name must not smuggle in a second Host line.
-func TestSSHConfigRejectsBadName(t *testing.T) {
-	for _, name := range []string{"Box", "a_b", "default", "x\nHost evil"} {
-		t.Run(name, func(t *testing.T) {
-			w := newWorld(t)
-			w.loggedIn()
-			w.sshDomain = "ssh.tunnels.test"
-			if c := w.main("ssh-config", "--name", name); c != 2 {
-				t.Errorf("exit %d, want 2", c)
-			}
-			if !strings.Contains(w.err.String(), "is not a tunnel name") {
-				t.Errorf("stderr does not name the rule:\n%s", w.err)
-			}
-			if w.out.String() != "" {
-				t.Errorf("stdout is not empty:\n%s", w.out)
-			}
-		})
-	}
-}
-
 func TestSSHConfigNotLoggedIn(t *testing.T) {
 	w := newWorld(t)
-	if c := w.main("ssh-config", "--name", "box1"); c != 1 || !strings.Contains(w.err.String(), "tunnel login") {
+	if c := w.main("ssh-config", "--alias-domain", "layertwo.lan"); c != 1 || !strings.Contains(w.err.String(), "tunnel login") {
 		t.Errorf("exit %d, stderr:\n%s", c, w.err)
 	}
 }
@@ -591,7 +568,7 @@ func TestSSHConfigNotLoggedIn(t *testing.T) {
 func TestSSHConfigServerDisabled(t *testing.T) {
 	w := newWorld(t) // no ssh_domain in the bootstrap document
 	w.loggedIn()
-	if c := w.main("ssh-config", "--name", "box1"); c != 2 {
+	if c := w.main("ssh-config", "--alias-domain", "layertwo.lan"); c != 2 {
 		t.Errorf("exit %d, want 2", c)
 	}
 	if !strings.Contains(w.err.String(), "ssh disabled") {
@@ -610,20 +587,27 @@ func TestSSHConfigDiscoveryFails(t *testing.T) {
 	if err := (auth.Store{Dir: w.dir}).Save(tok); err != nil {
 		t.Fatal(err)
 	}
-	if c := w.main("ssh-config"); c != 1 || !strings.Contains(w.err.String(), "cannot reach http://127.0.0.1:1") {
+	if c := w.main("ssh-config", "--alias-domain", "layertwo.lan"); c != 1 || !strings.Contains(w.err.String(), "cannot reach http://127.0.0.1:1") {
 		t.Errorf("exit %d, stderr:\n%s", c, w.err)
 	}
 }
 
 func TestSSHConfigArgumentErrors(t *testing.T) {
-	for _, args := range [][]string{{"ssh-config", "extra"}, {"ssh-config", "--bogus"}} {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"ssh-config", "extra"}, "Usage"},
+		{[]string{"ssh-config", "--bogus"}, "Usage"},
+		{[]string{"ssh-config"}, "tunnel ssh-config --alias-domain DOMAIN"},
+	} {
 		w := newWorld(t)
 		w.loggedIn()
-		if c := w.main(args...); c != 2 {
-			t.Errorf("%q: exit %d, want 2", args, c)
+		if c := w.main(tc.args...); c != 2 {
+			t.Errorf("%q: exit %d, want 2", tc.args, c)
 		}
-		if !strings.Contains(w.err.String(), "Usage") {
-			t.Errorf("%q: no usage on stderr:\n%s", args, w.err)
+		if !strings.Contains(w.err.String(), tc.want) {
+			t.Errorf("%q: no %q on stderr:\n%s", tc.args, tc.want, w.err)
 		}
 	}
 }
@@ -1028,7 +1012,7 @@ func TestCommandsWithoutAConfigDir(t *testing.T) {
 	}{
 		{"login", []string{"login"}, 1, "no place for the login"},
 		{"up", []string{"up", "3000"}, 1, "no place for the login"},
-		{"ssh-config", []string{"ssh-config"}, 1, "no place for the login"},
+		{"ssh-config", []string{"ssh-config", "--alias-domain", "layertwo.lan"}, 1, "no place for the login"},
 		{"dial", []string{"dial", "alice-box1"}, 1, "no place for the login"},
 		{"share", []string{"share", "alice", "bob"}, 1, "no place for the login"},
 		{"unshare", []string{"unshare", "alice", "bob"}, 1, "no place for the login"},

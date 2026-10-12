@@ -47,7 +47,7 @@ const usage = `Usage:
   tunnel login [--server HOST]                    log in with your browser
   tunnel up PORT [--name NAME]                    publish http://127.0.0.1:PORT until you stop it
   tunnel up PORT --ssh [--target HOST] [--name NAME]  publish an ssh service on HOST at PORT
-  tunnel ssh-config [--name NAME]                 print an ssh_config block for an ssh tunnel
+  tunnel ssh-config --alias-domain DOMAIN         print the ssh_config block for your ssh tunnels
   tunnel dial NAME                               pipe ssh through a published tunnel (an ssh ProxyCommand)
   tunnel share [--group] [--for DURATION] LABEL GRANTEE  let someone else reach a site (group shares need the gate to forward groups)
   tunnel unshare [--group] LABEL GRANTEE  stop sharing a site
@@ -65,7 +65,7 @@ const usageMachine = "Usage: tunnel machine create NAME | list | remove NAME"
 
 const usageDial = "Usage: tunnel dial NAME"
 
-const usageSSHConfig = "Usage: tunnel ssh-config [--name NAME]"
+const usageSSHConfig = "Usage: tunnel ssh-config --alias-domain DOMAIN"
 
 // Main runs the command in args and returns the exit code: 0 done, 1 failed, 2 used wrongly.
 func Main(args []string, env Env) int {
@@ -243,9 +243,9 @@ func up(ctx context.Context, env Env, args []string) int {
 	label := names.Label(tok.Handle, *name)
 	shown := "https://" + label + "." + b.SitesDomain
 	if *ssh {
-		// ssh <label> is the ssh_config alias, so the ProxyCommand in its Host block runs; the
-		// HostName (<label>.<ssh_domain>) would be dialled directly, and no sshd is there.
-		shown = "ssh " + label
+		// Every ssh tunnel shares one ssh_config block, so there is no per-tunnel Host to run the
+		// ProxyCommand: name the tunnel and point at the block.
+		shown = "ssh " + label + ".<your alias domain>  (see: tunnel ssh-config)"
 	}
 	printed := map[string]bool{}
 	onStatus := func(st tunnel.Status) {
@@ -282,12 +282,14 @@ func up(ctx context.Context, env Env, args []string) int {
 	return 0
 }
 
-// sshConfig prints the ssh_config Host block for one of the owner's ssh tunnels. It needs only the
-// stored handle and the service's ssh domain, so it sends no token.
+// sshConfig prints the ssh_config Host block every ssh tunnel shares: the alias domain is the
+// user's own name for the service's ssh host, and %n is the name ssh was asked for, unmodified,
+// which is what dial reads back. It still loads the login and discovers, so it can say when the
+// server has ssh disabled, but it sends no token.
 func sshConfig(ctx context.Context, env Env, args []string) int {
 	fs := pflag.NewFlagSet("ssh-config", pflag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	name := fs.String("name", "", "the tunnel's name; none configures the default tunnel")
+	aliasDomain := fs.String("alias-domain", "", "the domain your ssh tunnel names end with, e.g. layertwo.lan")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
 		if err != nil {
 			fmt.Fprintln(env.Stderr, err)
@@ -295,8 +297,8 @@ func sshConfig(ctx context.Context, env Env, args []string) int {
 		fmt.Fprint(env.Stderr, usage)
 		return 2
 	}
-	if *name != "" && !names.ValidTunnelName(*name) {
-		fmt.Fprintf(env.Stderr, "%q is not a tunnel name: use 1 to 42 lowercase letters, digits and inner dashes, other than %q\n%s\n", *name, names.Default, usageSSHConfig)
+	if *aliasDomain == "" {
+		fmt.Fprint(env.Stderr, usageSSHConfig+"\n")
 		return 2
 	}
 	s, err := store(env)
@@ -318,8 +320,7 @@ func sshConfig(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintln(env.Stderr, "this server has ssh disabled")
 		return 2
 	}
-	label := names.Label(tok.Handle, *name)
-	fmt.Fprintf(env.Stdout, "Host %s\n\tHostName %s.%s\n\tProxyCommand tunnel dial %%h %%p\n", label, label, b.SSHDomain)
+	fmt.Fprintf(env.Stdout, "Host *.%s\n\tProxyCommand tunnel dial %%n\n", *aliasDomain)
 	return 0
 }
 
