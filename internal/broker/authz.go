@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/layertwo/tunnels/internal/idp"
 	"github.com/layertwo/tunnels/internal/names"
 	"github.com/layertwo/tunnels/internal/store"
 )
@@ -39,13 +40,19 @@ type LookupObserver interface {
 // request (X-Tunnels-Sub, X-Tunnels-User, X-Tunnels-Groups). The owner gets in, and so does a
 // visitor the owner has shared the tunnel with.
 //
+// A host under SSHDomain is decided from the bearer token instead: the terminal has no browser and
+// no cookie, so it presents a Pocket ID access token and only the owner is let in. The two modes do
+// not cross-talk — an identity header never authorizes an SSH host and a bearer token never
+// authorizes a site host.
+//
 // Everything that is not a clear allow is the same empty 403, so nothing tells a name that exists
-// from one that does not. A store that cannot answer is an empty 503. It keeps no state and is safe
-// for concurrent use.
+// from one that does not. A missing or invalid bearer token is a 401, and a store that cannot
+// answer is an empty 503. It keeps no state and is safe for concurrent use.
 type Authz struct {
 	Users       Users
 	Machines    MachineStore
 	Shares      ShareMatcher
+	Verifier    TokenVerifier // checks an SSH visitor's bearer token locally; nil when SSH is off
 	SitesDomain string        // the domain sites live under, without a port or a trailing dot
 	SSHDomain   string        // the domain SSH tunnels live under; empty when the feature is off
 	Timeout     time.Duration // for the store lookup; zero means 5 s
@@ -65,11 +72,12 @@ func (a Authz) observe(phase string, start time.Time) {
 // outcome is one decision and what is logged about it.
 type outcome struct {
 	allow  bool
-	reason string // the class of the decision: owner, shared, host, identity, cross_owner, unknown_owner, disabled, not_owner, store
+	reason string // the class of the decision: owner, shared, host, identity, cross_owner, unknown_owner, disabled, not_owner, token, verify, store
+	status int    // the refusal status: 401 for a bad token, 503 for a dependency; zero means 403
 	label  string
 	sub    string
 	user   string // the visitor's username, for the allow answer
-	err    error  // set when the store could not answer
+	err    error  // set when the store or the verifier could not answer
 }
 
 func (a Authz) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -90,27 +98,42 @@ func (a Authz) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	case o.allow:
 		log.LogAttrs(r.Context(), slog.LevelInfo, "authz", append(attrs, slog.String("decision", "allow"))...)
-		w.Header().Set("X-Tunnel-User", o.user)
+		// A site tells the app who is looking; an SSH visitor has no username to tell it.
+		if o.user != "" {
+			w.Header().Set("X-Tunnel-User", o.user)
+		}
 		w.WriteHeader(http.StatusOK)
 	default:
 		log.LogAttrs(r.Context(), slog.LevelInfo, "authz", append(attrs, slog.String("decision", "deny"))...)
-		w.WriteHeader(http.StatusForbidden)
+		w.WriteHeader(cmp.Or(o.status, http.StatusForbidden))
 	}
 }
 
+// decide picks the mode from the host and refuses a host under neither domain. The subtrees are
+// checked in a fixed order, so a host that somehow matches both is a site.
 func (a Authz) decide(r *http.Request) outcome {
 	// A header that is missing, empty or repeated is refused: with more than one value there is no
 	// telling which one the gate set. The headers are indexed by their canonical names (how net/http
 	// stores them) rather than read with Values: that is how CodeQL's clear-text-logging check sees a
 	// header that holds no credential, and the label and the sub from them are logged.
 	hosts := r.Header["X-Forwarded-Host"]
-	if a.SitesDomain == "" || len(hosts) != 1 {
-		return outcome{reason: "host"}
+	if len(hosts) != 1 {
+		return outcome{reason: "host", status: http.StatusForbidden}
 	}
-	label, ok := names.SiteLabel(hosts[0], a.SitesDomain)
-	if !ok {
-		return outcome{reason: "host"}
+	if a.SitesDomain != "" {
+		if label, ok := names.SiteLabel(hosts[0], a.SitesDomain); ok {
+			return a.decideSite(r, label)
+		}
 	}
+	if a.SSHDomain != "" {
+		if label, ok := names.SSHLabel(hosts[0], a.SSHDomain); ok {
+			return a.decideSSH(r, label)
+		}
+	}
+	return outcome{reason: "host", status: http.StatusForbidden}
+}
+
+func (a Authz) decideSite(r *http.Request, label string) outcome {
 	handle, tunnel, _ := names.ParseLabel(label) // SiteLabel only returns ok for a label it can parse
 
 	o := outcome{label: label}
@@ -158,6 +181,50 @@ func (a Authz) decide(r *http.Request) outcome {
 		default:
 			o.reason = "not_owner"
 		}
+	}
+	return o
+}
+
+// decideSSH authorizes an SSH host by bearer token. The terminal cannot show a cookie, so the token
+// is verified locally and only the owner of the handle the label names is let in. A missing or
+// invalid token is a 401 (the client may retry with a fresh one); anything else but a clear owner is
+// a 403; a store or verifier that cannot answer is a 503.
+func (a Authz) decideSSH(r *http.Request, label string) outcome {
+	handle, _, valid := names.ParseLabel(label)
+	if !valid {
+		return outcome{reason: "host", status: http.StatusForbidden}
+	}
+	o := outcome{label: label, status: http.StatusForbidden}
+	token, ok := bearerToken(r)
+	if !ok {
+		o.reason, o.status = "token", http.StatusUnauthorized
+		return o
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), a.timeout())
+	defer cancel()
+	sub, err := a.Verifier.VerifyAccessToken(ctx, token)
+	if err != nil {
+		o.status = http.StatusServiceUnavailable
+		if errors.Is(err, idp.ErrInvalidToken) {
+			o.status, o.reason = http.StatusUnauthorized, "token"
+		} else {
+			o.reason, o.err = "verify", err
+		}
+		return o
+	}
+	o.sub = sub
+	owner, err := a.Users.UserByHandle(ctx, handle)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		o.reason = "unknown_owner"
+	case err != nil:
+		o.reason, o.err, o.status = "store", err, http.StatusServiceUnavailable
+	case owner.Disabled:
+		o.reason = "disabled"
+	case owner.Sub != sub:
+		o.reason = "not_owner"
+	default:
+		o.allow, o.reason = true, "owner"
 	}
 	return o
 }

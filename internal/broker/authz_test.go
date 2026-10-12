@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/layertwo/tunnels/internal/idp"
 	"github.com/layertwo/tunnels/internal/store"
 )
 
@@ -765,5 +766,145 @@ func TestMachineLookupErrorIs503(t *testing.T) {
 	r.users.bySubErr = errors.New("dial tcp 10.0.0.5:5432: connect: connection refused")
 	if w := r.serve(http.MethodGet, sharedRequest("nas-blog")); w.Code != http.StatusServiceUnavailable || w.Body.Len() != 0 || len(w.Header()) != 0 {
 		t.Errorf("owner lookup = %d %v %q, want an empty 503", w.Code, w.Header(), w.Body)
+	}
+}
+
+// --- SSH (bearer) mode ---
+
+const sshDomain = "ssh.tunnels.test"
+
+// newSSHRig is the authz rig with the SSH subtree on and a fake token verifier.
+func newSSHRig() (*authzRig, *fakeVerifier) {
+	r := newAuthzRig()
+	v := &fakeVerifier{sub: "sub-alice"}
+	r.authz.SSHDomain = sshDomain
+	r.authz.Verifier = v
+	return r, v
+}
+
+// sshRequest is what Traefik's forwardAuth sends for a terminal dialing alice's SSH tunnel: a bearer
+// token and no identity headers (the OIDC plugin is not in that route).
+func sshRequest(auth string) http.Header {
+	h := http.Header{}
+	h.Set("X-Forwarded-Host", "alice-box1."+sshDomain)
+	if auth != "" {
+		h.Set("Authorization", auth)
+	}
+	return h
+}
+
+func TestSSHOwnerAllowed(t *testing.T) {
+	const token = "Distinctive-SSH-Token"
+	// The SSH host is normalised exactly like a site label: an uppercase host is the same host.
+	for _, host := range []string{"alice-box1." + sshDomain, "Alice-Box1.SSH.Tunnels.Test"} {
+		r, v := newSSHRig()
+		h := sshRequest("Bearer " + token)
+		h.Set("X-Forwarded-Host", host)
+		w := r.serve(http.MethodGet, h)
+		if w.Code != http.StatusOK || w.Body.Len() != 0 {
+			t.Errorf("%s = %d %q, want 200 and no body", host, w.Code, w.Body)
+		}
+		// A site answers with the visitor's username; an SSH visitor has none, so no header.
+		if got := w.Header().Values("X-Tunnel-User"); len(got) != 0 {
+			t.Errorf("%s: X-Tunnel-User = %q, want no header", host, got)
+		}
+		if v.token != token {
+			t.Errorf("%s: the verifier was asked about %q, want %q", host, v.token, token)
+		}
+		if strings.Contains(r.logs.String(), token) {
+			t.Errorf("%s: the log holds the token:\n%s", host, r.logs)
+		}
+	}
+}
+
+func TestSSHDenied(t *testing.T) {
+	tests := []struct {
+		name     string
+		mod      func(r *authzRig, v *fakeVerifier, h http.Header)
+		want     int
+		lookups  int  // how many times the owner store may be asked
+		verified bool // whether the verifier may be asked at all
+	}{
+		{"no bearer token", func(_ *authzRig, _ *fakeVerifier, h http.Header) { delete(h, "Authorization") }, http.StatusUnauthorized, 0, false},
+		{"malformed authorization", func(_ *authzRig, _ *fakeVerifier, h http.Header) { h.Set("Authorization", "good") }, http.StatusUnauthorized, 0, false},
+		{"invalid token", func(_ *authzRig, v *fakeVerifier, _ http.Header) { v.err = idp.ErrInvalidToken }, http.StatusUnauthorized, 0, true},
+		{"not the owner", func(_ *authzRig, v *fakeVerifier, _ http.Header) { v.sub = "sub-bob" }, http.StatusForbidden, 1, true},
+		{"unknown owner", func(_ *authzRig, _ *fakeVerifier, h http.Header) { h.Set("X-Forwarded-Host", "carol-box1."+sshDomain) }, http.StatusForbidden, 1, true},
+		{"disabled owner", func(_ *authzRig, v *fakeVerifier, h http.Header) {
+			v.sub = "sub-dave"
+			h.Set("X-Forwarded-Host", "dave-box1."+sshDomain)
+		}, http.StatusForbidden, 1, true},
+		{"verifier infrastructure error", func(_ *authzRig, v *fakeVerifier, _ http.Header) { v.err = errors.New("jwks: connection refused") }, http.StatusServiceUnavailable, 0, true},
+		{"owner store error", func(r *authzRig, _ *fakeVerifier, _ http.Header) {
+			r.users.byHandleErr = errors.New("connection refused")
+		}, http.StatusServiceUnavailable, 1, true},
+		{"port", func(_ *authzRig, _ *fakeVerifier, h http.Header) {
+			h.Set("X-Forwarded-Host", "alice-box1."+sshDomain+":443")
+		}, http.StatusForbidden, 0, false},
+		{"trailing dot", func(_ *authzRig, _ *fakeVerifier, h http.Header) {
+			h.Set("X-Forwarded-Host", "alice-box1."+sshDomain+".")
+		}, http.StatusForbidden, 0, false},
+		{"extra label", func(_ *authzRig, _ *fakeVerifier, h http.Header) {
+			h.Set("X-Forwarded-Host", "x.alice-box1."+sshDomain)
+		}, http.StatusForbidden, 0, false},
+		{"two host lines", func(_ *authzRig, _ *fakeVerifier, h http.Header) {
+			h["X-Forwarded-Host"] = []string{"alice-box1." + sshDomain, "alice-box1." + sshDomain}
+		}, http.StatusForbidden, 0, false},
+		// The two modes must not cross-talk: identity headers never authorize an SSH host, and a
+		// bearer token never authorizes a site host.
+		{"identity headers do not authorize an ssh host", func(_ *authzRig, _ *fakeVerifier, h http.Header) {
+			delete(h, "Authorization")
+			h.Set("X-Tunnels-Sub", "sub-alice")
+			h.Set("X-Tunnels-User", "alice")
+		}, http.StatusUnauthorized, 0, false},
+		{"a bearer token does not authorize a site host", func(_ *authzRig, _ *fakeVerifier, h http.Header) {
+			h.Set("X-Forwarded-Host", "alice-blog."+sitesDomain)
+		}, http.StatusForbidden, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, v := newSSHRig()
+			h := sshRequest("Bearer good")
+			tt.mod(r, v, h)
+			w := r.serve(http.MethodGet, h)
+
+			if w.Code != tt.want || w.Body.Len() != 0 {
+				t.Errorf("= %d %q, want an empty %d", w.Code, w.Body, tt.want)
+			}
+			if got := len(r.users.calls); got > tt.lookups {
+				t.Errorf("%d owner lookups %q, want at most %d (cheap checks come first)", got, r.users.calls, tt.lookups)
+			}
+			if tt.verified && v.calls == 0 {
+				t.Errorf("the verifier was never asked, but it should have been")
+			}
+			if !tt.verified && v.calls != 0 {
+				t.Errorf("the verifier was asked %d times, want none", v.calls)
+			}
+		})
+	}
+}
+
+// A site host still decides only from the gate's identity headers: a bearer token is ignored there,
+// so a site with no X-Tunnels-Sub is refused even with a good token.
+func TestSiteStillUsesHeaders(t *testing.T) {
+	r, v := newSSHRig()
+	h := http.Header{}
+	h.Set("X-Forwarded-Host", "alice-blog."+sitesDomain)
+	h.Set("Authorization", "Bearer good")
+	if w := r.serve(http.MethodGet, h); w.Code != http.StatusForbidden || w.Body.Len() != 0 {
+		t.Errorf("= %d %q, want an empty 403", w.Code, w.Body)
+	}
+	if v.calls != 0 {
+		t.Errorf("the sites path consulted the bearer verifier %d times, want none", v.calls)
+	}
+}
+
+// decideSSH is only reached for a label SSHLabel accepted, so this guard is defensive: an unparseable
+// label must still fail closed rather than panic or allow.
+func TestDecideSSHRejectsAnUnparseableLabel(t *testing.T) {
+	r, _ := newSSHRig()
+	o := r.authz.decideSSH(httptest.NewRequest(http.MethodGet, "/authz", nil), "not_a_label")
+	if o.allow || o.status != http.StatusForbidden {
+		t.Errorf("outcome = %+v, want a 403 deny", o)
 	}
 }
