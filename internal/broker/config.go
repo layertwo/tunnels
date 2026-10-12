@@ -37,6 +37,10 @@ type Config struct {
 	MachinesEnabled bool
 	MetricsEnabled  bool
 
+	// SSHDomain is the domain SSH tunnels live under, without a scheme, a port or a trailing dot. It is
+	// empty when the feature is off, and the bootstrap document then omits it.
+	SSHDomain string
+
 	FrpsDashboardURL      string
 	FrpsDashboardUser     string
 	FrpsDashboardPassword string
@@ -64,6 +68,10 @@ func badDashboardURL(raw string) bool {
 	u, err := url.Parse(raw)
 	return raw != "" && (err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery)
 }
+
+// sectionOn reports whether a feature section leaves its feature on: an absent key means on, and only
+// an explicit `enabled = false` turns it off.
+func sectionOn(enabled *bool) bool { return enabled == nil || *enabled }
 
 // pick returns the environment value when it is set, else the file's value when the key is present (a
 // nil pointer is an absent key), else the built-in default. The environment always wins, so a
@@ -105,6 +113,7 @@ func LoadConfig(getenv func(string) string, file *FileConfig) (Config, error) {
 		identity identityFile
 		tunnels  tunnelsFile
 		machines machinesFile
+		ssh      sshFile
 	)
 	if file != nil {
 		if file.Server != nil {
@@ -118,6 +127,9 @@ func LoadConfig(getenv func(string) string, file *FileConfig) (Config, error) {
 		}
 		if file.Machines != nil {
 			machines = *file.Machines
+		}
+		if file.SSH != nil {
+			ssh = *file.SSH
 		}
 	}
 	c := Config{
@@ -162,11 +174,36 @@ func LoadConfig(getenv func(string) string, file *FileConfig) (Config, error) {
 			bad("POCKET_ID_URL", "is set but the config file has no [machines] section; add one or unset POCKET_ID_URL")
 		}
 	default:
-		c.MachinesEnabled = machines.Enabled == nil || *machines.Enabled
+		c.MachinesEnabled = sectionOn(machines.Enabled)
 	}
 	// With no file at all, metrics keep today's behaviour: always mounted. A file turns the feature on
 	// only with a [metrics] section that is not enabled = false.
-	c.MetricsEnabled = file == nil || (file.Metrics != nil && (file.Metrics.Enabled == nil || *file.Metrics.Enabled))
+	c.MetricsEnabled = file == nil || (file.Metrics != nil && sectionOn(file.Metrics.Enabled))
+
+	// The SSH feature follows the same switch as machines. With no file it is on exactly when
+	// SSH_DOMAIN is set, the behaviour before the file existed; with a file it is on exactly when the
+	// [ssh] section is present and not enabled = false. SSH_DOMAIN turns the feature on, so with no
+	// section it is a half-migration a typo could cause: loud, naming both. A disabled section's
+	// domain is ignored, so a malformed one is not a startup error, and nothing is resolved.
+	sshOn := false
+	switch {
+	case file == nil:
+		sshOn = getenv("SSH_DOMAIN") != ""
+	case file.SSH == nil:
+		if getenv("SSH_DOMAIN") != "" {
+			bad("SSH_DOMAIN", "is set but the config file has no [ssh] section; add one or unset SSH_DOMAIN")
+		}
+	default:
+		sshOn = sectionOn(ssh.Enabled)
+	}
+	if sshOn {
+		c.SSHDomain = host("SSH_DOMAIN", required("SSH_DOMAIN", pick(getenv, "SSH_DOMAIN", ssh.Domain, "")))
+	}
+	// With the two domains equal decide's site-first dispatch claims every SSH host, so the feature
+	// would be silently dead: refuse the pair rather than start a broker whose SSH routes never fire.
+	if c.SSHDomain != "" && c.SSHDomain == c.SitesDomain {
+		bad("SSH_DOMAIN", "must differ from SITES_DOMAIN")
+	}
 
 	// The credentials are separate variables; none in the URL, which would also end up in errors and logs.
 	if badDashboardURL(c.FrpsDashboardURL) {

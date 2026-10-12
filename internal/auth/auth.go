@@ -26,6 +26,7 @@ type Bootstrap struct {
 	APIResource   string `json:"api_resource"`
 	ServiceHost   string `json:"service_host"`
 	SitesDomain   string `json:"sites_domain"`
+	SSHDomain     string `json:"ssh_domain,omitempty"`
 	MinCLIVersion string `json:"min_cli_version"`
 }
 

@@ -38,6 +38,10 @@ pocket_id_api_id = "api-tunnels"
 
 [metrics]
 enabled = true
+
+[ssh]
+enabled = true
+domain  = "ssh.tunnels.test"
 `)
 	got, err := ParseFile(data)
 	if err != nil {
@@ -57,6 +61,7 @@ enabled = true
 		},
 		Machines: &machinesFile{Enabled: ptr(true), PocketIDURL: ptr("https://idp.layertwo.dev"), PocketIDAPIID: ptr("api-tunnels")},
 		Metrics:  &metricsFile{Enabled: ptr(true)},
+		SSH:      &sshFile{Enabled: ptr(true), Domain: ptr("ssh.tunnels.test")},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("file =\n%+v\nwant\n%+v", got, want)
@@ -76,7 +81,7 @@ func TestParseFileEmpty(t *testing.T) {
 
 // Absent differs from present-but-empty, and from a switch set to false.
 func TestParseFileAbsentVsEmpty(t *testing.T) {
-	got, err := ParseFile([]byte("[server]\n\n[machines]\nenabled = false\n"))
+	got, err := ParseFile([]byte("[server]\n\n[machines]\nenabled = false\n\n[ssh]\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,6 +90,9 @@ func TestParseFileAbsentVsEmpty(t *testing.T) {
 	}
 	if got.Machines == nil || got.Machines.Enabled == nil || *got.Machines.Enabled {
 		t.Errorf("machines = %+v, want enabled=false explicitly set", got.Machines)
+	}
+	if got.SSH == nil || got.SSH.Enabled != nil || got.SSH.Domain != nil {
+		t.Errorf("empty [ssh] = %+v, want present with no keys set", got.SSH)
 	}
 	if got.Identity != nil || got.Tunnels != nil || got.Metrics != nil {
 		t.Errorf("absent sections = %+v, %+v, %+v; want nil", got.Identity, got.Tunnels, got.Metrics)
@@ -98,6 +106,7 @@ func TestParseFileRejects(t *testing.T) {
 		{"typo section", "[machine]\nenabled = true\n", "machine"},
 		{"unknown key", "[tunnels]\nbogus = 1\n", "bogus"},
 		{"unknown key in a known section", "[server]\nlisten = \":1\"\n", "listen"},
+		{"unknown key in ssh", "[ssh]\nssh_domain = \"ssh.tunnels.test\"\n", "ssh_domain"},
 		{"malformed toml", "[server\nlisten_addr = \":1\"\n", "config file"},
 		{"bad value type", "[tunnels]\nmax_tunnels_per_user = \"many\"\n", "config file"},
 		{"secret pocket id key", "[machines]\npocket_id_api_key = \"hunter2\"\n", "pocket_id_api_key"},

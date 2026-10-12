@@ -35,6 +35,7 @@ type Hooks struct {
 	Resolver          Resolver
 	Frps              Frps
 	Secret            string        // the last path element frps is configured with; empty refuses everything
+	SSHDomain         string        // the domain SSH tunnels live under; empty accepts no custom domain
 	MaxTunnelsPerUser int           // proxies one user may have online
 	BandwidthLimit    string        // applied to every proxy, in "server" mode
 	Timeout           time.Duration // for one decision; zero means 8 s
@@ -136,7 +137,8 @@ func (h *Hooks) login(ctx context.Context, raw json.RawMessage) (plugin.Response
 	return h.accept(ctx, plugin.OpLogin, c, who...), nil
 }
 
-// newProxy lets through plain http tunnels the user owns, up to the limit.
+// newProxy lets through plain http tunnels the user owns, and ssh tunnels under the configured
+// domain, up to the limit.
 func (h *Hooks) newProxy(ctx context.Context, raw json.RawMessage) (plugin.Response, error) {
 	var c plugin.NewProxyContent
 	if err := json.Unmarshal(raw, &c); err != nil {
@@ -149,11 +151,17 @@ func (h *Hooks) newProxy(ctx context.Context, raw json.RawMessage) (plugin.Respo
 	if h.BandwidthLimit == "" { // frps reads "" as no limit, so this must not fail open
 		return h.reject(ctx, plugin.OpNewProxy, "cannot verify your tunnels right now, try again", errors.New("hooks: no bandwidth limit configured"), who...), nil
 	}
-	if c.ProxyType != "http" || len(c.CustomDomains) > 0 || len(c.Locations) > 0 {
-		return h.reject(ctx, plugin.OpNewProxy, "only plain http tunnels are allowed", nil, who...), nil
-	}
-	if !ownsProxy(handle, c.ProxyName, c.SubDomain) {
-		return h.reject(ctx, plugin.OpNewProxy, "name "+c.ProxyName+" is not yours", nil, who...), nil
+	switch {
+	case c.ProxyType == "http" && len(c.CustomDomains) == 0 && len(c.Locations) == 0:
+		if !ownsProxy(handle, c.ProxyName, c.SubDomain) {
+			return h.reject(ctx, plugin.OpNewProxy, "name "+c.ProxyName+" is not yours", nil, who...), nil
+		}
+	case c.ProxyType == "http" && c.SubDomain == "" && len(c.Locations) == 0 && len(c.CustomDomains) == 1:
+		if !ownsSSHProxy(handle, c.ProxyName, c.CustomDomains[0], h.SSHDomain) {
+			return h.reject(ctx, plugin.OpNewProxy, "name "+c.ProxyName+" is not yours", nil, who...), nil
+		}
+	default:
+		return h.reject(ctx, plugin.OpNewProxy, "only plain http and ssh tunnels are allowed", nil, who...), nil
 	}
 	// ponytail: the dashboard only counts a proxy once frps has acted on the answer given here, so a
 	// user who connects many clients at once can overshoot the limit (12 at once against a limit of 3
@@ -170,14 +178,30 @@ func (h *Hooks) newProxy(ctx context.Context, raw json.RawMessage) (plugin.Respo
 	return h.accept(ctx, plugin.OpNewProxy, c, who...), nil
 }
 
+// proxyTunnel splits an frp proxy name into the owner's handle and the tunnel name, and reports
+// whether it is a name this broker issues at all: <handle>.default or <handle>.<name> with a valid
+// handle and tunnel name.
+func proxyTunnel(handle, proxy string) (tunnel string, ok bool) {
+	tunnel, ok = strings.CutPrefix(proxy, handle+".")
+	return tunnel, ok && names.ValidHandle(handle) &&
+		(tunnel == names.Default || names.ValidTunnelName(tunnel))
+}
+
 // ownsProxy reports whether proxy and subdomain are the name and the label of one of handle's
 // tunnels: <handle>.default with <handle>, <handle>.<name> with <handle>-<name>. The handle is
 // checked as well, because the label has to parse back to this owner.
 func ownsProxy(handle, proxy, subdomain string) bool {
-	tunnel, ok := strings.CutPrefix(proxy, handle+".")
-	return ok && names.ValidHandle(handle) &&
-		(tunnel == names.Default || names.ValidTunnelName(tunnel)) &&
-		subdomain == names.Label(handle, tunnel)
+	tunnel, ok := proxyTunnel(handle, proxy)
+	return ok && subdomain == names.Label(handle, tunnel)
+}
+
+// ownsSSHProxy is ownsProxy for an SSH tunnel: the same name, but the custom domain must be exactly
+// <label>.<sshDomain> with an empty subdomain. sshDomain empty (the feature off) refuses every
+// custom domain. The comparison is exact, so a port, a trailing dot, an extra label, uppercase or
+// another owner's label is refused.
+func ownsSSHProxy(handle, proxy, domain, sshDomain string) bool {
+	tunnel, ok := proxyTunnel(handle, proxy)
+	return ok && sshDomain != "" && domain == names.Label(handle, tunnel)+"."+sshDomain
 }
 
 func (h *Hooks) closeProxy(ctx context.Context, raw json.RawMessage) (plugin.Response, error) {

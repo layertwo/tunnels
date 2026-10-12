@@ -147,6 +147,32 @@ func TestSiteLabel(t *testing.T) {
 	}
 }
 
+func TestSSHLabel(t *testing.T) {
+	const sshDomain = "ssh.tunnels.test"
+	tests := []struct {
+		host, label string
+		ok          bool
+	}{
+		{"alice-box1.ssh.tunnels.test", "alice-box1", true},
+		{"Alice-Box1.SSH.Tunnels.Test", "alice-box1", true},
+		{"alice.ssh.tunnels.test", "alice", true},
+		{"alice-box1.ssh.tunnels.test:443", "", false},
+		{"alice-box1.ssh.tunnels.test.", "", false},
+		{"x.alice-box1.ssh.tunnels.test", "", false},
+		{"ssh.tunnels.test", "", false},
+		{"alice.w.tunnels.test", "", false},
+		{"alice.ssh.tunnels.test.evil.com", "", false},
+		{"a.com, b.com", "", false},
+		{"", "", false},
+	}
+	for _, tt := range tests {
+		label, ok := SSHLabel(tt.host, sshDomain)
+		if label != tt.label || ok != tt.ok {
+			t.Errorf("SSHLabel(%q) = %q, %v; want %q, %v", tt.host, label, ok, tt.label, tt.ok)
+		}
+	}
+}
+
 // ValidHandle is what a stored handle must satisfy before a label is built from it: Label(handle, x)
 // has to parse back to this owner, so no dash, no capitals and nothing HandleFromUsername refuses.
 func TestValidHandle(t *testing.T) {

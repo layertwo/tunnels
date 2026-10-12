@@ -290,24 +290,42 @@ func TestAPIMeDependencyDownIs503(t *testing.T) {
 
 func TestWellKnown(t *testing.T) {
 	r := newServerRig(t)
-	w := r.do("GET", "/.well-known/tunnels.json", nil, "")
-	if w.Code != 200 || w.Header().Get("Content-Type") != "application/json" {
-		t.Fatalf("= %d %s", w.Code, w.Header())
-	}
-	var got map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
-		t.Fatal(err)
-	}
-	want := map[string]any{
+	base := map[string]any{
 		"issuer": r.idp.URL, "cli_client_id": "tunnels-cli", "api_resource": mockidp.APIResource,
 		"service_host": "tunnels.layertwo.dev", "sites_domain": sitesDomain, "min_cli_version": "0.2.0",
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("document =\n%v\nwant\n%v", got, want)
+	withSSH := map[string]any{"ssh_domain": "ssh.tunnels.test"}
+	for k, v := range base {
+		withSSH[k] = v
 	}
-	// Nothing in it is a secret, and the endpoint needs no login.
-	if strings.Contains(w.Body.String(), pluginSecret) {
-		t.Error("the document contains the plugin secret")
+	for _, tt := range []struct {
+		name, sshDomain string
+		want            map[string]any
+	}{
+		// A release starts with no ssh configured: the key is omitted, not empty.
+		{"no ssh domain", "", base},
+		{"ssh domain set", "ssh.tunnels.test", withSSH},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := r.cfg
+			cfg.SSHDomain = tt.sshDomain
+			r.h = NewHandler(cfg, r.d)
+			w := r.do("GET", "/.well-known/tunnels.json", nil, "")
+			if w.Code != 200 || w.Header().Get("Content-Type") != "application/json" {
+				t.Fatalf("= %d %s", w.Code, w.Header())
+			}
+			var got map[string]any
+			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("document =\n%v\nwant\n%v", got, tt.want)
+			}
+			// Nothing in it is a secret, and the endpoint needs no login.
+			if strings.Contains(w.Body.String(), pluginSecret) {
+				t.Error("the document contains the plugin secret")
+			}
+		})
 	}
 }
 
