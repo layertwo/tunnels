@@ -513,18 +513,51 @@ func TestUpSSHServerDisabled(t *testing.T) {
 
 // ---- ssh-config
 
-// ssh-config prints the exact block to paste into ~/.ssh/config, for the named tunnel's label and the
-// server's ssh domain.
+// ssh-config prints the exact block to paste into ~/.ssh/config, for the named tunnel's label and,
+// with no --name, for the default tunnel's.
 func TestSSHConfigPrintsBlock(t *testing.T) {
-	w := newWorld(t)
-	w.loggedIn()
-	w.sshDomain = "ssh.tunnels.test"
-	if c := w.main("ssh-config", "--name", "box1"); c != 0 {
-		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"named", []string{"ssh-config", "--name", "box1"},
+			"Host alice-box1\n\tHostName alice-box1.ssh.tunnels.test\n\tProxyCommand tunnel dial %h %p\n"},
+		{"default", []string{"ssh-config"},
+			"Host alice\n\tHostName alice.ssh.tunnels.test\n\tProxyCommand tunnel dial %h %p\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newWorld(t)
+			w.loggedIn()
+			w.sshDomain = "ssh.tunnels.test"
+			if c := w.main(tc.args...); c != 0 {
+				t.Fatalf("exit %d; stderr:\n%s", c, w.err)
+			}
+			if got := w.out.String(); got != tc.want {
+				t.Errorf("stdout = %q, want %q", got, tc.want)
+			}
+		})
 	}
-	want := "Host alice-box1\n\tHostName alice-box1.ssh.tunnels.test\n\tProxyCommand tunnel dial %h %p\n"
-	if got := w.out.String(); got != want {
-		t.Errorf("stdout = %q, want %q", got, want)
+}
+
+// A --name the broker would refuse is refused here, like up does: the block is pasted into
+// ~/.ssh/config, so a newline in the name must not smuggle in a second Host line.
+func TestSSHConfigRejectsBadName(t *testing.T) {
+	for _, name := range []string{"Box", "a_b", "default", "x\nHost evil"} {
+		t.Run(name, func(t *testing.T) {
+			w := newWorld(t)
+			w.loggedIn()
+			w.sshDomain = "ssh.tunnels.test"
+			if c := w.main("ssh-config", "--name", name); c != 2 {
+				t.Errorf("exit %d, want 2", c)
+			}
+			if !strings.Contains(w.err.String(), "is not a tunnel name") {
+				t.Errorf("stderr does not name the rule:\n%s", w.err)
+			}
+			if w.out.String() != "" {
+				t.Errorf("stdout is not empty:\n%s", w.out)
+			}
+		})
 	}
 }
 

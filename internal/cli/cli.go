@@ -270,6 +270,10 @@ func sshConfig(ctx context.Context, env Env, args []string) int {
 		fmt.Fprint(env.Stderr, usage)
 		return 2
 	}
+	if *name != "" && !names.ValidTunnelName(*name) {
+		fmt.Fprintf(env.Stderr, "%q is not a tunnel name: use 1 to 42 lowercase letters, digits and inner dashes, other than %q\n%s\n", *name, names.Default, usageUp)
+		return 2
+	}
 	s, err := store(env)
 	if err != nil {
 		fmt.Fprintln(env.Stderr, err)
