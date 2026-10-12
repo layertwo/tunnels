@@ -939,8 +939,9 @@ func TestSSHEndToEnd(t *testing.T) {
 		_ = conn.Close()
 		_ = local.Close()
 	}
-	// A path no location matches is reached by no bridge: one owner's traffic must not land on another.
-	if conn, resp, err := (&websocket.Dialer{}).Dial("ws://"+s.vhost+"/alicex/", http.Header{"Host": []string{sshDomain}}); err == nil {
+	// The trailing boundary stops a longer same-owner path from swallowing a tunnel: /alicex/ matches
+	// neither /alice/ nor /alice-box1/, so no bridge answers it.
+	if conn, resp, err := (&websocket.Dialer{HandshakeTimeout: 10 * time.Second}).Dial("ws://"+s.vhost+"/alicex/", http.Header{"Host": []string{sshDomain}}); err == nil {
 		resp.Body.Close()
 		_ = conn.Close()
 		t.Error("dialled /alicex/, which no tunnel registered")
