@@ -618,9 +618,10 @@ All of them fail closed.
   metrics and machines (both implemented; machines are broker-owned principals with their own key
   and row, see the [machines design](plans/2026-10-11-tunnels-machines-design.md), and metrics a
   scrape plus NetworkPolicy).
-- **Later:** SSH, a web UI, live tunnel status, frps HA by client fan-out. **v0.4.0** also adds
-  configuration by command-line flags, which override the environment (so an option can be set on the
-  command line as well as in the environment).
+- **Later:** SSH, a web UI, live tunnel status, frps HA by client fan-out. **v0.4.0** also moves the
+  broker's settings into a configuration file — one section per feature, and a feature with no section
+  is **off** (see the [broker config design](plans/2026-10-12-tunnels-broker-config-design.md)). The
+  environment keeps the secrets and overrides a file value.
 
 ## Verification
 
