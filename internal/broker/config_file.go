@@ -50,6 +50,12 @@ type metricsFile struct {
 	Enabled *bool `toml:"enabled"`
 }
 
+// sshFile is the `[ssh]` section: a switchable feature that publishes local services under a domain.
+type sshFile struct {
+	Enabled *bool   `toml:"enabled"`
+	Domain  *string `toml:"domain"`
+}
+
 // FileConfig is the config file's schema. A section pointer is nil when the section is absent, which
 // is how a feature with no section reads as off.
 type FileConfig struct {
@@ -58,6 +64,7 @@ type FileConfig struct {
 	Tunnels  *tunnelsFile  `toml:"tunnels"`
 	Machines *machinesFile `toml:"machines"`
 	Metrics  *metricsFile  `toml:"metrics"`
+	SSH      *sshFile      `toml:"ssh"`
 }
 
 // secretKeys are settings that must never appear in the file: it is world-readable and committed, so a

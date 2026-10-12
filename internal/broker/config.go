@@ -37,6 +37,10 @@ type Config struct {
 	MachinesEnabled bool
 	MetricsEnabled  bool
 
+	// SSHDomain is the domain SSH tunnels live under, without a scheme, a port or a trailing dot. It is
+	// empty when the feature is off, and the bootstrap document then omits it.
+	SSHDomain string
+
 	FrpsDashboardURL      string
 	FrpsDashboardUser     string
 	FrpsDashboardPassword string
@@ -105,6 +109,7 @@ func LoadConfig(getenv func(string) string, file *FileConfig) (Config, error) {
 		identity identityFile
 		tunnels  tunnelsFile
 		machines machinesFile
+		ssh      sshFile
 	)
 	if file != nil {
 		if file.Server != nil {
@@ -118,6 +123,9 @@ func LoadConfig(getenv func(string) string, file *FileConfig) (Config, error) {
 		}
 		if file.Machines != nil {
 			machines = *file.Machines
+		}
+		if file.SSH != nil {
+			ssh = *file.SSH
 		}
 	}
 	c := Config{
@@ -167,6 +175,26 @@ func LoadConfig(getenv func(string) string, file *FileConfig) (Config, error) {
 	// With no file at all, metrics keep today's behaviour: always mounted. A file turns the feature on
 	// only with a [metrics] section that is not enabled = false.
 	c.MetricsEnabled = file == nil || (file.Metrics != nil && (file.Metrics.Enabled == nil || *file.Metrics.Enabled))
+
+	// The SSH feature follows the same switch as machines. With no file it is on exactly when
+	// SSH_DOMAIN is set, the behaviour before the file existed; with a file it is on exactly when the
+	// [ssh] section is present and not enabled = false. SSH_DOMAIN turns the feature on, so with no
+	// section it is a half-migration a typo could cause: loud, naming both. A disabled section's
+	// domain is ignored, so a malformed one is not a startup error, and nothing is resolved.
+	sshOn := false
+	switch {
+	case file == nil:
+		sshOn = getenv("SSH_DOMAIN") != ""
+	case file.SSH == nil:
+		if getenv("SSH_DOMAIN") != "" {
+			bad("SSH_DOMAIN", "is set but the config file has no [ssh] section; add one or unset SSH_DOMAIN")
+		}
+	default:
+		sshOn = ssh.Enabled == nil || *ssh.Enabled
+	}
+	if sshOn {
+		c.SSHDomain = host("SSH_DOMAIN", required("SSH_DOMAIN", pick(getenv, "SSH_DOMAIN", ssh.Domain, "")))
+	}
 
 	// The credentials are separate variables; none in the URL, which would also end up in errors and logs.
 	if badDashboardURL(c.FrpsDashboardURL) {

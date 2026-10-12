@@ -35,6 +35,7 @@ type Hooks struct {
 	Resolver          Resolver
 	Frps              Frps
 	Secret            string        // the last path element frps is configured with; empty refuses everything
+	SSHDomain         string        // the domain SSH tunnels live under; empty accepts no custom domain
 	MaxTunnelsPerUser int           // proxies one user may have online
 	BandwidthLimit    string        // applied to every proxy, in "server" mode
 	Timeout           time.Duration // for one decision; zero means 8 s

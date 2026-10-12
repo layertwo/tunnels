@@ -47,6 +47,7 @@ type Authz struct {
 	Machines    MachineStore
 	Shares      ShareMatcher
 	SitesDomain string        // the domain sites live under, without a port or a trailing dot
+	SSHDomain   string        // the domain SSH tunnels live under; empty when the feature is off
 	Timeout     time.Duration // for the store lookup; zero means 5 s
 	Log         *slog.Logger
 	Metrics     LookupObserver // optional; times the store lookups

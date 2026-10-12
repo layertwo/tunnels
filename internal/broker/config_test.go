@@ -199,6 +199,10 @@ func TestLoadConfigRejects(t *testing.T) {
 		{"SERVICE_HOST", "https://tunnels.layertwo.dev"},
 		{"SERVICE_HOST", "tunnels.layertwo.dev:443"},
 		{"SERVICE_HOST", "tunnels.layertwo.dev/"},
+		{"SSH_DOMAIN", "ssh.tunnels.test:443"},
+		{"SSH_DOMAIN", "ssh.tunnels.test."},
+		{"SSH_DOMAIN", "https://ssh.tunnels.test"},
+		{"SSH_DOMAIN", "ssh tunnels"},
 		{"FRPS_DASHBOARD_URL", "frps:7500"},
 		{"FRPS_DASHBOARD_URL", "ftp://frps:7500"},
 		{"FRPS_DASHBOARD_URL", "http://"},
@@ -248,6 +252,8 @@ func TestLoadConfigAccepts(t *testing.T) {
 		{"SITES_DOMAIN", "W.Tunnels.Layertwo.Dev", func(c Config) bool { return c.SitesDomain == "w.tunnels.layertwo.dev" }},
 		{"SITES_DOMAIN", "sites", func(c Config) bool { return c.SitesDomain == "sites" }},
 		{"SERVICE_HOST", "Tunnels.Layertwo.Dev", func(c Config) bool { return c.ServiceHost == "tunnels.layertwo.dev" }},
+		{"SSH_DOMAIN", "SSH.Tunnels.Test", func(c Config) bool { return c.SSHDomain == "ssh.tunnels.test" }},
+		{"SSH_DOMAIN", "ssh", func(c Config) bool { return c.SSHDomain == "ssh" }},
 		{"DEFAULT_BANDWIDTH_LIMIT", "512KB", func(c Config) bool { return c.BandwidthLimit == "512KB" }},
 		{"DEFAULT_BANDWIDTH_LIMIT", "1.5MB", func(c Config) bool { return c.BandwidthLimit == "1.5MB" }},
 		{"FRPS_DASHBOARD_URL", "https://frps.example.com:7500/", func(c Config) bool { return c.FrpsDashboardURL == "https://frps.example.com:7500/" }},
@@ -482,5 +488,80 @@ func TestLoadConfigMachinesOffWithoutSection(t *testing.T) {
 	}
 	if got.MachinesEnabled || got.PocketIDURL != "" || got.PocketIDAPIKey != "" || got.PocketIDAPIID != "" {
 		t.Errorf("machines = %+v, want off with no config", got)
+	}
+}
+
+// sshVars is a file-based environment with the machine config off, so a case for one feature does not
+// trip another's arm.
+func sshVars() map[string]string {
+	vars := allVars()
+	for _, k := range []string{"POCKET_ID_URL", "POCKET_ID_API_KEY", "POCKET_ID_API_ID"} {
+		delete(vars, k)
+	}
+	return vars
+}
+
+// The [ssh] section mirrors [machines]: on when present and not enabled = false, off with no section.
+// The domain may come from the file or from SSH_DOMAIN, which wins.
+func TestLoadConfigSSH(t *testing.T) {
+	withEnv := func() map[string]string {
+		v := sshVars()
+		v["SSH_DOMAIN"] = "ssh.env.test"
+		return v
+	}
+	tests := []struct {
+		name, want, wantErr string
+		vars                map[string]string
+		file                *FileConfig
+	}{
+		{"the section supplies the domain", "ssh.tunnels.test", "", sshVars(), &FileConfig{SSH: &sshFile{Domain: ptr("ssh.tunnels.test")}}},
+		{"the environment wins over the section", "ssh.env.test", "", withEnv(), &FileConfig{SSH: &sshFile{Domain: ptr("ssh.tunnels.test")}}},
+		{"uppercase normalises to lower", "ssh.tunnels.test", "", sshVars(), &FileConfig{SSH: &sshFile{Domain: ptr("SSH.Tunnels.Test")}}},
+		{"no section and no variable is off", "", "", sshVars(), &FileConfig{Server: &serverFile{}}},
+		{"enabled = false wins over a domain", "", "", withEnv(), &FileConfig{SSH: &sshFile{Enabled: ptr(false), Domain: ptr("ssh.tunnels.test")}}},
+		{"a disabled section is not validated", "", "", sshVars(), &FileConfig{SSH: &sshFile{Enabled: ptr(false), Domain: ptr("has:port")}}},
+		{"a section with a port is refused", "", "SSH_DOMAIN", sshVars(), &FileConfig{SSH: &sshFile{Domain: ptr("ssh.tunnels.test:443")}}},
+		{"a section with a trailing dot is refused", "", "SSH_DOMAIN", sshVars(), &FileConfig{SSH: &sshFile{Domain: ptr("ssh.tunnels.test.")}}},
+		{"an enabled section needs a domain", "", "SSH_DOMAIN", sshVars(), &FileConfig{SSH: &sshFile{Enabled: ptr(true)}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := loadFile(tt.vars, tt.file)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want one naming %s", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil || got.SSHDomain != tt.want {
+				t.Errorf("SSHDomain = %q, %v; want %q", got.SSHDomain, err, tt.want)
+			}
+		})
+	}
+}
+
+// A non-secret variable that turns ssh on, with no [ssh] section, is a half-migration a typo could
+// cause; it must be loud, naming both the variable and the missing section.
+func TestLoadConfigEnablingSSHWithoutSection(t *testing.T) {
+	vars := sshVars()
+	vars["SSH_DOMAIN"] = "ssh.env.test"
+	_, err := loadFile(vars, &FileConfig{Server: &serverFile{}})
+	if err == nil || !strings.Contains(err.Error(), "SSH_DOMAIN") || !strings.Contains(err.Error(), "[ssh]") {
+		t.Fatalf("err = %v, want one naming SSH_DOMAIN and [ssh]", err)
+	}
+}
+
+// With no file at all ssh keeps the environment-only behaviour: on exactly when SSH_DOMAIN is set.
+// A release must start with nothing configured.
+func TestLoadConfigSSHWithoutFile(t *testing.T) {
+	got, err := load(allVars())
+	if err != nil || got.SSHDomain != "" {
+		t.Fatalf("with no SSH_DOMAIN: %+v, %v; want off", got, err)
+	}
+	vars := allVars()
+	vars["SSH_DOMAIN"] = "ssh.tunnels.test"
+	got, err = load(vars)
+	if err != nil || got.SSHDomain != "ssh.tunnels.test" {
+		t.Fatalf("with SSH_DOMAIN: %+v, %v; want it set", got, err)
 	}
 }

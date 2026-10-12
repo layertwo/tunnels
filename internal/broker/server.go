@@ -37,10 +37,10 @@ func NewHandler(cfg Config, d Deps) http.Handler {
 	mux := http.NewServeMux()
 	// No method here: Hooks answers a wrong secret with 404 whatever the method, so a probe learns nothing.
 	mux.Handle("/plugin/", &Hooks{
-		Resolver: resolver, Frps: d.Frps, Secret: cfg.PluginSecret,
+		Resolver: resolver, Frps: d.Frps, Secret: cfg.PluginSecret, SSHDomain: cfg.SSHDomain,
 		MaxTunnelsPerUser: cfg.MaxTunnelsPerUser, BandwidthLimit: cfg.BandwidthLimit, Log: d.Log,
 	})
-	mux.Handle("/authz", Authz{Users: d.Users, Machines: d.Machines, Shares: d.Shares, SitesDomain: cfg.SitesDomain, Log: d.Log, Metrics: m})
+	mux.Handle("/authz", Authz{Users: d.Users, Machines: d.Machines, Shares: d.Shares, SitesDomain: cfg.SitesDomain, SSHDomain: cfg.SSHDomain, Log: d.Log, Metrics: m})
 	mux.HandleFunc("GET /api/me", s.me)
 	if cfg.MachinesEnabled {
 		mux.HandleFunc("POST /api/machines", s.machinesCreate)
@@ -207,7 +207,7 @@ func validShare(sh store.Share, put bool) bool {
 // wellKnown is what the CLI needs to find the identity provider and the service.
 func (s *server) wellKnown(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, auth.Bootstrap{Issuer: s.cfg.Issuer, CLIClientID: s.cfg.CLIClientID, APIResource: s.cfg.APIResource,
-		ServiceHost: s.cfg.ServiceHost, SitesDomain: s.cfg.SitesDomain, MinCLIVersion: s.cfg.MinCLIVersion})
+		ServiceHost: s.cfg.ServiceHost, SitesDomain: s.cfg.SitesDomain, SSHDomain: s.cfg.SSHDomain, MinCLIVersion: s.cfg.MinCLIVersion})
 }
 
 // bearerToken is the token of an Authorization header that holds exactly one "Bearer <token>".
