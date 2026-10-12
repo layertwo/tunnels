@@ -1788,6 +1788,46 @@ func TestDialRefusesForeignHost(t *testing.T) {
 	}
 }
 
+// A login made before the ssh domain was stored has no stored domain: dial falls back to the live
+// bootstrap rather than rejecting every host. A bootstrap that names none, or that cannot be
+// reached, says what to do.
+func TestDialWithoutAStoredSSHDomain(t *testing.T) {
+	t.Run("bootstrap advertises it", func(t *testing.T) {
+		w := newWorld(t)
+		w.loggedIn()                     // the stored login has no ssh domain
+		w.sshDomain = "ssh.tunnels.test" // but the live service now advertises one
+		if c := w.main("dial", "alice.ssh.tunnels.test", "22"); c != 1 {
+			t.Errorf("exit %d, want 1 (the connection, not the argument)", c)
+		}
+		if strings.Contains(w.err.String(), "is not an ssh host") || strings.Contains(w.err.String(), "Usage: tunnel dial") {
+			t.Errorf("dial rejected a host although the bootstrap named the domain:\n%s", w.err)
+		}
+	})
+
+	t.Run("bootstrap has none", func(t *testing.T) {
+		w := newWorld(t)
+		w.loggedIn()
+		if c := w.main("dial", "alice.ssh.tunnels.test", "22"); c != 1 {
+			t.Errorf("exit %d, want 1", c)
+		}
+		if !strings.Contains(w.err.String(), "tunnel login") {
+			t.Errorf("stderr does not say to log in again:\n%s", w.err)
+		}
+	})
+
+	t.Run("server unreachable", func(t *testing.T) {
+		w := newWorld(t)
+		tok := w.loggedIn()
+		tok.Server = "http://127.0.0.1:1"
+		if err := (auth.Store{Dir: w.dir}).Save(tok); err != nil {
+			t.Fatal(err)
+		}
+		if c := w.main("dial", "alice.ssh.tunnels.test", "22"); c != 1 || !strings.Contains(w.err.String(), "cannot reach http://127.0.0.1:1") {
+			t.Errorf("exit %d, stderr:\n%s", c, w.err)
+		}
+	})
+}
+
 // A directory where the CA bundle belongs makes the rename fail, so dial never opens a socket.
 func TestDialCannotWriteTheCABundle(t *testing.T) {
 	w := newWorld(t)

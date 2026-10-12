@@ -389,30 +389,49 @@ func dial(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintln(env.Stderr, err)
 		return 1
 	}
-	// ssh passes %h from ~/.ssh/config, so a mistyped or tampered HostName would otherwise send
-	// the access token to a third party. The login stored the service's ssh domain: a host outside
-	// it, or one carrying a port, is refused here before TLS and before any discovery.
-	if _, ok := names.SSHLabel(host, tok.SSHDomain); !ok {
-		return bad("%q is not an ssh host of this service", host)
-	}
 	// The provider is needed only to refresh, so it is discovered on first use: a fresh token dials
 	// with no .well-known request, and a momentarily broken endpoint cannot fail a dial that does
-	// not refresh.
+	// not refresh. A login with no stored ssh domain needs it too, for the domain alone.
 	var (
-		resolveOnce sync.Once
-		refresher   auth.OIDC
-		resolveErr  error
+		discoverOnce sync.Once
+		discovered   auth.Bootstrap
+		discoverErr  error
 	)
-	resolve := func(ctx context.Context) (auth.OIDC, error) {
-		resolveOnce.Do(func() {
-			b, err := auth.Discover(ctx, env.HTTP, tok.Server)
-			if err != nil {
-				resolveErr = fmt.Errorf("cannot reach %s: %v", tok.Server, err)
-				return
+	discover := func(ctx context.Context) (auth.Bootstrap, error) {
+		discoverOnce.Do(func() {
+			discovered, discoverErr = auth.Discover(ctx, env.HTTP, tok.Server)
+			if discoverErr != nil {
+				discoverErr = fmt.Errorf("cannot reach %s: %v", tok.Server, discoverErr)
 			}
-			refresher = oidcFor(b, env.HTTP)
 		})
-		return refresher, resolveErr
+		return discovered, discoverErr
+	}
+	resolve := func(ctx context.Context) (auth.OIDC, error) {
+		b, err := discover(ctx)
+		if err != nil {
+			return auth.OIDC{}, err
+		}
+		return oidcFor(b, env.HTTP), nil
+	}
+	// ssh passes %h from ~/.ssh/config, so a mistyped or tampered HostName would otherwise send
+	// the access token to a third party. A login stores the service's ssh domain; a login made
+	// before that field existed has none, so fall back to the live bootstrap, which like the check
+	// talks only to tok.Server. A host outside the domain, or one carrying a port, is refused here
+	// before TLS.
+	domain := tok.SSHDomain
+	if domain == "" {
+		b, err := discover(ctx)
+		if err != nil {
+			fmt.Fprintln(env.Stderr, err)
+			return 1
+		}
+		if domain = b.SSHDomain; domain == "" {
+			fmt.Fprintln(env.Stderr, "this login has no ssh domain; run: tunnel login")
+			return 1
+		}
+	}
+	if _, ok := names.SSHLabel(host, domain); !ok {
+		return bad("%q is not an ssh host of this service", host)
 	}
 	caFile, err := tunnel.WriteCABundle(s.Dir)
 	if err != nil {
