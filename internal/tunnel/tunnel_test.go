@@ -400,6 +400,22 @@ func TestRunFirstLoginFails(t *testing.T) {
 	}
 }
 
+// An ssh tunnel starts the loopback bridge and builds the proxy against the bridge's port: LocalPort
+// is 0 here, which Build refuses, so reaching the login is proof Run replaced it before Build.
+func TestRunSSHStartsTheBridge(t *testing.T) {
+	o := opts()
+	o.ServerHost, o.ServerPort, o.Protocol, o.CAFile = "127.0.0.1", 1, "tcp", ""
+	o.TokenFile = filepath.Join(t.TempDir(), "access-token")
+	if err := os.WriteFile(o.TokenFile, []byte("tok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o.LocalPort = 0
+	o.SSH, o.SSHTarget, o.SSHPort, o.SSHDomain = true, "127.0.0.1", 22, "ssh.tunnels.test"
+	if err := Run(t.Context(), o, nil); err == nil || !strings.Contains(err.Error(), "refused") {
+		t.Errorf("Run = %v, want the connection error: the bridge's port should have replaced LocalPort", err)
+	}
+}
+
 func TestRunStopsWithItsContext(t *testing.T) {
 	o := opts()
 	o.ServerHost, o.ServerPort, o.Protocol, o.CAFile = "127.0.0.1", 1, "tcp", ""

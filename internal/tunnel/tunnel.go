@@ -133,6 +133,15 @@ const loginFailExitNote = ". With loginFailExit enabled, no additional retries w
 // onStatus (which may be nil). Once the first login has worked frp reconnects by itself; a first
 // login that fails ends Run with the reason. Run returns nil when ctx ends.
 func Run(ctx context.Context, o Options, onStatus func(Status)) error {
+	if o.SSH {
+		b, err := newBridge(o.SSHTarget, o.SSHPort)
+		if err != nil {
+			return fmt.Errorf("tunnel: listen for the ssh bridge: %w", err) // coverage-ignore: a loopback listen on an ephemeral port cannot fail
+		}
+		defer func() { _ = b.Close() }()
+		o.LocalPort = b.Port()
+		go b.Serve(ctx)
+	}
 	common, proxies, err := Build(o)
 	if err != nil {
 		return err
