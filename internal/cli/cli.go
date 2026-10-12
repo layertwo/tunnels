@@ -36,6 +36,7 @@ type Env struct {
 const usage = `Usage:
   tunnel login [--server HOST]                    log in with your browser
   tunnel up PORT [--name NAME]                    publish http://127.0.0.1:PORT until you stop it
+  tunnel up PORT --ssh [--target HOST] [--name NAME]  publish an ssh service on HOST at PORT
   tunnel share [--group] [--for DURATION] LABEL GRANTEE  let someone else reach a site (group shares need the gate to forward groups)
   tunnel unshare [--group] LABEL GRANTEE  stop sharing a site
   tunnel list                                     show what you share
@@ -170,6 +171,8 @@ func up(ctx context.Context, env Env, args []string) int {
 	fs := pflag.NewFlagSet("up", pflag.ContinueOnError)
 	fs.SetOutput(io.Discard) // with ContinueOnError pflag prints nothing useful; bad() says what was wrong
 	name := fs.String("name", "", "the tunnel's name; none publishes https://<handle>.<sites domain>")
+	ssh := fs.Bool("ssh", false, "publish an ssh service on the target at PORT instead of a site")
+	target := fs.String("target", "127.0.0.1", "the ssh target host; a bare host, no port and no scheme")
 	bad := func(format string, a ...any) int {
 		fmt.Fprintf(env.Stderr, format+"\n%s\n", append(a, usageUp)...)
 		return 2
@@ -187,11 +190,18 @@ func up(ctx context.Context, env Env, args []string) int {
 	if *name != "" && !names.ValidTunnelName(*name) {
 		return bad("%q is not a tunnel name: use 1 to 42 lowercase letters, digits and inner dashes, other than %q", *name, names.Default)
 	}
+	if *ssh && (*target == "" || strings.ContainsAny(*target, ":/")) {
+		return bad("--target %q is not a bare host: use a host, without a port or a scheme", *target)
+	}
 
 	// Start with a fresh token: the stored one may be hours old, and frp logs in with what the file holds.
 	s, b, tok, ok := session(ctx, env)
 	if !ok {
 		return 1
+	}
+	if *ssh && b.SSHDomain == "" {
+		fmt.Fprintln(env.Stderr, "this server has ssh disabled")
+		return 2
 	}
 	o := oidcFor(b, env.HTTP)
 	caFile, err := tunnel.WriteCABundle(s.Dir)
@@ -204,7 +214,12 @@ func up(ctx context.Context, env Env, args []string) int {
 	defer cancel() // ends the refresher with the tunnel
 	go auth.KeepFresh(ctx, s, o, 30*time.Minute, warnRefreshFailed(env.Stderr))
 
-	url := "https://" + names.Label(tok.Handle, *name) + "." + b.SitesDomain
+	label := names.Label(tok.Handle, *name)
+	// In ssh mode the bridge chooses its own local port and dials the target, so PORT is the target's.
+	url := "https://" + label + "." + b.SitesDomain
+	if *ssh {
+		url = "ssh " + label + "." + b.SSHDomain
+	}
 	printed := map[string]bool{}
 	onStatus := func(st tunnel.Status) {
 		switch st.Phase {
@@ -223,11 +238,15 @@ func up(ctx context.Context, env Env, args []string) int {
 			fmt.Fprintln(env.Stderr, msg)
 		}
 	}
-	err = env.Run(ctx, tunnel.Options{
+	opts := tunnel.Options{
 		ServerHost: b.ServiceHost, ServerPort: 443, Protocol: "wss",
 		Handle: tok.Handle, Name: *name, LocalPort: port,
 		TokenFile: s.AccessTokenPath(), CAFile: caFile, Version: env.Version,
-	}, onStatus)
+	}
+	if *ssh {
+		opts.SSH, opts.SSHTarget, opts.SSHPort, opts.SSHDomain = true, *target, port, b.SSHDomain
+	}
+	err = env.Run(ctx, opts, onStatus)
 	if err != nil { // a refused first login: "login to the server failed: <the broker's reason>"
 		fmt.Fprintln(env.Stderr, err)
 		return 1

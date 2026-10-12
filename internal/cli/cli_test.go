@@ -38,12 +38,13 @@ func (s *syncBuffer) String() string { s.mu.Lock(); defer s.mu.Unlock(); return 
 
 // world is a service (bootstrap document and /api/me), the mock identity provider and a config dir.
 type world struct {
-	t        *testing.T
-	idp      *mockidp.Server
-	svc      *httptest.Server
-	me       http.HandlerFunc
-	dir      string
-	out, err *syncBuffer
+	t         *testing.T
+	idp       *mockidp.Server
+	svc       *httptest.Server
+	me        http.HandlerFunc
+	dir       string
+	out, err  *syncBuffer
+	sshDomain string // when set, the bootstrap document advertises it
 
 	mu             sync.Mutex
 	runs           []tunnel.Options
@@ -81,10 +82,14 @@ func newWorld(t *testing.T) *world {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /.well-known/tunnels.json", func(rw http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(rw).Encode(map[string]string{
+		doc := map[string]string{
 			"issuer": w.idp.URL, "cli_client_id": mockidp.ClientID, "api_resource": mockidp.APIResource,
 			"service_host": "tunnels.test", "sites_domain": "w.tunnels.test", "min_cli_version": "0.0.0",
-		})
+		}
+		if w.sshDomain != "" {
+			doc["ssh_domain"] = w.sshDomain
+		}
+		json.NewEncoder(rw).Encode(doc)
 	})
 	mux.HandleFunc("GET /api/me", func(rw http.ResponseWriter, r *http.Request) { w.me(rw, r) })
 	mux.HandleFunc("GET /api/shares", func(rw http.ResponseWriter, _ *http.Request) {
@@ -403,6 +408,106 @@ func TestUpDefaultTunnel(t *testing.T) {
 	}
 	if c := w.main("up", "8080"); c != 0 || w.runs[0].Name != "" || !strings.Contains(w.out.String(), "https://alice.w.tunnels.test") {
 		t.Errorf("exit %d, runs %+v, stdout:\n%s", c, w.runs, w.out)
+	}
+}
+
+// In ssh mode PORT is the port on the target, --target picks the target host, and the print is the
+// ssh host rather than a site URL.
+func TestUpSSHPassesOptions(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	w.sshDomain = "ssh.tunnels.test"
+	w.run = func(ctx context.Context, o tunnel.Options, onStatus func(tunnel.Status)) error {
+		onStatus(tunnel.Status{Phase: "running"})
+		return nil
+	}
+	if c := w.main("up", "22", "--ssh", "--name", "box1"); c != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
+	}
+	if len(w.runs) != 1 {
+		t.Fatalf("%d runs", len(w.runs))
+	}
+	o := w.runs[0]
+	if !o.SSH || o.SSHTarget != "127.0.0.1" || o.SSHPort != 22 || o.SSHDomain != "ssh.tunnels.test" {
+		t.Errorf("options = %+v, want the ssh fields", o)
+	}
+	if !strings.Contains(w.out.String(), "ssh alice-box1.ssh.tunnels.test") {
+		t.Errorf("stdout lacks the ssh host:\n%s", w.out)
+	}
+}
+
+// In ssh mode --target names another host the machine can reach.
+func TestUpSSHTarget(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	w.sshDomain = "ssh.tunnels.test"
+	w.run = func(ctx context.Context, o tunnel.Options, onStatus func(tunnel.Status)) error {
+		onStatus(tunnel.Status{Phase: "running"})
+		return nil
+	}
+	if c := w.main("up", "22", "--ssh", "--target", "192.168.1.9"); c != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
+	}
+	if len(w.runs) != 1 || w.runs[0].SSHTarget != "192.168.1.9" {
+		t.Errorf("runs = %+v, want a run with the target", w.runs)
+	}
+}
+
+// --target is a bare host: the CLI says so before anything is dialled.
+func TestUpSSHRejectsTargetWithPort(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	if c := w.main("up", "22", "--ssh", "--target", "192.168.1.5:22"); c != 2 {
+		t.Errorf("exit %d, want 2", c)
+	}
+	if !strings.Contains(w.err.String(), "192.168.1.5:22") {
+		t.Errorf("stderr does not name the target:\n%s", w.err)
+	}
+	if len(w.runs) != 0 {
+		t.Error("the tunnel was started with a bad target")
+	}
+}
+
+func TestUpSSHRejectsTargetWithScheme(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	if c := w.main("up", "22", "--ssh", "--target", "http://x"); c != 2 {
+		t.Errorf("exit %d, want 2", c)
+	}
+	if !strings.Contains(w.err.String(), "http://x") {
+		t.Errorf("stderr does not name the target:\n%s", w.err)
+	}
+	if len(w.runs) != 0 {
+		t.Error("the tunnel was started with a bad target")
+	}
+}
+
+func TestUpSSHRejectsEmptyTarget(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	if c := w.main("up", "22", "--ssh", "--target", ""); c != 2 {
+		t.Errorf("exit %d, want 2", c)
+	}
+	if !strings.Contains(w.err.String(), "is not a bare host") {
+		t.Errorf("stderr does not name the target:\n%s", w.err)
+	}
+	if len(w.runs) != 0 {
+		t.Error("the tunnel was started with an empty target")
+	}
+}
+
+// The server has SSH off: publishing an ssh tunnel would be refused, so say so and stop.
+func TestUpSSHServerDisabled(t *testing.T) {
+	w := newWorld(t) // no ssh_domain in the bootstrap document
+	w.loggedIn()
+	if c := w.main("up", "22", "--ssh"); c != 2 {
+		t.Errorf("exit %d, want 2", c)
+	}
+	if !strings.Contains(w.err.String(), "server has ssh disabled") {
+		t.Errorf("stderr does not say ssh is disabled:\n%s", w.err)
+	}
+	if len(w.runs) != 0 {
+		t.Error("the tunnel was started against a server with ssh off")
 	}
 }
 
