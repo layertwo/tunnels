@@ -35,8 +35,8 @@ Decisions taken during design:
   From phase 1, frps is the pinned official binary repackaged onto distroless. See Container
   Hardening for what that does and does not buy.
 - **Names.** The service is `tunnels.layertwo.dev`; sites are
-  `<handle>[-<name>].w.tunnels.layertwo.dev`. A future SSH subtree would be
-  `*.ssh.tunnels.layertwo.dev`.
+  `<handle>[-<name>].w.tunnels.layertwo.dev`, and SSH tunnels are
+  `<handle>[-<name>].ssh.tunnels.layertwo.dev` (see SSH).
 
 Facts this design depends on were verified on 2026-10-07 against the frp v0.71.0 source, the
 Pocket ID v2.18.0 source and docs, Traefik's `forwardAuth` docs and the traefik-oidc-auth docs. A
@@ -204,10 +204,11 @@ and cannot see the host.
 - The apex `tunnels.layertwo.dev` is the service: control channel, API, bootstrap. Sites live
   in their own subtree, `w.tunnels.layertwo.dev`, so users can only ever name things under it
   and the service can add hosts (`status.tunnels...`) without a reserved-name list.
-- One subtree per protocol. frps has a single `subDomainHost` (here `w.tunnels.layertwo.dev`)
-  and frp's README says custom domains should not be subdomains of it. A future
-  `*.ssh.tunnels.layertwo.dev` therefore stays clear of it. SSH carries no hostname, so it needs
-  its own routing design (frp tcpmux over HTTP CONNECT, or SNI) and is out of scope here.
+- One subtree per protocol. frps has a single `subDomainHost` (here `w.tunnels.layertwo.dev`),
+  and frp's README says custom domains should not be subdomains of it, so
+  `*.ssh.tunnels.layertwo.dev` stays clear of it. SSH is implemented as a WebSocket bridge
+  published as an `http` proxy with a custom domain, so it reuses the sites' port and auth path
+  (see SSH), not tcpmux or SNI.
 - Cloudflare's free certificate covers one level below `layertwo.dev`, so `*.w.tunnels.layertwo.dev`
   is a DNS-only record with its own cert-manager wildcard certificate. The apex is one level
   and can stay proxied. The home IP is already public (`send.layertwo.dev` resolves to it), but
@@ -342,7 +343,7 @@ linux/arm64), signed with cosign.
 | `/plugin/<secret>` | frps only | Login, NewProxy, CloseProxy, Ping, NewWorkConn hooks |
 | `/authz` | Traefik `forwardAuth` | allow or deny one visitor request |
 | `/api/me`; `/api/machines`; `/api/shares` in phase 2 | CLI, bearer token | ensure user, manage machines and shares |
-| `/.well-known/tunnels.json` | anyone | bootstrap: issuer, CLI client id, API resource, service host, sites domain, minimum CLI version |
+| `/.well-known/tunnels.json` | anyone | bootstrap: issuer, CLI client id, API resource, service host, sites domain, the ssh domain when on, minimum CLI version |
 | `GET /metrics` | Prometheus | request, in-flight and `/authz` lookup metrics; bounded, secret-free labels |
 | `/install.sh` (later), `/healthz` | anyone | installer, probe |
 
@@ -407,16 +408,17 @@ Sharing with the group `tunnels-viewers` means every viewer.
 
 **Configuration:** the settings come from a TOML configuration file — `--config PATH`, else
 `$BROKER_CONFIG`, else `/etc/tunnels/broker.toml` — one section per feature (`[server]`, `[identity]`,
-`[tunnels]`, `[machines]`, `[metrics]`), and, when a file is present, a feature with no section is off
-(its routes are not mounted, so they answer 404), while with no file at all the broker behaves as
-before (`/metrics` served, machines follow `POCKET_ID_URL`); see the
+`[tunnels]`, `[machines]`, `[ssh]`, `[metrics]`), and, when a file is present, a feature with no section
+is off (its routes are not mounted, so they answer 404), while with no file at all the broker behaves as
+before (`/metrics` served, machines follow `POCKET_ID_URL`, SSH follows `SSH_DOMAIN`); see the
 [broker config design](plans/2026-10-12-tunnels-broker-config-design.md). The environment keeps the
 secrets and overrides a file value. The settings are `SERVICE_HOST`, `SITES_DOMAIN`, `ISSUER`,
 `API_RESOURCE`, `CREATORS_GROUP`, `DATABASE_URL`, `FRPS_DASHBOARD_URL`, `FRPS_DASHBOARD_USER`,
 `FRPS_DASHBOARD_PASSWORD`, `PLUGIN_SECRET`, `MAX_TUNNELS_PER_USER` (5),
 `DEFAULT_BANDWIDTH_LIMIT` (10MB per second, frp's format), `RESERVED_HANDLES`,
 `POCKET_ID_URL`, `POCKET_ID_API_KEY` (the Pocket ID admin API the broker mints a machine's client
-with), `POCKET_ID_API_ID` (the Tunnels API id the minted client is granted access to), `LOG_LEVEL`
+with), `POCKET_ID_API_ID` (the Tunnels API id the minted client is granted access to),
+`SSH_DOMAIN` (the domain SSH tunnels live under; the file's `[ssh]` `domain` names it), `LOG_LEVEL`
 (these are the environment-variable names, the override). Logs are structured JSON for
 logins, proxy registrations, denials and share changes, and never contain tokens. Outbound
 requests carry an explicit User-Agent. `DATABASE_URL` comes from the CNPG-generated secret
@@ -462,6 +464,34 @@ tunnel version
   its SHA-256 and installs it to `~/.local/bin`.
   Binaries fetched with curl avoid macOS quarantine; one downloaded in a browser will show the
   unsigned-binary warning.
+
+## SSH
+
+Implemented; the homelab still needs the route (below). A creator runs `tunnel up PORT --ssh
+[--target HOST]` — PORT is the **target's** SSH port and HOST is a bare host, default
+`127.0.0.1` — and the agent publishes an ordinary `http` proxy for a loopback WebSocket bridge with
+the custom domain `<label>.<ssh domain>`. The terminal runs `tunnel dial HOST PORT`, the
+`ProxyCommand` in the block `tunnel ssh-config [--name NAME]` prints, presenting a Pocket ID bearer
+token. The route runs Traefik `forwardAuth` **only** — never the OIDC plugin, which would answer a
+bearer client with an HTML login page. frps is unchanged: the stream rides the existing
+`vhostHTTPPort` (8080) and frps routes by `Host` to the agent's bridge, which dials the target. It is
+owner-only for now, with no share support.
+
+Whether SSH is on is the broker's `[ssh]` section (`enabled`, `domain`), overridden by the
+environment's `SSH_DOMAIN`; with no file at all, `SSH_DOMAIN` alone turns it on. With no `[ssh]`
+section an SSH custom domain is refused in `NewProxy`, an SSH host is denied on `/authz`, and
+`ssh_domain` is omitted from `/.well-known/tunnels.json`.
+
+The homelab repo needs, and this repo cannot do:
+
+- a `*.ssh.tunnels.layertwo.dev` DNS record, **DNS-only** (no Cloudflare proxy), like the sites
+  wildcard — Cloudflare's free certificate does not cover the extra level;
+- a wildcard certificate for `*.ssh.tunnels.layertwo.dev` from the existing DNS-01 issuer;
+- a Traefik `Host(*.ssh.tunnels.layertwo.dev)` route with `forwardAuth` only (no OIDC plugin), whose
+  `authRequestHeaders` include `Authorization` so the bearer token reaches the broker.
+
+frps and the NetworkPolicy are unchanged: no new port, Traefik to frps :8080, frps to the broker,
+the broker to Postgres and Pocket ID.
 
 ## Pocket ID
 
@@ -625,7 +655,10 @@ All of them fail closed.
   metrics and machines (both implemented; machines are broker-owned principals with their own key
   and row, see the [machines design](plans/2026-10-11-tunnels-machines-design.md), and metrics a
   scrape plus NetworkPolicy).
-- **Later:** SSH, a web UI, live tunnel status, frps HA by client fan-out. **v0.4.0** also moves the
+- **SSH (implemented):** `tunnel up PORT --ssh [--target HOST]`, `tunnel ssh-config [--name NAME]`
+  and `tunnel dial HOST PORT`; the broker's `[ssh]` section; the agent's loopback WebSocket bridge.
+  The homelab manifests for the `*.ssh.` route are a separate change (see SSH).
+- **Later:** a web UI, live tunnel status, frps HA by client fan-out. **v0.4.0** also moves the
   broker's settings into a configuration file — one section per feature, and a feature with no section
   is **off** when a file is present (with no file, behaviour is unchanged) (see the [broker config
   design](plans/2026-10-12-tunnels-broker-config-design.md)). The environment keeps the secrets and

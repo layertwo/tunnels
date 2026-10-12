@@ -6,6 +6,7 @@
 package e2e
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/fatedier/frp/pkg/msg"
 	plugin "github.com/fatedier/frp/pkg/plugin/server"
+	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
 	"github.com/jackc/pgx/v5"
 
@@ -38,11 +40,13 @@ import (
 	"github.com/layertwo/tunnels/internal/mockidp"
 	"github.com/layertwo/tunnels/internal/store"
 	"github.com/layertwo/tunnels/internal/tunnel"
+	"github.com/layertwo/tunnels/internal/ws"
 )
 
 const (
 	secret       = "e2e-plugin-secret-0123456789abcdef"
 	sites        = "w.test"
+	sshDomain    = "ssh.test"
 	dashUser     = "admin"
 	dashPassword = "dash-pw"
 	ua           = "tunnels-e2e/1"
@@ -179,7 +183,7 @@ func newStack(t *testing.T, maxTunnels int) *stack {
 	brokerLog := &lockedBuffer{}
 	s.brokerLog = brokerLog
 	b := httptest.NewServer(broker.NewHandler(broker.Config{
-		ServiceHost: "tunnels.test", SitesDomain: sites, Issuer: s.mock.URL, APIResource: mockidp.APIResource,
+		ServiceHost: "tunnels.test", SitesDomain: sites, SSHDomain: sshDomain, Issuer: s.mock.URL, APIResource: mockidp.APIResource,
 		CreatorsGroup: "tunnels-creators", CLIClientID: mockidp.ClientID, MinCLIVersion: "0.0.0",
 		PluginSecret: secret, MaxTunnelsPerUser: maxTunnels, BandwidthLimit: "10MB", Reserved: []string{"admin"},
 		// As a real no-file broker: metrics are always mounted, and machines are on only when
@@ -253,25 +257,48 @@ type run struct {
 	err     error // set once stopped is closed
 }
 
-// up publishes the backend as handle's tunnel name with token in the token file.
-func (s *stack) up(t *testing.T, token, handle, name string) *run {
+// tokenFile writes token to a fresh access-token file in the test's temp dir.
+func tokenFile(t *testing.T, token string) string {
 	t.Helper()
 	file := filepath.Join(t.TempDir(), "access-token")
 	if err := os.WriteFile(file, []byte(token), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return s.upWithFile(t, file, handle, name)
+	return file
+}
+
+// up publishes the backend as handle's tunnel name with token in the token file.
+func (s *stack) up(t *testing.T, token, handle, name string) *run {
+	t.Helper()
+	return s.upWithFile(t, tokenFile(t, token), handle, name)
 }
 
 func (s *stack) upWithFile(t *testing.T, tokenFile, handle, name string) *run {
 	t.Helper()
+	return s.start(t, tunnel.Options{
+		ServerHost: "127.0.0.1", ServerPort: s.bind, Protocol: "tcp",
+		Handle: handle, Name: name, LocalPort: s.backend, TokenFile: tokenFile, HeartbeatInterval: 1, Version: "0.0.0-e2e",
+	})
+}
+
+// upSSH publishes the ssh target at sshPort as handle's tunnel, reached at <label>.<sshDomain>. Run
+// replaces LocalPort with the loopback bridge's port, so it is left unset.
+func (s *stack) upSSH(t *testing.T, token, handle, name string, sshPort int) *run {
+	t.Helper()
+	return s.start(t, tunnel.Options{
+		ServerHost: "127.0.0.1", ServerPort: s.bind, Protocol: "tcp",
+		Handle: handle, Name: name, TokenFile: tokenFile(t, token), HeartbeatInterval: 1, Version: "0.0.0-e2e",
+		SSH: true, SSHTarget: "127.0.0.1", SSHPort: sshPort, SSHDomain: sshDomain,
+	})
+}
+
+// start runs one tunnel.Run with o, as `tunnel up` starts it, and reports its statuses.
+func (s *stack) start(t *testing.T, o tunnel.Options) *run {
+	t.Helper()
 	r := &run{status: make(chan tunnel.Status, 64), stopped: make(chan struct{})}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		r.err = tunnel.Run(ctx, tunnel.Options{
-			ServerHost: "127.0.0.1", ServerPort: s.bind, Protocol: "tcp",
-			Handle: handle, Name: name, LocalPort: s.backend, TokenFile: tokenFile, HeartbeatInterval: 1, Version: "0.0.0-e2e",
-		}, func(st tunnel.Status) {
+		r.err = tunnel.Run(ctx, o, func(st tunnel.Status) {
 			select {
 			case r.status <- st:
 			default:
@@ -840,5 +867,60 @@ func TestSharing(t *testing.T) {
 	}
 	if code := s.authz(t, host, "sub-carol", "Carol", "work"); code != 403 {
 		t.Errorf("carol in another group = %d, want 403", code)
+	}
+}
+
+// echoListener accepts TCP connections and echoes each line back, standing in for the ssh service
+// the agent's bridge dials.
+func echoListener(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() { _, _ = io.Copy(conn, conn); _ = conn.Close() }()
+		}
+	}()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// TestSSHEndToEnd proves the whole ssh path against a real frps: the client's WebSocket handshake
+// reaches frps's vhost port, frps routes it by the ssh Host to alice's agent, the agent's loopback
+// bridge dials the ssh target, and the bytes come back. There is no Traefik in the harness, so the
+// test drives frps's host routing directly, as the site tests do.
+func TestSSHEndToEnd(t *testing.T) {
+	s := newStack(t, 5)
+	echoPort := echoListener(t)
+	s.upSSH(t, s.token("sub-alice"), "alice", "", echoPort).waitPhase(t, "running")
+
+	host := "alice." + sshDomain
+	conn, resp, err := (&websocket.Dialer{HandshakeTimeout: 10 * time.Second}).Dial("ws://"+s.vhost+"/", http.Header{"Host": []string{host}})
+	if err != nil {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		t.Fatalf("dial %s through frps: %v", host, err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	// The client half of `tunnel dial`: the pipe's local end is what `ssh` would read and write.
+	local, remote := net.Pipe()
+	defer local.Close()
+	go ws.Pipe(conn, remote)
+
+	_ = local.SetDeadline(time.Now().Add(10 * time.Second))
+	if _, err := local.Write([]byte("hello-ssh\n")); err != nil {
+		t.Fatalf("write to the ssh tunnel: %v", err)
+	}
+	line, err := bufio.NewReader(local).ReadString('\n')
+	if err != nil || line != "hello-ssh\n" {
+		t.Errorf("the ssh echo = %q, %v; want %q", line, err, "hello-ssh\n")
 	}
 }

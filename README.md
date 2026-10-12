@@ -15,6 +15,9 @@ case, and it has to be 2 to 20 letters and digits. Download the archive for your
 tunnel login                    # shows a URL and a code to approve in your browser
 tunnel up 3000                  # https://<handle>.w.tunnels.layertwo.dev serves http://127.0.0.1:3000
 tunnel up 3000 --name blog      # https://<handle>-blog.w.tunnels.layertwo.dev
+tunnel up 22 --ssh              # publishes your ssh server on 127.0.0.1:22 as <handle>.ssh.tunnels.layertwo.dev
+tunnel ssh-config --name box1   # prints the ~/.ssh/config block; paste it, then ssh <handle>-box1
+tunnel dial HOST PORT           # the ProxyCommand that block runs; ssh runs it, you do not
 tunnel share <label> <grantee>  # lets a user or --group reach one site, named by its label
 tunnel share --for 7d <label> <grantee>   # the share ends after a duration (7d, 24h, ...)
 tunnel unshare <label> <grantee>          # stops sharing it
@@ -33,6 +36,14 @@ it is kept in `machine-key.json` in the config dir, mode 0600. A machine then pu
 you share that site with, may reach it. `tunnel machine remove NAME` is the revocation lever.
 
 A site's label is `<handle>` for the default tunnel, `<handle>-<name>` for a named one (`alice-blog`).
+
+`tunnel up PORT --ssh` publishes an SSH server instead of a site: PORT is the **target's** SSH port,
+and `--target HOST` (default `127.0.0.1`) names the host the agent dials — a bare host, with no port
+or scheme. The tunnel serves `<label>.ssh.tunnels.layertwo.dev`. Paste the block
+`tunnel ssh-config [--name NAME]` prints into `~/.ssh/config`, then `ssh <label>` (for `--name box1`,
+`ssh <handle>-box1`). `tunnel dial HOST PORT` is that block's `ProxyCommand`: ssh runs it once per
+connection, it presents your Pocket ID token, and it pipes the terminal. An SSH tunnel is owner-only,
+and the server has to have SSH enabled (its `[ssh]` section).
 
 `--group` shares take effect once the site gate forwards the visitor's groups (a deferred change);
 user shares work today.
@@ -78,12 +89,14 @@ when one is missing or wrong, refuses to start with an error that names every su
 | `[identity]` | `issuer`, `api_resource`, `creators_group`, `cli_client_id`, `min_cli_version`, `username_claim`, `groups_claim` |
 | `[tunnels]` | `service_host`, `sites_domain`, `max_tunnels_per_user`, `bandwidth_limit`, `reserved_handles` |
 | `[machines]` | `enabled`, `pocket_id_url`, `pocket_id_api_id` |
+| `[ssh]` | `enabled`, `domain` |
 | `[metrics]` | `enabled` |
 
 A **feature with no section is off when a configuration file is present**: with no `[machines]` the
-`/api/machines` endpoints answer 404, and with no `[metrics]` `GET /metrics` answers 404 (`enabled = false`
-is off the same way). The file is optional — the default path may be absent — and with **no file at all**
-the broker behaves as before: `/metrics` is served and the machine endpoints follow `POCKET_ID_URL`. The
+`/api/machines` endpoints answer 404, with no `[ssh]` an SSH tunnel is refused and no SSH host is served,
+and with no `[metrics]` `GET /metrics` answers 404 (`enabled = false` is off the same way). The file is
+optional — the default path may be absent — and with **no file at all** the broker behaves as before:
+`/metrics` is served, the machine endpoints follow `POCKET_ID_URL` and SSH follows `SSH_DOMAIN`. The
 environment **overrides** a file value and keeps every setting's name; the four
 secrets (`DATABASE_URL`, `POCKET_ID_API_KEY`, `FRPS_DASHBOARD_PASSWORD`, `PLUGIN_SECRET`) come from the
 environment only and must not appear in the file.
@@ -100,6 +113,7 @@ environment only and must not appear in the file.
 | `POCKET_ID_URL` | required for `[machines]` | the Pocket ID instance whose admin API mints a machine's client; an http(s) URL without credentials |
 | `POCKET_ID_API_KEY` | required for `[machines]` | the admin API key the broker creates machine clients with (admin-grade; rotate it); never logged |
 | `POCKET_ID_API_ID` | required for `[machines]` | the Tunnels API a machine's client is granted access to |
+| `SSH_DOMAIN` | required for `[ssh]` | the domain SSH tunnels live under, e.g. `ssh.tunnels.layertwo.dev` |
 | `FRPS_DASHBOARD_URL`, `FRPS_DASHBOARD_USER`, `FRPS_DASHBOARD_PASSWORD` | required | frps's dashboard; an http(s) URL without credentials |
 | `PLUGIN_SECRET` | required | 32 or more of `A-Z a-z 0-9 - _`; frps calls `/plugin/<secret>` |
 | `USERNAME_CLAIM`, `GROUPS_CLAIM` | `preferred_username`, `groups` | the userinfo claims for the username and the groups |
