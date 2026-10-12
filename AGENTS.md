@@ -14,8 +14,11 @@ the conventions that are easy to get wrong.
   read as "feature off".
 - **Secrets come from the environment or a file and never reach a log, an error, or a URL.** The
   broker's own errors name the variable, never its value.
-- **Flags (v0.4.0).** Configuration should also be settable by command-line flags, which override the
-  environment. Not implemented yet — record it, do not add it piecemeal.
+- **A config file (v0.4.0).** The broker's settings move into a TOML config file — one section per
+  feature (`[server]`, `[identity]`, `[tunnels]`, `[machines]`, `[metrics]`), and **a feature with no
+  section is off**. Secrets stay in the environment, never the file; the environment overrides a file
+  value. See the [broker config design](docs/plans/2026-10-12-tunnels-broker-config-design.md). Not
+  implemented yet.
 
 ## Code
 
