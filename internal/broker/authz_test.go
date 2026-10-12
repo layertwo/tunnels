@@ -828,6 +828,22 @@ func TestSSHOwnerAllowed(t *testing.T) {
 	}
 }
 
+// A machine's SSH tunnel is owned by the machine's owner_ref (sub-alice), not by the machine's own
+// handle: the owner gets in. Resolving the handle in the users table alone refuses every visitor,
+// including this owner.
+func TestSSHMachineOwnerAllowed(t *testing.T) {
+	r, _ := newSSHRig()
+	h := sshRequest("Bearer good")
+	h.Set("X-Forwarded-Host", "nas-box1."+sshDomain)
+	w := r.serve(http.MethodGet, h)
+	if w.Code != http.StatusOK || w.Body.Len() != 0 {
+		t.Errorf("= %d %q, want 200 for the machine's owner", w.Code, w.Body)
+	}
+	if got := w.Header().Values("X-Tunnel-User"); len(got) != 0 {
+		t.Errorf("X-Tunnel-User = %q, want no header", got)
+	}
+}
+
 func TestSSHDenied(t *testing.T) {
 	tests := []struct {
 		name     string

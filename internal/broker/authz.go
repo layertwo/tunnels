@@ -218,16 +218,16 @@ func (a Authz) decideSSH(r *http.Request, label string) outcome {
 	}
 	o.sub = sub
 	ownerStart := time.Now()
-	owner, err := a.Users.UserByHandle(ctx, handle)
+	owner, err := a.siteOwner(ctx, handle)
 	a.observe("owner", ownerStart)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		o.reason = "unknown_owner"
 	case err != nil:
 		o.reason, o.err = "store", err
-	case owner.Disabled:
+	case owner.disabled:
 		o.reason = "disabled"
-	case owner.Sub != sub:
+	case owner.ref != sub:
 		o.reason = "not_owner"
 	default:
 		o.allow, o.reason = true, "owner"
