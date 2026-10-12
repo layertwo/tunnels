@@ -3,6 +3,12 @@
 > Companion to `docs/design.md`, which reserves the SSH subtree.
 > This document decides how SSH works. It is the working design for the feature; an
 > implementation plan follows once it is approved.
+>
+> **Superseded in part, 2026-10-12.** SSH is published at the one host `ssh.tunnels.layertwo.dev`
+> with the tunnel named in the request path, not at `<label>.ssh.tunnels.layertwo.dev`: decision 4,
+> the names, the native-`ssh` flow, the infra bullets and the `/authz`/`NewProxy` wording below are
+> replaced by [Tunnels SSH: one host, the name in the path](2026-10-12-tunnels-ssh-one-host-design.md).
+> No `*.ssh.` wildcard, no per-label certificate or route. Everything else stands.
 
 ## Intent and why
 
