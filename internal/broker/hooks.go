@@ -178,14 +178,21 @@ func (h *Hooks) newProxy(ctx context.Context, raw json.RawMessage) (plugin.Respo
 	return h.accept(ctx, plugin.OpNewProxy, c, who...), nil
 }
 
+// proxyTunnel splits an frp proxy name into the owner's handle and the tunnel name, and reports
+// whether it is a name this broker issues at all: <handle>.default or <handle>.<name> with a valid
+// handle and tunnel name.
+func proxyTunnel(handle, proxy string) (tunnel string, ok bool) {
+	tunnel, ok = strings.CutPrefix(proxy, handle+".")
+	return tunnel, ok && names.ValidHandle(handle) &&
+		(tunnel == names.Default || names.ValidTunnelName(tunnel))
+}
+
 // ownsProxy reports whether proxy and subdomain are the name and the label of one of handle's
 // tunnels: <handle>.default with <handle>, <handle>.<name> with <handle>-<name>. The handle is
 // checked as well, because the label has to parse back to this owner.
 func ownsProxy(handle, proxy, subdomain string) bool {
-	tunnel, ok := strings.CutPrefix(proxy, handle+".")
-	return ok && names.ValidHandle(handle) &&
-		(tunnel == names.Default || names.ValidTunnelName(tunnel)) &&
-		subdomain == names.Label(handle, tunnel)
+	tunnel, ok := proxyTunnel(handle, proxy)
+	return ok && subdomain == names.Label(handle, tunnel)
 }
 
 // ownsSSHProxy is ownsProxy for an SSH tunnel: the same name, but the custom domain must be exactly
@@ -193,10 +200,8 @@ func ownsProxy(handle, proxy, subdomain string) bool {
 // custom domain. The comparison is exact, so a port, a trailing dot, an extra label, uppercase or
 // another owner's label is refused.
 func ownsSSHProxy(handle, proxy, domain, sshDomain string) bool {
-	tunnel, ok := strings.CutPrefix(proxy, handle+".")
-	return ok && sshDomain != "" && names.ValidHandle(handle) &&
-		(tunnel == names.Default || names.ValidTunnelName(tunnel)) &&
-		domain == names.Label(handle, tunnel)+"."+sshDomain
+	tunnel, ok := proxyTunnel(handle, proxy)
+	return ok && sshDomain != "" && domain == names.Label(handle, tunnel)+"."+sshDomain
 }
 
 func (h *Hooks) closeProxy(ctx context.Context, raw json.RawMessage) (plugin.Response, error) {
