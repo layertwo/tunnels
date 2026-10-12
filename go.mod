@@ -8,7 +8,7 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.5
 	github.com/hashicorp/yamux v0.1.2
 	github.com/jackc/pgx/v5 v5.11.0
-	github.com/pelletier/go-toml/v2 v2.2.0
+	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/prometheus/client_golang v1.25.0
 	github.com/spf13/pflag v1.0.10
 	golang.org/x/crypto/x509roots/fallback v0.0.0-20261009200856-99e4382b128e
