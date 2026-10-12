@@ -48,7 +48,7 @@ const usage = `Usage:
   tunnel version
 `
 
-const usageUp = "Usage: tunnel up PORT [--name NAME]"
+const usageUp = "Usage: tunnel up PORT [--ssh] [--target HOST] [--name NAME]"
 
 const usageMachine = "Usage: tunnel machine create NAME | list | remove NAME"
 
