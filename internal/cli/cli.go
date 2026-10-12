@@ -3,6 +3,11 @@ package cli
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,16 +19,19 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/spf13/pflag"
 
 	"github.com/layertwo/tunnels/internal/auth"
 	"github.com/layertwo/tunnels/internal/httpx"
 	"github.com/layertwo/tunnels/internal/names"
 	"github.com/layertwo/tunnels/internal/tunnel"
+	"github.com/layertwo/tunnels/internal/ws"
 )
 
 // Env is what the command runs against.
 type Env struct {
+	Stdin          io.Reader
 	Stdout, Stderr io.Writer
 	ConfigDir      string // "" means $TUNNELS_CONFIG_DIR, else <os.UserConfigDir()>/tunnels
 	DefaultServer  string // set at build time
@@ -38,6 +46,7 @@ const usage = `Usage:
   tunnel up PORT [--name NAME]                    publish http://127.0.0.1:PORT until you stop it
   tunnel up PORT --ssh [--target HOST] [--name NAME]  publish an ssh service on HOST at PORT
   tunnel ssh-config [--name NAME]                 print an ssh_config block for an ssh tunnel
+  tunnel dial HOST PORT                           pipe ssh through a published tunnel (an ssh ProxyCommand)
   tunnel share [--group] [--for DURATION] LABEL GRANTEE  let someone else reach a site (group shares need the gate to forward groups)
   tunnel unshare [--group] LABEL GRANTEE  stop sharing a site
   tunnel list                                     show what you share
@@ -52,10 +61,15 @@ const usageUp = "Usage: tunnel up PORT [--ssh] [--target HOST] [--name NAME]"
 
 const usageMachine = "Usage: tunnel machine create NAME | list | remove NAME"
 
+const usageDial = "Usage: tunnel dial HOST PORT"
+
 // Main runs the command in args and returns the exit code: 0 done, 1 failed, 2 used wrongly.
 func Main(args []string, env Env) int {
 	if env.HTTP == nil {
 		env.HTTP = httpx.Client("tunnels/"+env.Version, 10*time.Second)
+	}
+	if env.Stdin == nil {
+		env.Stdin = os.Stdin
 	}
 	if env.Run == nil {
 		env.Run = tunnel.Run
@@ -80,6 +94,8 @@ func Main(args []string, env Env) int {
 		return list(ctx, env, rest)
 	case "ssh-config":
 		return sshConfig(ctx, env, rest)
+	case "dial":
+		return dial(ctx, env, rest)
 	case "machine":
 		return machine(ctx, env, rest)
 	case "logout", "version":
@@ -327,12 +343,187 @@ func session(ctx context.Context, env Env) (auth.Store, auth.Bootstrap, auth.Tok
 	}
 	tok, err = auth.RefreshStored(ctx, s, oidcFor(b, env.HTTP))
 	if err != nil {
-		// auth.Refresh's errors already end with "; run: tunnel login"; strip it so the sentence is not doubled.
-		fmt.Fprintf(env.Stderr, "could not refresh your session (%s); run: tunnel login\n", strings.TrimSuffix(err.Error(), "; run: tunnel login"))
+		refreshFailed(env, err)
 		return auth.Store{}, auth.Bootstrap{}, auth.Tokens{}, false
 	}
 	return s, b, tok, true
 }
+
+// refreshFailed says a login could not be refreshed, and what to run about it.
+func refreshFailed(env Env, err error) {
+	// auth.Refresh's errors already end with "; run: tunnel login"; strip it so the sentence is not doubled.
+	fmt.Fprintf(env.Stderr, "could not refresh your session (%s); run: tunnel login\n", strings.TrimSuffix(err.Error(), "; run: tunnel login"))
+}
+
+// dial pipes this process's stdin and stdout to the published ssh tunnel at HOST, so ssh's
+// ProxyCommand sees a raw stream. ssh runs it once per connection, so it is short-lived.
+func dial(ctx context.Context, env Env, args []string) int {
+	fs := pflag.NewFlagSet("dial", pflag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	bad := func(format string, a ...any) int {
+		fmt.Fprintf(env.Stderr, format+"\n"+usageDial+"\n", a...)
+		return 2
+	}
+	if err := fs.Parse(args); err != nil {
+		return bad("%v", err)
+	}
+	if fs.NArg() != 2 {
+		return bad("give the ssh host and port")
+	}
+	// PORT is what ssh passed (%p); the data route is ordinary https, so it is checked and then unused.
+	if port, err := strconv.Atoi(fs.Arg(1)); err != nil || port < 1 || port > 65535 {
+		return bad("%q is not a port: use 1 to 65535", fs.Arg(1))
+	}
+	host := fs.Arg(0)
+
+	s, err := store(env)
+	if err != nil {
+		fmt.Fprintln(env.Stderr, err)
+		return 1
+	}
+	tok, err := s.Load()
+	if err != nil {
+		fmt.Fprintln(env.Stderr, err)
+		return 1
+	}
+	// The 401 retry needs the provider's token endpoint, so Discover is not only for the login.
+	b, err := auth.Discover(ctx, env.HTTP, tok.Server)
+	if err != nil {
+		fmt.Fprintf(env.Stderr, "cannot reach %s: %v\n", tok.Server, err)
+		return 1
+	}
+	caFile, err := tunnel.WriteCABundle(s.Dir)
+	if err != nil {
+		fmt.Fprintln(env.Stderr, err)
+		return 1
+	}
+	pool, err := rootPool(caFile)
+	if err != nil {
+		fmt.Fprintln(env.Stderr, err) // coverage-ignore: WriteCABundle just wrote this file, so it always parses
+		return 1
+	}
+	d := &websocket.Dialer{
+		HandshakeTimeout: 10 * time.Second,
+		TLSClientConfig: &tls.Config{
+			ServerName: host, NextProtos: []string{"http/1.1"}, RootCAs: pool,
+		},
+	}
+	// ssh's %p is the target's port, not the data route's: the tunnel is reached on 443 through Traefik.
+	return dialStream(ctx, env, d, "wss://"+host+":443/", s, oidcFor(b, env.HTTP), tok)
+}
+
+// wsDial opens the WebSocket; *websocket.Dialer is the real one.
+type wsDial interface {
+	DialContext(ctx context.Context, urlStr string, requestHeader http.Header) (*websocket.Conn, *http.Response, error)
+}
+
+// dialStream opens the WebSocket to url presenting the login, then pumps it to this process's stdin
+// and stdout. On a 401 handshake it refreshes the login once and retries.
+func dialStream(ctx context.Context, env Env, d wsDial, url string, s auth.Store, o auth.OIDC, tok auth.Tokens) int {
+	token, err := dialToken(ctx, s, o, tok)
+	if err != nil {
+		refreshFailed(env, err)
+		return 1
+	}
+	conn, resp, err := d.DialContext(ctx, url, dialHeader(token, env.Version))
+	if refused(err, resp) {
+		// The token aged between the check and the dial: refresh once and try again.
+		token, err = refreshLogin(ctx, s, o)
+		if err != nil {
+			refreshFailed(env, err)
+			return 1
+		}
+		conn, resp, err = d.DialContext(ctx, url, dialHeader(token, env.Version))
+		if refused(err, resp) {
+			fmt.Fprintln(env.Stderr, "your login was refused; run: tunnel login")
+			return 1
+		}
+	}
+	if err != nil {
+		fmt.Fprintln(env.Stderr, err)
+		return 1
+	}
+	defer conn.Close()
+	_ = ws.Pipe(conn, stdio{in: env.Stdin, out: env.Stdout})
+	return 0
+}
+
+// tokenSkew is how early an access token counts as stale at the dial handshake.
+const tokenSkew = time.Minute
+
+// dialToken is the token to present: the stored one while it has not expired, else a refreshed one.
+// Refreshing only when stale keeps dial from rotating the login that a running up also holds.
+func dialToken(ctx context.Context, s auth.Store, o auth.OIDC, tok auth.Tokens) (string, error) {
+	if jwtExpiry(tok.AccessToken).After(time.Now().Add(tokenSkew)) {
+		return tok.AccessToken, nil
+	}
+	return refreshLogin(ctx, s, o)
+}
+
+// refreshLogin mints a fresh access token from the stored refresh token.
+func refreshLogin(ctx context.Context, s auth.Store, o auth.OIDC) (string, error) {
+	fresh, err := auth.RefreshStored(ctx, s, o)
+	if err != nil {
+		return "", err
+	}
+	return fresh.AccessToken, nil
+}
+
+// jwtExpiry reads a JWT's exp claim without checking its signature: the broker is the verifier, and
+// dial only needs to know whether the stored token is worth presenting. The zero time means it
+// could not be read, which is treated as stale.
+func jwtExpiry(token string) time.Time {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return time.Time{}
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}
+	}
+	var c struct {
+		Exp int64 `json:"exp"`
+	}
+	if json.Unmarshal(payload, &c) != nil || c.Exp == 0 {
+		return time.Time{}
+	}
+	return time.Unix(c.Exp, 0)
+}
+
+// dialHeader is the handshake's headers: the token's only place, plus the CLI's own name. The token
+// never goes in the URL.
+func dialHeader(token, version string) http.Header {
+	return http.Header{"Authorization": {"Bearer " + token}, "User-Agent": {"tunnels/" + version}}
+}
+
+// refused reports whether a handshake answered 401, the sign of an aged token.
+func refused(err error, resp *http.Response) bool {
+	return errors.Is(err, websocket.ErrBadHandshake) && resp != nil && resp.StatusCode == http.StatusUnauthorized
+}
+
+// rootPool is the certificate pool that verifies the tunnel's server, from the CA bundle a login
+// writes.
+func rootPool(caFile string) (*x509.CertPool, error) {
+	pem, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, err
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("%s holds no certificates", caFile)
+	}
+	return pool, nil
+}
+
+// stdio is this process's stdin and stdout as the stream ws.Pipe pumps.
+type stdio struct {
+	in  io.Reader
+	out io.Writer
+}
+
+func (s stdio) Read(p []byte) (int, error)  { return s.in.Read(p) }
+func (s stdio) Write(p []byte) (int, error) { return s.out.Write(p) }
+func (s stdio) Close() error                { return nil }
 
 // share grants or, when remove is set, removes access to one of the owner's sites, named by its label
 // (<handle> for the default site, <handle>-<name> for a named one).

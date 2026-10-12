@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,6 +19,8 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/gorilla/websocket"
+
 	"github.com/layertwo/tunnels/internal/auth"
 	"github.com/layertwo/tunnels/internal/httpx"
 	"github.com/layertwo/tunnels/internal/mockidp"
@@ -1010,6 +1013,7 @@ func TestCommandsWithoutAConfigDir(t *testing.T) {
 		{"login", []string{"login"}, 1, "no place for the login"},
 		{"up", []string{"up", "3000"}, 1, "no place for the login"},
 		{"ssh-config", []string{"ssh-config"}, 1, "no place for the login"},
+		{"dial", []string{"dial", "host", "22"}, 1, "no place for the login"},
 		{"share", []string{"share", "alice", "bob"}, 1, "no place for the login"},
 		{"unshare", []string{"unshare", "alice", "bob"}, 1, "no place for the login"},
 		{"list", []string{"list"}, 1, "no place for the login"},
@@ -1437,5 +1441,315 @@ func TestMachineArgumentErrors(t *testing.T) {
 				t.Errorf("no usage line on stderr:\n%s", w.err)
 			}
 		})
+	}
+}
+
+// ---- dial
+
+// wsServer upgrades a WebSocket when mayUpgrade allows it and otherwise answers 401, then echoes
+// every message until the connection ends. It stands in for the broker's ssh bridge.
+func wsServer(t *testing.T, mayUpgrade func(*http.Request) bool) *httptest.Server {
+	t.Helper()
+	up := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if !mayUpgrade(r) {
+			rw.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		conn, err := up.Upgrade(rw, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			mt, msg, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			if conn.WriteMessage(mt, msg) != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// wsURL is srv's address as the dialer's ws:// URL.
+func wsURL(srv *httptest.Server) string { return "ws" + strings.TrimPrefix(srv.URL, "http") }
+
+// The token travels only in the Authorization header, and the handshake names the CLI.
+func TestDialHeader(t *testing.T) {
+	h := dialHeader("tok", "1.2.3")
+	if h.Get("Authorization") != "Bearer tok" || h.Get("User-Agent") != "tunnels/1.2.3" {
+		t.Errorf("header = %v", h)
+	}
+}
+
+// dialOIDC is the identity provider a 401 refresh needs, as Discover would describe it.
+func (w *world) dialOIDC(hc *http.Client) auth.OIDC {
+	return auth.OIDC{Issuer: w.idp.URL, ClientID: mockidp.ClientID, Resource: mockidp.APIResource, HTTP: hc}
+}
+
+// dialToken presents the stored token while it is still valid and refreshes it only when it is not:
+// refreshing on every dial would rotate a token ssh does not need.
+func TestDialTokenRefreshesOnlyWhenStale(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		token       func(*world) string
+		wantRefresh bool
+	}{
+		{"valid", func(w *world) string { return w.idp.Issue("sub-alice", mockidp.IssueOpts{TTL: time.Hour}) }, false},
+		{"expired", func(w *world) string { return w.idp.Issue("sub-alice", mockidp.IssueOpts{TTL: -time.Hour}) }, true},
+		{"unreadable", func(*world) string { return "garbage" }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newWorld(t)
+			tok := auth.Tokens{AccessToken: tc.token(w), RefreshToken: w.idp.IssueRefreshToken("sub-alice"), Handle: "alice", Server: w.svc.URL}
+			s := auth.Store{Dir: w.dir}
+			if err := s.Save(tok); err != nil {
+				t.Fatal(err)
+			}
+			env := w.env()
+			got, err := dialToken(context.Background(), s, w.dialOIDC(env.HTTP), tok)
+			if err != nil {
+				t.Fatalf("dialToken: %v", err)
+			}
+			if refreshed := got != tok.AccessToken; refreshed != tc.wantRefresh {
+				t.Errorf("refreshed = %v, want %v (token %q)", refreshed, tc.wantRefresh, got)
+			}
+			after, err := s.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (after.AccessToken != tok.AccessToken) != tc.wantRefresh {
+				t.Errorf("stored token refreshed = %v, want %v", after.AccessToken != tok.AccessToken, tc.wantRefresh)
+			}
+		})
+	}
+}
+
+// A refresh that the provider refuses is the one error dialToken reports.
+func TestDialTokenRefreshFails(t *testing.T) {
+	w := newWorld(t)
+	tok := auth.Tokens{AccessToken: w.idp.Issue("sub-alice", mockidp.IssueOpts{TTL: -time.Hour}),
+		RefreshToken: w.idp.IssueRefreshToken("sub-alice"), Handle: "alice", Server: w.svc.URL}
+	s := auth.Store{Dir: w.dir}
+	if err := s.Save(tok); err != nil {
+		t.Fatal(err)
+	}
+	w.idp.RevokeUser("sub-alice")
+	env := w.env()
+	if _, err := dialToken(context.Background(), s, w.dialOIDC(env.HTTP), tok); err == nil {
+		t.Error("dialToken returned a token after a refused refresh")
+	}
+}
+
+// jwtExpiry reads exp out of a token without verifying it; anything it cannot read is stale.
+func TestJWTExpiry(t *testing.T) {
+	payload := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
+	for _, tc := range []struct {
+		name  string
+		token string
+		want  time.Time
+	}{
+		{"exp", "a." + payload(`{"exp":1234567890}`) + ".c", time.Unix(1234567890, 0)},
+		{"no exp", "a." + payload(`{"sub":"alice"}`) + ".c", time.Time{}},
+		{"zero exp", "a." + payload(`{"exp":0}`) + ".c", time.Time{}},
+		{"bad json", "a." + payload("not json") + ".c", time.Time{}},
+		{"bad base64", "a.!!!.c", time.Time{}},
+		{"not a jwt", "garbage", time.Time{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := jwtExpiry(tc.token); !got.Equal(tc.want) {
+				t.Errorf("jwtExpiry(%q) = %v, want %v", tc.token, got, tc.want)
+			}
+		})
+	}
+}
+
+// rootPool reads the CA bundle WriteCABundle writes; a file it cannot read or that holds no
+// certificate is an error, not an empty pool that trusts nothing.
+func TestRootPool(t *testing.T) {
+	if _, err := rootPool(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Error("rootPool accepted a missing file")
+	}
+	empty := filepath.Join(t.TempDir(), "empty.pem")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rootPool(empty); err == nil {
+		t.Error("rootPool accepted a file with no certificates")
+	}
+	dir := t.TempDir()
+	ca, err := tunnel.WriteCABundle(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pool, err := rootPool(ca); err != nil || pool == nil {
+		t.Errorf("rootPool(%s) = %v, %v", ca, pool, err)
+	}
+}
+
+// The dial command pipes this process's stdin and stdout to the WebSocket; only the TLS wrapper is
+// left to the e2e task, because the data route is on 443 and a test cannot bind it.
+func TestDialStreamPipes(t *testing.T) {
+	w := newWorld(t)
+	tok := w.loggedIn()
+	srv := wsServer(t, func(r *http.Request) bool {
+		return strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") == tok.AccessToken
+	})
+	pr, pw := io.Pipe()
+	env := w.env()
+	env.Stdin = pr
+	code := make(chan int, 1)
+	go func() {
+		code <- dialStream(context.Background(), env, websocket.DefaultDialer, wsURL(srv), auth.Store{Dir: w.dir}, oidcFor(auth.Bootstrap{}, env.HTTP), tok)
+	}()
+
+	if _, err := pw.Write([]byte("hello\n")); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, w.out, regexp.MustCompile("hello"))
+	if got := w.out.String(); got != "hello\n" {
+		t.Errorf("stdout = %q, want %q", got, "hello\n")
+	}
+	_ = pw.Close()
+	if c := exitOf(t, code); c != 0 {
+		t.Errorf("exit %d; stderr:\n%s", c, w.err)
+	}
+}
+
+// A 401 handshake means the token aged between the check and the dial: refresh once and retry.
+func TestDialStreamRefreshesOn401(t *testing.T) {
+	w := newWorld(t)
+	tok := w.loggedIn()
+	srv := wsServer(t, func(r *http.Request) bool {
+		return strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != tok.AccessToken
+	})
+	env := w.env()
+	env.Stdin = strings.NewReader("")
+	if c := dialStream(context.Background(), env, websocket.DefaultDialer, wsURL(srv), auth.Store{Dir: w.dir}, w.dialOIDC(env.HTTP), tok); c != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
+	}
+	after, err := (auth.Store{Dir: w.dir}).Load()
+	if err != nil || after.AccessToken == tok.AccessToken {
+		t.Errorf("the 401 did not refresh the stored token: %+v, %v", after, err)
+	}
+}
+
+// A second 401 after the refresh ends the connection with what to run.
+func TestDialStreamRefusedAfterRefresh(t *testing.T) {
+	w := newWorld(t)
+	tok := w.loggedIn()
+	srv := wsServer(t, func(*http.Request) bool { return false })
+	env := w.env()
+	if c := dialStream(context.Background(), env, websocket.DefaultDialer, wsURL(srv), auth.Store{Dir: w.dir}, w.dialOIDC(env.HTTP), tok); c != 1 {
+		t.Errorf("exit %d, want 1", c)
+	}
+	if !strings.Contains(w.err.String(), "run: tunnel login") {
+		t.Errorf("stderr:\n%s", w.err)
+	}
+}
+
+// A refresh failing after a 401 is reported like any other failed refresh, not as a refused login.
+func TestDialStreamRefreshAfter401Fails(t *testing.T) {
+	w := newWorld(t)
+	tok := w.loggedIn()
+	w.idp.RevokeUser("sub-alice")
+	srv := wsServer(t, func(*http.Request) bool { return false })
+	env := w.env()
+	if c := dialStream(context.Background(), env, websocket.DefaultDialer, wsURL(srv), auth.Store{Dir: w.dir}, w.dialOIDC(env.HTTP), tok); c != 1 {
+		t.Errorf("exit %d, want 1", c)
+	}
+	if !strings.Contains(w.err.String(), "could not refresh your session") {
+		t.Errorf("stderr:\n%s", w.err)
+	}
+}
+
+// A stale stored token with a refused refresh never reaches the socket.
+func TestDialStreamRefreshFails(t *testing.T) {
+	w := newWorld(t)
+	tok := w.loggedIn()
+	tok.AccessToken = w.idp.Issue("sub-alice", mockidp.IssueOpts{TTL: -time.Hour})
+	if err := (auth.Store{Dir: w.dir}).Save(tok); err != nil {
+		t.Fatal(err)
+	}
+	w.idp.RevokeUser("sub-alice")
+	env := w.env()
+	if c := dialStream(context.Background(), env, websocket.DefaultDialer, wsURL(wsServer(t, func(*http.Request) bool { return true })),
+		auth.Store{Dir: w.dir}, w.dialOIDC(env.HTTP), tok); c != 1 {
+		t.Errorf("exit %d, want 1", c)
+	}
+	if !strings.Contains(w.err.String(), "could not refresh your session") {
+		t.Errorf("stderr:\n%s", w.err)
+	}
+}
+
+func TestDialArgumentErrors(t *testing.T) {
+	for _, args := range [][]string{
+		{"dial"},
+		{"dial", "host"},
+		{"dial", "host", "22", "extra"},
+		{"dial", "host", "abc"},
+		{"dial", "host", "0"},
+		{"dial", "host", "65536"},
+		{"dial", "--bogus", "host", "22"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			w := newWorld(t)
+			w.loggedIn()
+			if c := w.main(args...); c != 2 {
+				t.Errorf("exit %d, want 2", c)
+			}
+			if !strings.Contains(w.err.String(), "tunnel dial HOST PORT") {
+				t.Errorf("no usage line on stderr:\n%s", w.err)
+			}
+		})
+	}
+}
+
+func TestDialNotLoggedIn(t *testing.T) {
+	w := newWorld(t)
+	if c := w.main("dial", "host", "22"); c != 1 || !strings.Contains(w.err.String(), "run: tunnel login") {
+		t.Errorf("exit %d, stderr:\n%s", c, w.err)
+	}
+}
+
+// dial still discovers the server, so a stored login whose service is gone fails like the rest.
+func TestDialDiscoveryFails(t *testing.T) {
+	w := newWorld(t)
+	tok := w.loggedIn()
+	tok.Server = "http://127.0.0.1:1"
+	if err := (auth.Store{Dir: w.dir}).Save(tok); err != nil {
+		t.Fatal(err)
+	}
+	if c := w.main("dial", "host", "22"); c != 1 || !strings.Contains(w.err.String(), "cannot reach http://127.0.0.1:1") {
+		t.Errorf("exit %d, stderr:\n%s", c, w.err)
+	}
+}
+
+// A directory where the CA bundle belongs makes the rename fail, so dial never opens a socket.
+func TestDialCannotWriteTheCABundle(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	if err := os.Mkdir(filepath.Join(w.dir, "cacert.pem"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if c := w.main("dial", "host", "22"); c != 1 || !strings.Contains(w.err.String(), "CA bundle") {
+		t.Errorf("exit %d, stderr:\n%s", c, w.err)
+	}
+}
+
+// The command dials the data route on 443, whatever PORT ssh passed; a host that answers nothing is
+// a connection error, not a crash.
+func TestDialUnreachableHost(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	if c := w.main("dial", "127.0.0.1", "22"); c != 1 {
+		t.Errorf("exit %d, want 1", c)
+	}
+	if w.err.String() == "" {
+		t.Error("no error on stderr for an unreachable host")
 	}
 }
