@@ -38,7 +38,8 @@ func main() {
 }
 
 func run() error {
-	cfg, err := broker.LoadConfig(os.Getenv)
+	// No configuration file yet: the settings come from the environment alone.
+	cfg, err := broker.LoadConfig(os.Getenv, nil)
 	if err != nil {
 		return err
 	}
