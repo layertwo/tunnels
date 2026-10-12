@@ -71,6 +71,7 @@ func newRig() *rig {
 			Resolver:          Resolver{IdP: i, Verifier: &fakeVerifier{idp: i}, Users: users, Machines: machines, CreatorsGroup: creators, Reserved: []string{"admin"}},
 			Frps:              f,
 			Secret:            pluginSecret,
+			SSHDomain:         "ssh.tunnels.test",
 			MaxTunnelsPerUser: 5,
 			BandwidthLimit:    "10MB",
 			Log:               slog.New(slog.NewJSONHandler(logs, nil)),
@@ -278,12 +279,15 @@ func newProxyContent(handle, name, sub string) plugin.NewProxyContent {
 func TestNewProxy(t *testing.T) {
 	type mod func(*plugin.NewProxyContent)
 	typ := func(s string) mod { return func(c *plugin.NewProxyContent) { c.ProxyType = s } }
+	domains := func(d ...string) mod { return func(c *plugin.NewProxyContent) { c.CustomDomains = d } }
+	locations := func(p ...string) mod { return func(c *plugin.NewProxyContent) { c.Locations = p } }
 	name42 := strings.Repeat("b", 42)
 	tests := []struct {
 		name        string
 		handle      string
 		proxy, sub  string
 		mod         mod
+		sshOff      bool
 		count       int
 		countErr    error
 		reason      string // "" when accepted
@@ -323,21 +327,53 @@ func TestNewProxy(t *testing.T) {
 		{name: "handle with a dash", handle: "a-b", proxy: "a-b.c", sub: "a-b-c", reason: "name a-b.c is not yours"},
 		{name: "handle too short", handle: "a", proxy: "a.default", sub: "a", reason: "name a.default is not yours"},
 
-		{name: "tcp", handle: "alice", proxy: "alice.default", sub: "alice", mod: typ("tcp"), reason: "only plain http tunnels are allowed"},
-		{name: "https", handle: "alice", proxy: "alice.default", sub: "alice", mod: typ("https"), reason: "only plain http tunnels are allowed"},
-		{name: "tcpmux", handle: "alice", proxy: "alice.default", sub: "alice", mod: typ("tcpmux"), reason: "only plain http tunnels are allowed"},
-		{name: "udp", handle: "alice", proxy: "alice.default", sub: "alice", mod: typ("udp"), reason: "only plain http tunnels are allowed"},
-		{name: "stcp", handle: "alice", proxy: "alice.default", sub: "alice", mod: typ("stcp"), reason: "only plain http tunnels are allowed"},
-		{name: "sudp", handle: "alice", proxy: "alice.default", sub: "alice", mod: typ("sudp"), reason: "only plain http tunnels are allowed"},
-		{name: "xtcp", handle: "alice", proxy: "alice.default", sub: "alice", mod: typ("xtcp"), reason: "only plain http tunnels are allowed"},
-		{name: "no type", handle: "alice", proxy: "alice.default", sub: "alice", mod: typ(""), reason: "only plain http tunnels are allowed"},
-		{name: "type in capitals", handle: "alice", proxy: "alice.default", sub: "alice", mod: typ("HTTP"), reason: "only plain http tunnels are allowed"},
-		{name: "custom domain", handle: "alice", proxy: "alice.default", sub: "alice", reason: "only plain http tunnels are allowed",
-			mod: func(c *plugin.NewProxyContent) { c.CustomDomains = []string{"victim.example.com"} }},
-		{name: "empty custom domain", handle: "alice", proxy: "alice.default", sub: "alice", reason: "only plain http tunnels are allowed",
-			mod: func(c *plugin.NewProxyContent) { c.CustomDomains = []string{""} }},
-		{name: "locations", handle: "alice", proxy: "alice.default", sub: "alice", reason: "only plain http tunnels are allowed",
-			mod: func(c *plugin.NewProxyContent) { c.Locations = []string{"/admin"} }},
+		{name: "tcp", handle: "alice", proxy: "alice.default", sub: "alice", mod: typ("tcp"), reason: "only plain http and ssh tunnels are allowed"},
+		{name: "https", handle: "alice", proxy: "alice.default", sub: "alice", mod: typ("https"), reason: "only plain http and ssh tunnels are allowed"},
+		{name: "tcpmux", handle: "alice", proxy: "alice.default", sub: "alice", mod: typ("tcpmux"), reason: "only plain http and ssh tunnels are allowed"},
+		{name: "udp", handle: "alice", proxy: "alice.default", sub: "alice", mod: typ("udp"), reason: "only plain http and ssh tunnels are allowed"},
+		{name: "stcp", handle: "alice", proxy: "alice.default", sub: "alice", mod: typ("stcp"), reason: "only plain http and ssh tunnels are allowed"},
+		{name: "sudp", handle: "alice", proxy: "alice.default", sub: "alice", mod: typ("sudp"), reason: "only plain http and ssh tunnels are allowed"},
+		{name: "xtcp", handle: "alice", proxy: "alice.default", sub: "alice", mod: typ("xtcp"), reason: "only plain http and ssh tunnels are allowed"},
+		{name: "no type", handle: "alice", proxy: "alice.default", sub: "alice", mod: typ(""), reason: "only plain http and ssh tunnels are allowed"},
+		{name: "type in capitals", handle: "alice", proxy: "alice.default", sub: "alice", mod: typ("HTTP"), reason: "only plain http and ssh tunnels are allowed"},
+		{name: "custom domain", handle: "alice", proxy: "alice.default", sub: "alice", reason: "only plain http and ssh tunnels are allowed",
+			mod: domains("victim.example.com")},
+		{name: "empty custom domain", handle: "alice", proxy: "alice.default", sub: "alice", reason: "only plain http and ssh tunnels are allowed",
+			mod: domains("")},
+		{name: "locations", handle: "alice", proxy: "alice.default", sub: "alice", reason: "only plain http and ssh tunnels are allowed",
+			mod: locations("/admin")},
+
+		// An ssh tunnel is an ordinary http proxy whose one custom domain is <label>.<ssh domain>
+		// with an empty subdomain; any other custom domain is refused.
+		{name: "ssh tunnel", handle: "alice", proxy: "alice.blog", sub: "", count: 1, wantCounted: true,
+			mod: domains("alice-blog.ssh.tunnels.test")},
+		{name: "ssh default tunnel", handle: "alice", proxy: "alice.default", sub: "", wantCounted: true,
+			mod: domains("alice.ssh.tunnels.test")},
+		{name: "ssh tunnel of another owner", handle: "alice", proxy: "alice.blog", sub: "",
+			mod: domains("bob-blog.ssh.tunnels.test"), reason: "name alice.blog is not yours"},
+		{name: "ssh tunnel under the sites domain", handle: "alice", proxy: "alice.blog", sub: "",
+			mod: domains("alice-blog.w.tunnels.test"), reason: "name alice.blog is not yours"},
+		{name: "ssh tunnel with an extra label", handle: "alice", proxy: "alice.blog", sub: "",
+			mod: domains("alice-blog.extra.ssh.tunnels.test"), reason: "name alice.blog is not yours"},
+		{name: "ssh domain with a port", handle: "alice", proxy: "alice.blog", sub: "",
+			mod: domains("alice-blog.ssh.tunnels.test:443"), reason: "name alice.blog is not yours"},
+		{name: "ssh domain with a trailing dot", handle: "alice", proxy: "alice.blog", sub: "",
+			mod: domains("alice-blog.ssh.tunnels.test."), reason: "name alice.blog is not yours"},
+		{name: "ssh domain in capitals", handle: "alice", proxy: "alice.blog", sub: "",
+			mod: domains("ALICE-BLOG.ssh.tunnels.test"), reason: "name alice.blog is not yours"},
+		{name: "ssh proxy of another owner", handle: "alice", proxy: "bob.blog", sub: "",
+			mod: domains("bob-blog.ssh.tunnels.test"), reason: "name bob.blog is not yours"},
+		{name: "two custom domains", handle: "alice", proxy: "alice.blog", sub: "",
+			mod: domains("alice-blog.ssh.tunnels.test", "alice-blog.ssh.tunnels.test"), reason: "only plain http and ssh tunnels are allowed"},
+		{name: "custom domain with a label", handle: "alice", proxy: "alice.blog", sub: "alice-blog",
+			mod: domains("alice-blog.ssh.tunnels.test"), reason: "only plain http and ssh tunnels are allowed"},
+		{name: "custom domain with locations", handle: "alice", proxy: "alice.blog", sub: "",
+			mod: func(c *plugin.NewProxyContent) {
+				c.CustomDomains, c.Locations = []string{"alice-blog.ssh.tunnels.test"}, []string{"/admin"}
+			},
+			reason: "only plain http and ssh tunnels are allowed"},
+		{name: "custom domain with ssh off", handle: "alice", proxy: "alice.blog", sub: "",
+			mod: domains("alice-blog.ssh.tunnels.test"), sshOff: true, reason: "name alice.blog is not yours"},
 
 		{name: "at the limit", handle: "alice", proxy: "alice.default", sub: "alice", count: 5, reason: "tunnel limit of 5 reached", wantCounted: true},
 		{name: "over the limit", handle: "alice", proxy: "alice.default", sub: "alice", count: 9, reason: "tunnel limit of 5 reached", wantCounted: true},
@@ -348,6 +384,9 @@ func TestNewProxy(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r := newRig()
 			r.frps.count, r.frps.countErr = tt.count, tt.countErr
+			if tt.sshOff {
+				r.hooks.SSHDomain = ""
+			}
 			in := newProxyContent(tt.handle, tt.proxy, tt.sub)
 			if tt.mod != nil {
 				tt.mod(&in)
