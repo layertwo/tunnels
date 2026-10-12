@@ -166,15 +166,17 @@ func LoadConfig(getenv func(string) string, file *FileConfig) (Config, error) {
 	default:
 		c.MachinesEnabled = machines.Enabled == nil || *machines.Enabled
 	}
-	if file != nil && file.Metrics != nil {
-		c.MetricsEnabled = file.Metrics.Enabled == nil || *file.Metrics.Enabled
-	}
+	// With no file at all, metrics keep today's behaviour: always mounted. A file turns the feature on
+	// only with a [metrics] section that is not enabled = false.
+	c.MetricsEnabled = file == nil || (file.Metrics != nil && (file.Metrics.Enabled == nil || *file.Metrics.Enabled))
 
 	// The credentials are separate variables; none in the URL, which would also end up in errors and logs.
 	if badDashboardURL(c.FrpsDashboardURL) {
 		bad("FRPS_DASHBOARD_URL", "must be an http or https URL with a host and nothing else: no credentials, query or fragment") // not repeated: it may hold a password
 	}
-	if badDashboardURL(c.PocketIDURL) {
+	// A disabled [machines] ignores its other keys, so a malformed URL is not a startup error. The URL
+	// is still validated whenever the feature is on, from either source.
+	if c.MachinesEnabled && badDashboardURL(c.PocketIDURL) {
 		bad("POCKET_ID_URL", "must be an http or https URL with a host and nothing else: no credentials, query or fragment")
 	}
 	if file == nil {

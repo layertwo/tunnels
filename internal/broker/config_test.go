@@ -64,7 +64,7 @@ func TestLoadConfig(t *testing.T) {
 		CLIClientID: "tunnels-cli", MinCLIVersion: "0.2.0",
 		DatabaseURL: "postgres://broker:pw@db:5432/tunnels",
 		PocketIDURL: "https://idp.layertwo.dev", PocketIDAPIKey: "pocket-admin-key", PocketIDAPIID: "api-tunnels",
-		MachinesEnabled:  true,
+		MachinesEnabled: true, MetricsEnabled: true,
 		FrpsDashboardURL: "http://frps.tunnels.svc:7500", FrpsDashboardUser: "broker", FrpsDashboardPassword: "dash-pw",
 		PluginSecret: goodSecret, MaxTunnelsPerUser: 3, BandwidthLimit: "2MB",
 		Reserved: []string{"admin", "root", "ops"}, ListenAddr: "127.0.0.1:9000", LogLevel: slog.LevelDebug,
@@ -338,8 +338,9 @@ func TestLoadConfigFromFile(t *testing.T) {
 func TestLoadConfigEnvironmentOverridesFile(t *testing.T) {
 	vars := allVars()
 	vars["POCKET_ID_URL"] = "https://env.example.com"
+	vars["LISTEN_ADDR"] = "127.0.0.1:9001"
 	file := &FileConfig{
-		Server:  &serverFile{ListenAddr: ptr("127.0.0.1:9000")},
+		Server:  &serverFile{ListenAddr: ptr("10.0.0.1:9000")},
 		Metrics: &metricsFile{},
 		Machines: &machinesFile{
 			Enabled: ptr(true), PocketIDURL: ptr("https://file.example.com"), PocketIDAPIID: ptr("api-file"),
@@ -349,7 +350,9 @@ func TestLoadConfigEnvironmentOverridesFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.PocketIDURL != "https://env.example.com" || got.PocketIDAPIID != "api-tunnels" || got.ListenAddr != "127.0.0.1:9000" {
+	// The environment wins over a differing file value for both a section setting and a machine one;
+	// the file fills a value the environment leaves unset.
+	if got.PocketIDURL != "https://env.example.com" || got.PocketIDAPIID != "api-tunnels" || got.ListenAddr != "127.0.0.1:9001" {
 		t.Errorf("merged = %+v, want the environment to win and the file to fill the rest", got)
 	}
 }
@@ -388,6 +391,20 @@ func TestLoadConfigMachinesDisabledWins(t *testing.T) {
 	}
 }
 
+// A disabled section's other keys are ignored, so a malformed POCKET_ID_URL set alongside enabled =
+// false is not a startup error: the URL is only validated when the feature is on.
+func TestLoadConfigMachinesDisabledSkipsURLValidation(t *testing.T) {
+	vars := allVars()
+	vars["POCKET_ID_URL"] = "idp:8080"
+	got, err := loadFile(vars, &FileConfig{Machines: &machinesFile{Enabled: ptr(false)}})
+	if err != nil {
+		t.Fatalf("a disabled [machines] must not validate its URL: %v", err)
+	}
+	if got.MachinesEnabled {
+		t.Errorf("machines = %+v, want off", got)
+	}
+}
+
 // A section with no enabled key is on: enabled != false.
 func TestLoadConfigMachinesEnabledByPresence(t *testing.T) {
 	got, err := loadFile(allVars(), &FileConfig{Machines: &machinesFile{PocketIDURL: ptr("https://file.example.com")}})
@@ -420,20 +437,36 @@ func TestLoadConfigMachinesRequiresItsInputs(t *testing.T) {
 	}
 }
 
-// The metrics feature is on exactly when its section exists and enabled is not false.
+// With a file, metrics are on exactly when its section exists and enabled is not false. With no file
+// at all they keep today's behaviour: always on.
 func TestLoadConfigMetricsEnabled(t *testing.T) {
 	vars := allVars()
 	for _, k := range []string{"POCKET_ID_URL", "POCKET_ID_API_KEY", "POCKET_ID_API_ID"} {
 		delete(vars, k)
 	}
-	if got, err := loadFile(vars, &FileConfig{Metrics: &metricsFile{}}); err != nil || !got.MetricsEnabled {
-		t.Errorf("empty [metrics] = %+v, %v; want on", got, err)
+	tests := []struct {
+		name string
+		file *FileConfig
+		want bool
+	}{
+		{"nil file", nil, true},
+		{"no [metrics] section", &FileConfig{Server: &serverFile{}}, false},
+		{"empty [metrics]", &FileConfig{Metrics: &metricsFile{}}, true},
+		{"[metrics] enabled=true", &FileConfig{Metrics: &metricsFile{Enabled: ptr(true)}}, true},
+		{"[metrics] enabled=false", &FileConfig{Metrics: &metricsFile{Enabled: ptr(false)}}, false},
 	}
-	if got, err := loadFile(vars, &FileConfig{Metrics: &metricsFile{Enabled: ptr(false)}}); err != nil || got.MetricsEnabled {
-		t.Errorf("[metrics] enabled=false = %+v, %v; want off", got, err)
-	}
-	if got, err := load(vars); err != nil || got.MetricsEnabled {
-		t.Errorf("no file = %+v, %v; want metrics off", got, err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// The nil-file case has the machine config set, which a file with no [machines] rejects.
+			v := vars
+			if tt.file == nil {
+				v = allVars()
+			}
+			got, err := loadFile(v, tt.file)
+			if err != nil || got.MetricsEnabled != tt.want {
+				t.Errorf("metrics = %v, %v; want %v", got.MetricsEnabled, err, tt.want)
+			}
+		})
 	}
 }
 
