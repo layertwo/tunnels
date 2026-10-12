@@ -1491,6 +1491,11 @@ func (w *world) dialOIDC(hc *http.Client) auth.OIDC {
 	return auth.OIDC{Issuer: w.idp.URL, ClientID: mockidp.ClientID, Resource: mockidp.APIResource, HTTP: hc}
 }
 
+// oidcSourceOf is an oidcSource that always answers o: in these tests a refresh never discovers.
+func oidcSourceOf(o auth.OIDC) oidcSource {
+	return func(context.Context) (auth.OIDC, error) { return o, nil }
+}
+
 // dialToken presents the stored token while it is still valid and refreshes it only when it is not:
 // refreshing on every dial would rotate a token ssh does not need.
 func TestDialTokenRefreshesOnlyWhenStale(t *testing.T) {
@@ -1511,7 +1516,7 @@ func TestDialTokenRefreshesOnlyWhenStale(t *testing.T) {
 				t.Fatal(err)
 			}
 			env := w.env()
-			got, err := dialToken(context.Background(), s, w.dialOIDC(env.HTTP), tok)
+			got, err := dialToken(context.Background(), s, oidcSourceOf(w.dialOIDC(env.HTTP)), tok)
 			if err != nil {
 				t.Fatalf("dialToken: %v", err)
 			}
@@ -1540,7 +1545,7 @@ func TestDialTokenRefreshFails(t *testing.T) {
 	}
 	w.idp.RevokeUser("sub-alice")
 	env := w.env()
-	if _, err := dialToken(context.Background(), s, w.dialOIDC(env.HTTP), tok); err == nil {
+	if _, err := dialToken(context.Background(), s, oidcSourceOf(w.dialOIDC(env.HTTP)), tok); err == nil {
 		t.Error("dialToken returned a token after a refused refresh")
 	}
 }
@@ -1604,7 +1609,7 @@ func TestDialStreamPipes(t *testing.T) {
 	env.Stdin = pr
 	code := make(chan int, 1)
 	go func() {
-		code <- dialStream(context.Background(), env, websocket.DefaultDialer, wsURL(srv), auth.Store{Dir: w.dir}, oidcFor(auth.Bootstrap{}, env.HTTP), tok)
+		code <- dialStream(context.Background(), env, websocket.DefaultDialer, wsURL(srv), auth.Store{Dir: w.dir}, oidcSourceOf(oidcFor(auth.Bootstrap{}, env.HTTP)), tok)
 	}()
 
 	if _, err := pw.Write([]byte("hello\n")); err != nil {
@@ -1629,7 +1634,7 @@ func TestDialStreamRefreshesOn401(t *testing.T) {
 	})
 	env := w.env()
 	env.Stdin = strings.NewReader("")
-	if c := dialStream(context.Background(), env, websocket.DefaultDialer, wsURL(srv), auth.Store{Dir: w.dir}, w.dialOIDC(env.HTTP), tok); c != 0 {
+	if c := dialStream(context.Background(), env, websocket.DefaultDialer, wsURL(srv), auth.Store{Dir: w.dir}, oidcSourceOf(w.dialOIDC(env.HTTP)), tok); c != 0 {
 		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
 	}
 	after, err := (auth.Store{Dir: w.dir}).Load()
@@ -1644,7 +1649,7 @@ func TestDialStreamRefusedAfterRefresh(t *testing.T) {
 	tok := w.loggedIn()
 	srv := wsServer(t, func(*http.Request) bool { return false })
 	env := w.env()
-	if c := dialStream(context.Background(), env, websocket.DefaultDialer, wsURL(srv), auth.Store{Dir: w.dir}, w.dialOIDC(env.HTTP), tok); c != 1 {
+	if c := dialStream(context.Background(), env, websocket.DefaultDialer, wsURL(srv), auth.Store{Dir: w.dir}, oidcSourceOf(w.dialOIDC(env.HTTP)), tok); c != 1 {
 		t.Errorf("exit %d, want 1", c)
 	}
 	if !strings.Contains(w.err.String(), "run: tunnel login") {
@@ -1659,7 +1664,7 @@ func TestDialStreamRefreshAfter401Fails(t *testing.T) {
 	w.idp.RevokeUser("sub-alice")
 	srv := wsServer(t, func(*http.Request) bool { return false })
 	env := w.env()
-	if c := dialStream(context.Background(), env, websocket.DefaultDialer, wsURL(srv), auth.Store{Dir: w.dir}, w.dialOIDC(env.HTTP), tok); c != 1 {
+	if c := dialStream(context.Background(), env, websocket.DefaultDialer, wsURL(srv), auth.Store{Dir: w.dir}, oidcSourceOf(w.dialOIDC(env.HTTP)), tok); c != 1 {
 		t.Errorf("exit %d, want 1", c)
 	}
 	if !strings.Contains(w.err.String(), "could not refresh your session") {
@@ -1678,7 +1683,7 @@ func TestDialStreamRefreshFails(t *testing.T) {
 	w.idp.RevokeUser("sub-alice")
 	env := w.env()
 	if c := dialStream(context.Background(), env, websocket.DefaultDialer, wsURL(wsServer(t, func(*http.Request) bool { return true })),
-		auth.Store{Dir: w.dir}, w.dialOIDC(env.HTTP), tok); c != 1 {
+		auth.Store{Dir: w.dir}, oidcSourceOf(w.dialOIDC(env.HTTP)), tok); c != 1 {
 		t.Errorf("exit %d, want 1", c)
 	}
 	if !strings.Contains(w.err.String(), "could not refresh your session") {
@@ -1716,7 +1721,9 @@ func TestDialNotLoggedIn(t *testing.T) {
 	}
 }
 
-// dial still discovers the server, so a stored login whose service is gone fails like the rest.
+// dial discovers the server only when it must refresh: a fresh token dials with no .well-known
+// request, so a broken one cannot fail a dial that does not refresh; a stale token still surfaces
+// the discovery failure.
 func TestDialDiscoveryFails(t *testing.T) {
 	w := newWorld(t)
 	tok := w.loggedIn()
@@ -1724,8 +1731,36 @@ func TestDialDiscoveryFails(t *testing.T) {
 	if err := (auth.Store{Dir: w.dir}).Save(tok); err != nil {
 		t.Fatal(err)
 	}
+	// Fresh: TLS to the host is as far as it gets; no discovery is tried.
+	if c := w.main("dial", "host", "22"); c != 1 || strings.Contains(w.err.String(), "cannot reach") {
+		t.Errorf("fresh token: exit %d, stderr:\n%s", c, w.err)
+	}
+
+	// Stale: the refresh needs the provider, so the broken discovery is surfaced.
+	tok.AccessToken = w.idp.Issue("sub-alice", mockidp.IssueOpts{TTL: -time.Hour})
+	if err := (auth.Store{Dir: w.dir}).Save(tok); err != nil {
+		t.Fatal(err)
+	}
+	w.err = &syncBuffer{}
 	if c := w.main("dial", "host", "22"); c != 1 || !strings.Contains(w.err.String(), "cannot reach http://127.0.0.1:1") {
-		t.Errorf("exit %d, stderr:\n%s", c, w.err)
+		t.Errorf("stale token: exit %d, stderr:\n%s", c, w.err)
+	}
+}
+
+// A stale token is refreshed (which discovers the provider) before the socket is opened.
+func TestDialRefreshesWhenStale(t *testing.T) {
+	w := newWorld(t)
+	before := w.loggedIn()
+	before.AccessToken = w.idp.Issue("sub-alice", mockidp.IssueOpts{TTL: -time.Hour})
+	if err := (auth.Store{Dir: w.dir}).Save(before); err != nil {
+		t.Fatal(err)
+	}
+	if c := w.main("dial", "host", "22"); c != 1 {
+		t.Errorf("exit %d, want 1", c)
+	}
+	after, err := (auth.Store{Dir: w.dir}).Load()
+	if err != nil || after.AccessToken == before.AccessToken {
+		t.Errorf("the stale token was not refreshed before dialling: %+v, %v", after, err)
 	}
 }
 

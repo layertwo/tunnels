@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -386,11 +387,24 @@ func dial(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintln(env.Stderr, err)
 		return 1
 	}
-	// The 401 retry needs the provider's token endpoint, so Discover is not only for the login.
-	b, err := auth.Discover(ctx, env.HTTP, tok.Server)
-	if err != nil {
-		fmt.Fprintf(env.Stderr, "cannot reach %s: %v\n", tok.Server, err)
-		return 1
+	// The provider is needed only to refresh, so it is discovered on first use: a fresh token dials
+	// with no .well-known request, and a momentarily broken endpoint cannot fail a dial that does
+	// not refresh.
+	var (
+		resolveOnce sync.Once
+		refresher   auth.OIDC
+		resolveErr  error
+	)
+	resolve := func(ctx context.Context) (auth.OIDC, error) {
+		resolveOnce.Do(func() {
+			b, err := auth.Discover(ctx, env.HTTP, tok.Server)
+			if err != nil {
+				resolveErr = fmt.Errorf("cannot reach %s: %v", tok.Server, err)
+				return
+			}
+			refresher = oidcFor(b, env.HTTP)
+		})
+		return refresher, resolveErr
 	}
 	caFile, err := tunnel.WriteCABundle(s.Dir)
 	if err != nil {
@@ -409,7 +423,7 @@ func dial(ctx context.Context, env Env, args []string) int {
 		},
 	}
 	// ssh's %p is the target's port, not the data route's: the tunnel is reached on 443 through Traefik.
-	return dialStream(ctx, env, d, "wss://"+host+":443/", s, oidcFor(b, env.HTTP), tok)
+	return dialStream(ctx, env, d, "wss://"+host+":443/", s, resolve, tok)
 }
 
 // wsDial opens the WebSocket; *websocket.Dialer is the real one.
@@ -417,10 +431,14 @@ type wsDial interface {
 	DialContext(ctx context.Context, urlStr string, requestHeader http.Header) (*websocket.Conn, *http.Response, error)
 }
 
+// oidcSource resolves the identity provider a token refresh needs. dial's discovers the service
+// on first use, so a dial that does not refresh makes no discovery request.
+type oidcSource func(context.Context) (auth.OIDC, error)
+
 // dialStream opens the WebSocket to url presenting the login, then pumps it to this process's stdin
 // and stdout. On a 401 handshake it refreshes the login once and retries.
-func dialStream(ctx context.Context, env Env, d wsDial, url string, s auth.Store, o auth.OIDC, tok auth.Tokens) int {
-	token, err := dialToken(ctx, s, o, tok)
+func dialStream(ctx context.Context, env Env, d wsDial, url string, s auth.Store, src oidcSource, tok auth.Tokens) int {
+	token, err := dialToken(ctx, s, src, tok)
 	if err != nil {
 		refreshFailed(env, err)
 		return 1
@@ -428,7 +446,7 @@ func dialStream(ctx context.Context, env Env, d wsDial, url string, s auth.Store
 	conn, resp, err := d.DialContext(ctx, url, dialHeader(token, env.Version))
 	if refused(err, resp) {
 		// The token aged between the check and the dial: refresh once and try again.
-		token, err = refreshLogin(ctx, s, o)
+		token, err = refreshLogin(ctx, s, src)
 		if err != nil {
 			refreshFailed(env, err)
 			return 1
@@ -453,15 +471,20 @@ const tokenSkew = time.Minute
 
 // dialToken is the token to present: the stored one while it has not expired, else a refreshed one.
 // Refreshing only when stale keeps dial from rotating the login that a running up also holds.
-func dialToken(ctx context.Context, s auth.Store, o auth.OIDC, tok auth.Tokens) (string, error) {
+func dialToken(ctx context.Context, s auth.Store, src oidcSource, tok auth.Tokens) (string, error) {
 	if jwtExpiry(tok.AccessToken).After(time.Now().Add(tokenSkew)) {
 		return tok.AccessToken, nil
 	}
-	return refreshLogin(ctx, s, o)
+	return refreshLogin(ctx, s, src)
 }
 
-// refreshLogin mints a fresh access token from the stored refresh token.
-func refreshLogin(ctx context.Context, s auth.Store, o auth.OIDC) (string, error) {
+// refreshLogin mints a fresh access token from the stored refresh token, resolving the provider only
+// now: a stale token needs it, and so does a 401 retry.
+func refreshLogin(ctx context.Context, s auth.Store, src oidcSource) (string, error) {
+	o, err := src(ctx)
+	if err != nil {
+		return "", err
+	}
 	fresh, err := auth.RefreshStored(ctx, s, o)
 	if err != nil {
 		return "", err
