@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,6 +19,8 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/gorilla/websocket"
+
 	"github.com/layertwo/tunnels/internal/auth"
 	"github.com/layertwo/tunnels/internal/httpx"
 	"github.com/layertwo/tunnels/internal/mockidp"
@@ -38,12 +41,13 @@ func (s *syncBuffer) String() string { s.mu.Lock(); defer s.mu.Unlock(); return 
 
 // world is a service (bootstrap document and /api/me), the mock identity provider and a config dir.
 type world struct {
-	t        *testing.T
-	idp      *mockidp.Server
-	svc      *httptest.Server
-	me       http.HandlerFunc
-	dir      string
-	out, err *syncBuffer
+	t         *testing.T
+	idp       *mockidp.Server
+	svc       *httptest.Server
+	me        http.HandlerFunc
+	dir       string
+	out, err  *syncBuffer
+	sshDomain string // when set, the bootstrap document advertises it
 
 	mu             sync.Mutex
 	runs           []tunnel.Options
@@ -81,10 +85,14 @@ func newWorld(t *testing.T) *world {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /.well-known/tunnels.json", func(rw http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(rw).Encode(map[string]string{
+		doc := map[string]string{
 			"issuer": w.idp.URL, "cli_client_id": mockidp.ClientID, "api_resource": mockidp.APIResource,
 			"service_host": "tunnels.test", "sites_domain": "w.tunnels.test", "min_cli_version": "0.0.0",
-		})
+		}
+		if w.sshDomain != "" {
+			doc["ssh_domain"] = w.sshDomain
+		}
+		json.NewEncoder(rw).Encode(doc)
 	})
 	mux.HandleFunc("GET /api/me", func(rw http.ResponseWriter, r *http.Request) { w.me(rw, r) })
 	mux.HandleFunc("GET /api/shares", func(rw http.ResponseWriter, _ *http.Request) {
@@ -131,7 +139,7 @@ func (w *world) main(args ...string) int { return Main(args, w.env()) }
 func (w *world) loggedIn() auth.Tokens {
 	w.t.Helper()
 	tok := auth.Tokens{AccessToken: w.idp.Issue("sub-alice", mockidp.IssueOpts{}), RefreshToken: w.idp.IssueRefreshToken("sub-alice"),
-		Handle: "alice", Server: w.svc.URL}
+		Handle: "alice", Server: w.svc.URL, SSHDomain: w.sshDomain}
 	if err := (auth.Store{Dir: w.dir}).Save(tok); err != nil {
 		w.t.Fatal(err)
 	}
@@ -403,6 +411,220 @@ func TestUpDefaultTunnel(t *testing.T) {
 	}
 	if c := w.main("up", "8080"); c != 0 || w.runs[0].Name != "" || !strings.Contains(w.out.String(), "https://alice.w.tunnels.test") {
 		t.Errorf("exit %d, runs %+v, stdout:\n%s", c, w.runs, w.out)
+	}
+}
+
+// In ssh mode PORT is the port on the target, --target picks the target host, and the print is the
+// ssh_config alias, which is what the user types, rather than a site URL.
+func TestUpSSHPassesOptions(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	w.sshDomain = "ssh.tunnels.test"
+	w.run = func(ctx context.Context, o tunnel.Options, onStatus func(tunnel.Status)) error {
+		onStatus(tunnel.Status{Phase: "running"})
+		return nil
+	}
+	if c := w.main("up", "22", "--ssh", "--name", "box1"); c != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
+	}
+	if len(w.runs) != 1 {
+		t.Fatalf("%d runs", len(w.runs))
+	}
+	o := w.runs[0]
+	if !o.SSH || o.SSHTarget != "127.0.0.1" || o.SSHPort != 22 || o.SSHDomain != "ssh.tunnels.test" {
+		t.Errorf("options = %+v, want the ssh fields", o)
+	}
+	if !strings.Contains(w.out.String(), "ssh alice-box1\n") {
+		t.Errorf("stdout lacks the ssh alias:\n%s", w.out)
+	}
+}
+
+// In ssh mode --target names another host the machine can reach.
+func TestUpSSHTarget(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	w.sshDomain = "ssh.tunnels.test"
+	w.run = func(ctx context.Context, o tunnel.Options, onStatus func(tunnel.Status)) error {
+		onStatus(tunnel.Status{Phase: "running"})
+		return nil
+	}
+	if c := w.main("up", "22", "--ssh", "--target", "192.168.1.9"); c != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
+	}
+	if len(w.runs) != 1 || w.runs[0].SSHTarget != "192.168.1.9" {
+		t.Errorf("runs = %+v, want a run with the target", w.runs)
+	}
+}
+
+// --target is a bare host: the CLI says so before anything is dialled.
+func TestUpSSHRejectsTargetWithPort(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	if c := w.main("up", "22", "--ssh", "--target", "192.168.1.5:22"); c != 2 {
+		t.Errorf("exit %d, want 2", c)
+	}
+	if !strings.Contains(w.err.String(), "192.168.1.5:22") {
+		t.Errorf("stderr does not name the target:\n%s", w.err)
+	}
+	if len(w.runs) != 0 {
+		t.Error("the tunnel was started with a bad target")
+	}
+}
+
+func TestUpSSHRejectsTargetWithScheme(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	if c := w.main("up", "22", "--ssh", "--target", "http://x"); c != 2 {
+		t.Errorf("exit %d, want 2", c)
+	}
+	if !strings.Contains(w.err.String(), "http://x") {
+		t.Errorf("stderr does not name the target:\n%s", w.err)
+	}
+	if len(w.runs) != 0 {
+		t.Error("the tunnel was started with a bad target")
+	}
+}
+
+func TestUpSSHRejectsEmptyTarget(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	if c := w.main("up", "22", "--ssh", "--target", ""); c != 2 {
+		t.Errorf("exit %d, want 2", c)
+	}
+	if !strings.Contains(w.err.String(), "is not a bare host") {
+		t.Errorf("stderr does not name the target:\n%s", w.err)
+	}
+	if len(w.runs) != 0 {
+		t.Error("the tunnel was started with an empty target")
+	}
+}
+
+// --target names the ssh target, so without --ssh it would be silently ignored: refuse it, as share
+// refuses --for on unshare.
+func TestUpRejectsTargetWithoutSSH(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	if c := w.main("up", "22", "--target", "otherhost"); c != 2 {
+		t.Errorf("exit %d, want 2", c)
+	}
+	if !strings.Contains(w.err.String(), "--target is only for up --ssh") {
+		t.Errorf("stderr does not say the flag needs --ssh:\n%s", w.err)
+	}
+	if len(w.runs) != 0 {
+		t.Error("the tunnel was started with an ignored --target")
+	}
+}
+
+// The server has SSH off: publishing an ssh tunnel would be refused, so say so and stop.
+func TestUpSSHServerDisabled(t *testing.T) {
+	w := newWorld(t) // no ssh_domain in the bootstrap document
+	w.loggedIn()
+	if c := w.main("up", "22", "--ssh"); c != 2 {
+		t.Errorf("exit %d, want 2", c)
+	}
+	if !strings.Contains(w.err.String(), "server has ssh disabled") {
+		t.Errorf("stderr does not say ssh is disabled:\n%s", w.err)
+	}
+	if len(w.runs) != 0 {
+		t.Error("the tunnel was started against a server with ssh off")
+	}
+}
+
+// ---- ssh-config
+
+// ssh-config prints the exact block to paste into ~/.ssh/config, for the named tunnel's label and,
+// with no --name, for the default tunnel's.
+func TestSSHConfigPrintsBlock(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"named", []string{"ssh-config", "--name", "box1"},
+			"Host alice-box1\n\tHostName alice-box1.ssh.tunnels.test\n\tProxyCommand tunnel dial %h %p\n"},
+		{"default", []string{"ssh-config"},
+			"Host alice\n\tHostName alice.ssh.tunnels.test\n\tProxyCommand tunnel dial %h %p\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newWorld(t)
+			w.loggedIn()
+			w.sshDomain = "ssh.tunnels.test"
+			if c := w.main(tc.args...); c != 0 {
+				t.Fatalf("exit %d; stderr:\n%s", c, w.err)
+			}
+			if got := w.out.String(); got != tc.want {
+				t.Errorf("stdout = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A --name the broker would refuse is refused here, like up does: the block is pasted into
+// ~/.ssh/config, so a newline in the name must not smuggle in a second Host line.
+func TestSSHConfigRejectsBadName(t *testing.T) {
+	for _, name := range []string{"Box", "a_b", "default", "x\nHost evil"} {
+		t.Run(name, func(t *testing.T) {
+			w := newWorld(t)
+			w.loggedIn()
+			w.sshDomain = "ssh.tunnels.test"
+			if c := w.main("ssh-config", "--name", name); c != 2 {
+				t.Errorf("exit %d, want 2", c)
+			}
+			if !strings.Contains(w.err.String(), "is not a tunnel name") {
+				t.Errorf("stderr does not name the rule:\n%s", w.err)
+			}
+			if w.out.String() != "" {
+				t.Errorf("stdout is not empty:\n%s", w.out)
+			}
+		})
+	}
+}
+
+func TestSSHConfigNotLoggedIn(t *testing.T) {
+	w := newWorld(t)
+	if c := w.main("ssh-config", "--name", "box1"); c != 1 || !strings.Contains(w.err.String(), "tunnel login") {
+		t.Errorf("exit %d, stderr:\n%s", c, w.err)
+	}
+}
+
+// The server has SSH off: a block would point at a host that cannot work, so say so and print nothing.
+func TestSSHConfigServerDisabled(t *testing.T) {
+	w := newWorld(t) // no ssh_domain in the bootstrap document
+	w.loggedIn()
+	if c := w.main("ssh-config", "--name", "box1"); c != 2 {
+		t.Errorf("exit %d, want 2", c)
+	}
+	if !strings.Contains(w.err.String(), "ssh disabled") {
+		t.Errorf("stderr does not say ssh is disabled:\n%s", w.err)
+	}
+	if w.out.String() != "" {
+		t.Errorf("stdout is not empty:\n%s", w.out)
+	}
+}
+
+// ssh-config still discovers the server, so a stored login whose service is gone fails like the rest.
+func TestSSHConfigDiscoveryFails(t *testing.T) {
+	w := newWorld(t)
+	tok := w.loggedIn()
+	tok.Server = "http://127.0.0.1:1"
+	if err := (auth.Store{Dir: w.dir}).Save(tok); err != nil {
+		t.Fatal(err)
+	}
+	if c := w.main("ssh-config"); c != 1 || !strings.Contains(w.err.String(), "cannot reach http://127.0.0.1:1") {
+		t.Errorf("exit %d, stderr:\n%s", c, w.err)
+	}
+}
+
+func TestSSHConfigArgumentErrors(t *testing.T) {
+	for _, args := range [][]string{{"ssh-config", "extra"}, {"ssh-config", "--bogus"}} {
+		w := newWorld(t)
+		w.loggedIn()
+		if c := w.main(args...); c != 2 {
+			t.Errorf("%q: exit %d, want 2", args, c)
+		}
+		if !strings.Contains(w.err.String(), "Usage") {
+			t.Errorf("%q: no usage on stderr:\n%s", args, w.err)
+		}
 	}
 }
 
@@ -806,6 +1028,8 @@ func TestCommandsWithoutAConfigDir(t *testing.T) {
 	}{
 		{"login", []string{"login"}, 1, "no place for the login"},
 		{"up", []string{"up", "3000"}, 1, "no place for the login"},
+		{"ssh-config", []string{"ssh-config"}, 1, "no place for the login"},
+		{"dial", []string{"dial", "host", "22"}, 1, "no place for the login"},
 		{"share", []string{"share", "alice", "bob"}, 1, "no place for the login"},
 		{"unshare", []string{"unshare", "alice", "bob"}, 1, "no place for the login"},
 		{"list", []string{"list"}, 1, "no place for the login"},
@@ -1233,5 +1457,416 @@ func TestMachineArgumentErrors(t *testing.T) {
 				t.Errorf("no usage line on stderr:\n%s", w.err)
 			}
 		})
+	}
+}
+
+// ---- dial
+
+// wsServer upgrades a WebSocket when mayUpgrade allows it and otherwise answers 401, then echoes
+// every message until the connection ends. It stands in for the broker's ssh bridge.
+func wsServer(t *testing.T, mayUpgrade func(*http.Request) bool) *httptest.Server {
+	t.Helper()
+	up := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if !mayUpgrade(r) {
+			rw.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		conn, err := up.Upgrade(rw, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			mt, msg, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			if conn.WriteMessage(mt, msg) != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// wsURL is srv's address as the dialer's ws:// URL.
+func wsURL(srv *httptest.Server) string { return "ws" + strings.TrimPrefix(srv.URL, "http") }
+
+// The token travels only in the Authorization header, and the handshake names the CLI.
+func TestDialHeader(t *testing.T) {
+	h := dialHeader("tok", "1.2.3")
+	if h.Get("Authorization") != "Bearer tok" || h.Get("User-Agent") != "tunnels/1.2.3" {
+		t.Errorf("header = %v", h)
+	}
+}
+
+// dialOIDC is the identity provider a 401 refresh needs, as Discover would describe it.
+func (w *world) dialOIDC(hc *http.Client) auth.OIDC {
+	return auth.OIDC{Issuer: w.idp.URL, ClientID: mockidp.ClientID, Resource: mockidp.APIResource, HTTP: hc}
+}
+
+// oidcSourceOf is an oidcSource that always answers o: in these tests a refresh never discovers.
+func oidcSourceOf(o auth.OIDC) oidcSource {
+	return func(context.Context) (auth.OIDC, error) { return o, nil }
+}
+
+// dialToken presents the stored token while it is still valid and refreshes it only when it is not:
+// refreshing on every dial would rotate a token ssh does not need.
+func TestDialTokenRefreshesOnlyWhenStale(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		token       func(*world) string
+		wantRefresh bool
+	}{
+		{"valid", func(w *world) string { return w.idp.Issue("sub-alice", mockidp.IssueOpts{TTL: time.Hour}) }, false},
+		{"expired", func(w *world) string { return w.idp.Issue("sub-alice", mockidp.IssueOpts{TTL: -time.Hour}) }, true},
+		{"unreadable", func(*world) string { return "garbage" }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newWorld(t)
+			tok := auth.Tokens{AccessToken: tc.token(w), RefreshToken: w.idp.IssueRefreshToken("sub-alice"), Handle: "alice", Server: w.svc.URL}
+			s := auth.Store{Dir: w.dir}
+			if err := s.Save(tok); err != nil {
+				t.Fatal(err)
+			}
+			env := w.env()
+			got, err := dialToken(context.Background(), s, oidcSourceOf(w.dialOIDC(env.HTTP)), tok)
+			if err != nil {
+				t.Fatalf("dialToken: %v", err)
+			}
+			if refreshed := got != tok.AccessToken; refreshed != tc.wantRefresh {
+				t.Errorf("refreshed = %v, want %v (token %q)", refreshed, tc.wantRefresh, got)
+			}
+			after, err := s.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (after.AccessToken != tok.AccessToken) != tc.wantRefresh {
+				t.Errorf("stored token refreshed = %v, want %v", after.AccessToken != tok.AccessToken, tc.wantRefresh)
+			}
+		})
+	}
+}
+
+// A refresh that the provider refuses is the one error dialToken reports.
+func TestDialTokenRefreshFails(t *testing.T) {
+	w := newWorld(t)
+	tok := auth.Tokens{AccessToken: w.idp.Issue("sub-alice", mockidp.IssueOpts{TTL: -time.Hour}),
+		RefreshToken: w.idp.IssueRefreshToken("sub-alice"), Handle: "alice", Server: w.svc.URL}
+	s := auth.Store{Dir: w.dir}
+	if err := s.Save(tok); err != nil {
+		t.Fatal(err)
+	}
+	w.idp.RevokeUser("sub-alice")
+	env := w.env()
+	if _, err := dialToken(context.Background(), s, oidcSourceOf(w.dialOIDC(env.HTTP)), tok); err == nil {
+		t.Error("dialToken returned a token after a refused refresh")
+	}
+}
+
+// jwtExpiry reads exp out of a token without verifying it; anything it cannot read is stale.
+func TestJWTExpiry(t *testing.T) {
+	payload := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
+	for _, tc := range []struct {
+		name  string
+		token string
+		want  time.Time
+	}{
+		{"exp", "a." + payload(`{"exp":1234567890}`) + ".c", time.Unix(1234567890, 0)},
+		{"no exp", "a." + payload(`{"sub":"alice"}`) + ".c", time.Time{}},
+		{"zero exp", "a." + payload(`{"exp":0}`) + ".c", time.Time{}},
+		{"bad json", "a." + payload("not json") + ".c", time.Time{}},
+		{"bad base64", "a.!!!.c", time.Time{}},
+		{"not a jwt", "garbage", time.Time{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := jwtExpiry(tc.token); !got.Equal(tc.want) {
+				t.Errorf("jwtExpiry(%q) = %v, want %v", tc.token, got, tc.want)
+			}
+		})
+	}
+}
+
+// rootPool reads the CA bundle WriteCABundle writes; a file it cannot read or that holds no
+// certificate is an error, not an empty pool that trusts nothing.
+func TestRootPool(t *testing.T) {
+	if _, err := rootPool(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Error("rootPool accepted a missing file")
+	}
+	empty := filepath.Join(t.TempDir(), "empty.pem")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rootPool(empty); err == nil {
+		t.Error("rootPool accepted a file with no certificates")
+	}
+	dir := t.TempDir()
+	ca, err := tunnel.WriteCABundle(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pool, err := rootPool(ca); err != nil || pool == nil {
+		t.Errorf("rootPool(%s) = %v, %v", ca, pool, err)
+	}
+}
+
+// The dial command pipes this process's stdin and stdout to the WebSocket; only the TLS wrapper is
+// left to the e2e task, because the data route is on 443 and a test cannot bind it.
+func TestDialStreamPipes(t *testing.T) {
+	w := newWorld(t)
+	tok := w.loggedIn()
+	srv := wsServer(t, func(r *http.Request) bool {
+		return strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") == tok.AccessToken
+	})
+	pr, pw := io.Pipe()
+	env := w.env()
+	env.Stdin = pr
+	code := make(chan int, 1)
+	go func() {
+		code <- dialStream(context.Background(), env, websocket.DefaultDialer, wsURL(srv), auth.Store{Dir: w.dir}, oidcSourceOf(oidcFor(auth.Bootstrap{}, env.HTTP)), tok)
+	}()
+
+	if _, err := pw.Write([]byte("hello\n")); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, w.out, regexp.MustCompile("hello"))
+	if got := w.out.String(); got != "hello\n" {
+		t.Errorf("stdout = %q, want %q", got, "hello\n")
+	}
+	_ = pw.Close()
+	if c := exitOf(t, code); c != 0 {
+		t.Errorf("exit %d; stderr:\n%s", c, w.err)
+	}
+}
+
+// A 401 handshake means the token aged between the check and the dial: refresh once and retry.
+func TestDialStreamRefreshesOn401(t *testing.T) {
+	w := newWorld(t)
+	tok := w.loggedIn()
+	srv := wsServer(t, func(r *http.Request) bool {
+		return strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != tok.AccessToken
+	})
+	env := w.env()
+	env.Stdin = strings.NewReader("")
+	if c := dialStream(context.Background(), env, websocket.DefaultDialer, wsURL(srv), auth.Store{Dir: w.dir}, oidcSourceOf(w.dialOIDC(env.HTTP)), tok); c != 0 {
+		t.Fatalf("exit %d; stderr:\n%s", c, w.err)
+	}
+	after, err := (auth.Store{Dir: w.dir}).Load()
+	if err != nil || after.AccessToken == tok.AccessToken {
+		t.Errorf("the 401 did not refresh the stored token: %+v, %v", after, err)
+	}
+}
+
+// A second 401 after the refresh ends the connection with what to run.
+func TestDialStreamRefusedAfterRefresh(t *testing.T) {
+	w := newWorld(t)
+	tok := w.loggedIn()
+	srv := wsServer(t, func(*http.Request) bool { return false })
+	env := w.env()
+	if c := dialStream(context.Background(), env, websocket.DefaultDialer, wsURL(srv), auth.Store{Dir: w.dir}, oidcSourceOf(w.dialOIDC(env.HTTP)), tok); c != 1 {
+		t.Errorf("exit %d, want 1", c)
+	}
+	if !strings.Contains(w.err.String(), "run: tunnel login") {
+		t.Errorf("stderr:\n%s", w.err)
+	}
+}
+
+// A refresh failing after a 401 is reported like any other failed refresh, not as a refused login.
+func TestDialStreamRefreshAfter401Fails(t *testing.T) {
+	w := newWorld(t)
+	tok := w.loggedIn()
+	w.idp.RevokeUser("sub-alice")
+	srv := wsServer(t, func(*http.Request) bool { return false })
+	env := w.env()
+	if c := dialStream(context.Background(), env, websocket.DefaultDialer, wsURL(srv), auth.Store{Dir: w.dir}, oidcSourceOf(w.dialOIDC(env.HTTP)), tok); c != 1 {
+		t.Errorf("exit %d, want 1", c)
+	}
+	if !strings.Contains(w.err.String(), "could not refresh your session") {
+		t.Errorf("stderr:\n%s", w.err)
+	}
+}
+
+// A stale stored token with a refused refresh never reaches the socket.
+func TestDialStreamRefreshFails(t *testing.T) {
+	w := newWorld(t)
+	tok := w.loggedIn()
+	tok.AccessToken = w.idp.Issue("sub-alice", mockidp.IssueOpts{TTL: -time.Hour})
+	if err := (auth.Store{Dir: w.dir}).Save(tok); err != nil {
+		t.Fatal(err)
+	}
+	w.idp.RevokeUser("sub-alice")
+	env := w.env()
+	if c := dialStream(context.Background(), env, websocket.DefaultDialer, wsURL(wsServer(t, func(*http.Request) bool { return true })),
+		auth.Store{Dir: w.dir}, oidcSourceOf(w.dialOIDC(env.HTTP)), tok); c != 1 {
+		t.Errorf("exit %d, want 1", c)
+	}
+	if !strings.Contains(w.err.String(), "could not refresh your session") {
+		t.Errorf("stderr:\n%s", w.err)
+	}
+}
+
+func TestDialArgumentErrors(t *testing.T) {
+	for _, args := range [][]string{
+		{"dial"},
+		{"dial", "host"},
+		{"dial", "host", "22", "extra"},
+		{"dial", "host", "abc"},
+		{"dial", "host", "0"},
+		{"dial", "host", "65536"},
+		{"dial", "--bogus", "host", "22"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			w := newWorld(t)
+			w.loggedIn()
+			if c := w.main(args...); c != 2 {
+				t.Errorf("exit %d, want 2", c)
+			}
+			if !strings.Contains(w.err.String(), "tunnel dial HOST PORT") {
+				t.Errorf("no usage line on stderr:\n%s", w.err)
+			}
+		})
+	}
+}
+
+func TestDialNotLoggedIn(t *testing.T) {
+	w := newWorld(t)
+	if c := w.main("dial", "host", "22"); c != 1 || !strings.Contains(w.err.String(), "run: tunnel login") {
+		t.Errorf("exit %d, stderr:\n%s", c, w.err)
+	}
+}
+
+// dial discovers the server only when it must refresh: a fresh token dials with no .well-known
+// request, so a broken one cannot fail a dial that does not refresh; a stale token still surfaces
+// the discovery failure. The ssh host is checked against the domain stored at login, so a valid
+// dial never needs the bootstrap.
+func TestDialDiscoveryFails(t *testing.T) {
+	w := newWorld(t)
+	w.sshDomain = "ssh.tunnels.test"
+	tok := w.loggedIn()
+	tok.Server = "http://127.0.0.1:1"
+	if err := (auth.Store{Dir: w.dir}).Save(tok); err != nil {
+		t.Fatal(err)
+	}
+	// Fresh: TLS to the (unresolvable) host is as far as it gets; no discovery is tried.
+	if c := w.main("dial", "alice.ssh.tunnels.test", "22"); c != 1 || strings.Contains(w.err.String(), "cannot reach") {
+		t.Errorf("fresh token: exit %d, stderr:\n%s", c, w.err)
+	}
+
+	// Stale: the refresh needs the provider, so the broken discovery is surfaced.
+	tok.AccessToken = w.idp.Issue("sub-alice", mockidp.IssueOpts{TTL: -time.Hour})
+	if err := (auth.Store{Dir: w.dir}).Save(tok); err != nil {
+		t.Fatal(err)
+	}
+	w.err = &syncBuffer{}
+	if c := w.main("dial", "alice.ssh.tunnels.test", "22"); c != 1 || !strings.Contains(w.err.String(), "cannot reach http://127.0.0.1:1") {
+		t.Errorf("stale token: exit %d, stderr:\n%s", c, w.err)
+	}
+}
+
+// A stale token is refreshed (which discovers the provider) before the socket is opened.
+func TestDialRefreshesWhenStale(t *testing.T) {
+	w := newWorld(t)
+	w.sshDomain = "ssh.tunnels.test"
+	before := w.loggedIn()
+	before.AccessToken = w.idp.Issue("sub-alice", mockidp.IssueOpts{TTL: -time.Hour})
+	if err := (auth.Store{Dir: w.dir}).Save(before); err != nil {
+		t.Fatal(err)
+	}
+	if c := w.main("dial", "alice.ssh.tunnels.test", "22"); c != 1 {
+		t.Errorf("exit %d, want 1", c)
+	}
+	after, err := (auth.Store{Dir: w.dir}).Load()
+	if err != nil || after.AccessToken == before.AccessToken {
+		t.Errorf("the stale token was not refreshed before dialling: %+v, %v", after, err)
+	}
+}
+
+// dial refuses to send the access token to a host that is not one of this service's ssh hosts; a
+// host carrying a port is refused the same way rather than reaching the URL parser.
+func TestDialRefusesForeignHost(t *testing.T) {
+	for _, host := range []string{"evil.example", "alice.other.test", "alice.ssh.tunnels.test:22", "ssh.tunnels.test"} {
+		t.Run(host, func(t *testing.T) {
+			w := newWorld(t)
+			w.sshDomain = "ssh.tunnels.test"
+			w.loggedIn()
+			if c := w.main("dial", host, "22"); c != 2 {
+				t.Errorf("exit %d, want 2", c)
+			}
+			if !strings.Contains(w.err.String(), host) {
+				t.Errorf("stderr does not name the host:\n%s", w.err)
+			}
+			if !strings.Contains(w.err.String(), "Usage: tunnel dial") {
+				t.Errorf("stderr has no dial usage line:\n%s", w.err)
+			}
+		})
+	}
+}
+
+// A login made before the ssh domain was stored has no stored domain: dial falls back to the live
+// bootstrap rather than rejecting every host. A bootstrap that names none, or that cannot be
+// reached, says what to do.
+func TestDialWithoutAStoredSSHDomain(t *testing.T) {
+	t.Run("bootstrap advertises it", func(t *testing.T) {
+		w := newWorld(t)
+		w.loggedIn()                     // the stored login has no ssh domain
+		w.sshDomain = "ssh.tunnels.test" // but the live service now advertises one
+		if c := w.main("dial", "alice.ssh.tunnels.test", "22"); c != 1 {
+			t.Errorf("exit %d, want 1 (the connection, not the argument)", c)
+		}
+		if strings.Contains(w.err.String(), "is not an ssh host") || strings.Contains(w.err.String(), "Usage: tunnel dial") {
+			t.Errorf("dial rejected a host although the bootstrap named the domain:\n%s", w.err)
+		}
+	})
+
+	t.Run("bootstrap has none", func(t *testing.T) {
+		w := newWorld(t)
+		w.loggedIn()
+		if c := w.main("dial", "alice.ssh.tunnels.test", "22"); c != 1 {
+			t.Errorf("exit %d, want 1", c)
+		}
+		if !strings.Contains(w.err.String(), "tunnel login") {
+			t.Errorf("stderr does not say to log in again:\n%s", w.err)
+		}
+	})
+
+	t.Run("server unreachable", func(t *testing.T) {
+		w := newWorld(t)
+		tok := w.loggedIn()
+		tok.Server = "http://127.0.0.1:1"
+		if err := (auth.Store{Dir: w.dir}).Save(tok); err != nil {
+			t.Fatal(err)
+		}
+		if c := w.main("dial", "alice.ssh.tunnels.test", "22"); c != 1 || !strings.Contains(w.err.String(), "cannot reach http://127.0.0.1:1") {
+			t.Errorf("exit %d, stderr:\n%s", c, w.err)
+		}
+	})
+}
+
+// A directory where the CA bundle belongs makes the rename fail, so dial never opens a socket.
+func TestDialCannotWriteTheCABundle(t *testing.T) {
+	w := newWorld(t)
+	w.sshDomain = "ssh.tunnels.test"
+	w.loggedIn()
+	if err := os.Mkdir(filepath.Join(w.dir, "cacert.pem"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if c := w.main("dial", "alice.ssh.tunnels.test", "22"); c != 1 || !strings.Contains(w.err.String(), "CA bundle") {
+		t.Errorf("exit %d, stderr:\n%s", c, w.err)
+	}
+}
+
+// The command dials the data route on 443, whatever PORT ssh passed; a host that answers nothing is
+// a connection error, not a crash. The ssh domain is matched case-insensitively, as the broker does.
+func TestDialUnreachableHost(t *testing.T) {
+	w := newWorld(t)
+	w.sshDomain = "ssh.tunnels.test"
+	w.loggedIn()
+	if c := w.main("dial", "Alice.SSH.Tunnels.Test", "22"); c != 1 {
+		t.Errorf("exit %d, want 1", c)
+	}
+	if w.err.String() == "" {
+		t.Error("no error on stderr for an unreachable host")
 	}
 }

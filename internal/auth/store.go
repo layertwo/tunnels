@@ -21,6 +21,9 @@ type Tokens struct {
 	Server       string `json:"server"`
 	ClientID     string `json:"client_id,omitempty"`
 	MachineKey   string `json:"machine_key,omitempty"` // path to the machine's private key, when this is a machine
+	// SSHDomain is where the service publishes ssh hosts. Storing it at login lets dial refuse a
+	// host outside it with no discovery round trip.
+	SSHDomain string `json:"ssh_domain,omitempty"`
 }
 
 // ErrNotLoggedIn is what Load says when nobody has logged in here.
