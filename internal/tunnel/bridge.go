@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/fatedier/frp/pkg/util/log"
 	"github.com/gorilla/websocket"
 
 	"github.com/layertwo/tunnels/internal/ws"
@@ -50,8 +51,10 @@ func (b *bridge) serve(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	peer, err := net.Dial("tcp", net.JoinHostPort(b.target, strconv.Itoa(b.sshPort)))
+	addr := net.JoinHostPort(b.target, strconv.Itoa(b.sshPort))
+	peer, err := net.Dial("tcp", addr)
 	if err != nil {
+		log.Warnf("tunnel: the ssh bridge cannot dial %s: %v", addr, err)
 		_ = conn.Close() // a failed dial must not leak the upgraded WebSocket
 		return
 	}
