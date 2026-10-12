@@ -61,6 +61,12 @@ terminal, authenticated with Pocket ID. No host is exposed directly; no anonymou
   subdomains of `subDomainHost`; `ssh.tunnels.layertwo.dev` is not under `w.`, so it is clear.
 - The identity provider and the OIDC plugin are used as they are; no new identity system.
 - User-private files are 0600; tokens are never logged.
+- **SSH is optional configuration** (amended 2026-10-12). It comes from the broker config file's
+  `[ssh]` section — a switchable feature like `[machines]` and `[metrics]`, carrying `enabled` and
+  `domain` — overridden by the environment's `SSH_DOMAIN`. **No `[ssh]` section means SSH is off**:
+  the broker refuses an SSH custom domain in `NewProxy`, denies an SSH host on `/authz`, and omits
+  `ssh_domain` from the bootstrap document. A release must start without it; see the
+  [broker config design](2026-10-12-tunnels-broker-config-design.md).
 
 ## Architecture
 
@@ -90,6 +96,7 @@ client with an HTML login page).
 | 6 | `--target` may name another address the machine can reach; the broker cannot and does not enforce the dial target. | Only the publisher chooses it, and it already runs code on its own machine; a visitor never influences it. |
 | 7 | v1 is **owner-only**; SSH inherits sharing when phase 2 lands. | The `shares` table does not exist yet, and `/authz` is owner-only today. |
 | 8 | **Machine clients (`client_credentials`) stay phase 3**; v1 uses Pocket ID refresh tokens (30-day window). | A box idle more than 30 days re-logs in once; the never-a-passkey path is phase 3. |
+| 9 | SSH is configured by the broker's **`[ssh]` section**, never by a required variable (amended 2026-10-12). | The config-file convention: a feature with no section is off, and a release must not require new configuration. |
 
 ## Flows
 
@@ -172,7 +179,7 @@ certain is done in Pocket ID (see `docs/design.md`).
 
 | Item | Rule |
 |------|------|
-| SSH domain | `SSH_DOMAIN` = `ssh.tunnels.layertwo.dev` (new config) |
+| SSH domain | the `[ssh]` section's `domain` = `ssh.tunnels.layertwo.dev` (env `SSH_DOMAIN` overrides) |
 | Tunnel label | reused: `<handle>` or `<handle>-<name>` |
 | SSH host | `<label>.<SSH_DOMAIN>` = `<label>.ssh.tunnels.layertwo.dev` (frp custom domain) |
 | frp proxy name | `<handle>.<name>` (shared namespace with HTTP tunnels) |
@@ -184,8 +191,8 @@ certain is done in Pocket ID (see `docs/design.md`).
 | `internal/names` | a `SiteLabel`-equivalent for the SSH domain, reusing label rules |
 | `internal/tunnel` | SSH mode: a WebSocket bridge + an `http` proxy with `customDomains` |
 | `internal/cli` | `up PORT --ssh [--target HOST]`, `dial HOST PORT`, `ssh-config [NAME]` |
-| `internal/broker` | `NewProxy` allows `http`+custom domain under `*.ssh.`; `/authz` gains a bearer mode; `SSH_DOMAIN` |
-| `cmd/broker` | wire `SSH_DOMAIN` |
+| `internal/broker` | `NewProxy` allows `http`+custom domain under `*.ssh.`; `/authz` gains a bearer mode; the `[ssh]` section |
+| `cmd/broker` | none — the config file already reaches the broker |
 
 ## Infra changes (homelab repo)
 
