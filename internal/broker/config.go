@@ -120,8 +120,6 @@ func LoadConfig(getenv func(string) string, file *FileConfig) (Config, error) {
 			machines = *file.Machines
 		}
 	}
-	hasMachines := file != nil && file.Machines != nil
-
 	c := Config{
 		ServiceHost:   host("SERVICE_HOST", required("SERVICE_HOST", pick(getenv, "SERVICE_HOST", tunnels.ServiceHost, ""))),
 		SitesDomain:   host("SITES_DOMAIN", required("SITES_DOMAIN", pick(getenv, "SITES_DOMAIN", tunnels.SitesDomain, ""))),
@@ -156,7 +154,7 @@ func LoadConfig(getenv func(string) string, file *FileConfig) (Config, error) {
 	switch {
 	case file == nil:
 		c.MachinesEnabled = c.PocketIDURL != ""
-	case !hasMachines:
+	case file.Machines == nil:
 		// POCKET_ID_URL is the non-secret variable that turns machines on. With no section a typo or a
 		// half-migration must be loud, naming both, rather than silently disabling the feature. A
 		// secret alone never enables, so it needs no section.
@@ -220,9 +218,9 @@ func LoadConfig(getenv func(string) string, file *FileConfig) (Config, error) {
 	}
 
 	var handles []string
-	switch {
-	case getenv("RESERVED_HANDLES") != "":
-		handles = strings.Split(getenv("RESERVED_HANDLES"), ",")
+	switch rh := getenv("RESERVED_HANDLES"); {
+	case rh != "":
+		handles = strings.Split(rh, ",")
 	case tunnels.ReservedHandles != nil:
 		handles = tunnels.ReservedHandles
 	default:
