@@ -18,7 +18,7 @@ the conventions that are easy to get wrong.
   broker's own errors name the variable, never its value.
 - **A config file (v0.4.0).** The broker's settings come from a TOML config file — `--config PATH`, else
   `BROKER_CONFIG`, else `/etc/tunnels/broker.toml` — one section per feature (`[server]`, `[identity]`,
-  `[tunnels]`, `[machines]`, `[metrics]`), and **a feature with no section is off** when a file is
+  `[tunnels]`, `[machines]`, `[ssh]`, `[metrics]`), and **a feature with no section is off** when a file is
   present (its routes are not mounted, so they answer 404); with **no file** the broker behaves as
   before (`/metrics` served, machines follow `POCKET_ID_URL`). Secrets stay in the environment, never
   the file; the environment overrides a file value. See the [broker config

@@ -1,6 +1,6 @@
 # Tunnels SSH - Design
 
-> Companion to `docs/design.md`, which reserves the SSH subtree and lists SSH under "Later".
+> Companion to `docs/design.md`, which reserves the SSH subtree.
 > This document decides how SSH works. It is the working design for the feature; an
 > implementation plan follows once it is approved.
 
@@ -115,18 +115,18 @@ client with an HTML login page).
 ### Native `ssh`
 
 ```
-Host box1
-  HostName alice-box1.ssh.tunnels.layertwo.dev
-  ProxyCommand tunnel dial %h %p
+Host alice-box1
+	HostName alice-box1.ssh.tunnels.layertwo.dev
+	ProxyCommand tunnel dial %h %p
 ```
 
-1. `ssh box1` runs `tunnel dial alice-box1.ssh.tunnels.layertwo.dev 22`.
+1. `ssh alice-box1` runs `tunnel dial alice-box1.ssh.tunnels.layertwo.dev 22`.
 2. The CLI loads its access token, opens TLS to the host, sends an HTTP upgrade with
    `Authorization: Bearer <access token>`, then pipes stdin/stdout.
 3. Traefik `forwardAuth` → broker: verify the token (JWKS), authorize (owner or share), allow.
 4. frps routes by `Host` to the agent's bridge, which dials the target. Bytes flow.
 
-`tunnel ssh-config [NAME]` prints the `Host` block, so the user does not hand-edit.
+`tunnel ssh-config [--name NAME]` prints the `Host` block, so the user does not hand-edit.
 
 ## Auth model
 
@@ -190,7 +190,7 @@ certain is done in Pocket ID (see `docs/design.md`).
 |------|--------|
 | `internal/names` | a `SiteLabel`-equivalent for the SSH domain, reusing label rules |
 | `internal/tunnel` | SSH mode: a WebSocket bridge + an `http` proxy with `customDomains` |
-| `internal/cli` | `up PORT --ssh [--target HOST]`, `dial HOST PORT`, `ssh-config [NAME]` |
+| `internal/cli` | `up PORT --ssh [--target HOST]`, `dial HOST PORT`, `ssh-config [--name NAME]` |
 | `internal/broker` | `NewProxy` allows `http`+custom domain under `*.ssh.`; `/authz` gains a bearer mode; the `[ssh]` section |
 | `cmd/broker` | none — the config file already reaches the broker |
 
@@ -248,7 +248,6 @@ the tunnel; the cluster never touches the shell. It is deferred.
 
 ## Left to the builder
 
-- The `dial` mode's mapping of `%h`/`%p` to a tunnel, and `ssh-config` output format.
 - WebSocket library choice (reuse the module graph where possible).
 - Bridge protocol details, keepalives, and graceful shutdown.
 - The exact `--ssh` flag shape and whether `--ssh` and a plain port can coexist in one invocation.
