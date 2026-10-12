@@ -42,16 +42,20 @@ func NewHandler(cfg Config, d Deps) http.Handler {
 	})
 	mux.Handle("/authz", Authz{Users: d.Users, Machines: d.Machines, Shares: d.Shares, SitesDomain: cfg.SitesDomain, Log: d.Log, Metrics: m})
 	mux.HandleFunc("GET /api/me", s.me)
-	mux.HandleFunc("POST /api/machines", s.machinesCreate)
-	mux.HandleFunc("GET /api/machines", s.machinesList)
-	mux.HandleFunc("DELETE /api/machines/{handle}", s.machinesDelete)
-	mux.HandleFunc("PUT /api/machines/{handle}", s.machinesDisable)
+	if cfg.MachinesEnabled {
+		mux.HandleFunc("POST /api/machines", s.machinesCreate)
+		mux.HandleFunc("GET /api/machines", s.machinesList)
+		mux.HandleFunc("DELETE /api/machines/{handle}", s.machinesDelete)
+		mux.HandleFunc("PUT /api/machines/{handle}", s.machinesDisable)
+	}
 	mux.HandleFunc("GET /api/shares", s.sharesGet)
 	mux.HandleFunc("PUT /api/shares", s.sharesPut)
 	mux.HandleFunc("DELETE /api/shares", s.sharesDelete)
 	mux.HandleFunc("GET /.well-known/tunnels.json", s.wellKnown)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
-	mux.Handle("GET /metrics", m.Handler())
+	if cfg.MetricsEnabled {
+		mux.Handle("GET /metrics", m.Handler())
+	}
 	return m.Middleware(mux)
 }
 
