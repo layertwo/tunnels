@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -35,8 +36,12 @@ const defaultConfigPath = "/etc/tunnels/broker.toml"
 // reads and parses it. Only the default path may be absent; an explicit path must exist, and any
 // read or parse error is fatal. Errors name the path, never a value.
 func readConfig() (*broker.FileConfig, error) {
-	path := flag.String("config", os.Getenv("BROKER_CONFIG"), "broker configuration file, else $BROKER_CONFIG, else "+defaultConfigPath)
-	flag.Parse()
+	flags := flag.NewFlagSet("broker", flag.ContinueOnError)
+	flags.SetOutput(io.Discard) // the error is logged as JSON by the caller, not printed as usage
+	path := flags.String("config", os.Getenv("BROKER_CONFIG"), "broker configuration file, else $BROKER_CONFIG, else "+defaultConfigPath)
+	if err := flags.Parse(os.Args[1:]); err != nil {
+		return nil, err
+	}
 	explicit := *path != ""
 	if !explicit {
 		*path = defaultConfigPath
