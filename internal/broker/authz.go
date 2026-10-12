@@ -73,7 +73,7 @@ func (a Authz) observe(phase string, start time.Time) {
 type outcome struct {
 	allow  bool
 	reason string // the class of the decision: owner, shared, host, identity, cross_owner, unknown_owner, disabled, not_owner, token, verify, store
-	status int    // the refusal status: 401 for a bad token, 503 for a dependency; zero means 403
+	status int    // the refusal status: 401 for a bad token; zero means 403 (the 503 comes from err)
 	label  string
 	sub    string
 	user   string // the visitor's username, for the allow answer
@@ -204,12 +204,11 @@ func (a Authz) decideSSH(r *http.Request, label string) outcome {
 	defer cancel()
 	// A broker built without a token verifier (a bare Deps) must answer 503, not panic.
 	if a.Verifier == nil {
-		o.reason, o.err, o.status = "verify", errors.New("authz: no token verifier"), http.StatusServiceUnavailable
+		o.reason, o.err = "verify", errors.New("authz: no token verifier")
 		return o
 	}
 	sub, err := a.Verifier.VerifyAccessToken(ctx, token)
 	if err != nil {
-		o.status = http.StatusServiceUnavailable
 		if errors.Is(err, idp.ErrInvalidToken) {
 			o.status, o.reason = http.StatusUnauthorized, "token"
 		} else {
@@ -225,7 +224,7 @@ func (a Authz) decideSSH(r *http.Request, label string) outcome {
 	case errors.Is(err, store.ErrNotFound):
 		o.reason = "unknown_owner"
 	case err != nil:
-		o.reason, o.err, o.status = "store", err, http.StatusServiceUnavailable
+		o.reason, o.err = "store", err
 	case owner.Disabled:
 		o.reason = "disabled"
 	case owner.Sub != sub:

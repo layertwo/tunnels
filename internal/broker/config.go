@@ -69,6 +69,10 @@ func badDashboardURL(raw string) bool {
 	return raw != "" && (err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery)
 }
 
+// sectionOn reports whether a feature section leaves its feature on: an absent key means on, and only
+// an explicit `enabled = false` turns it off.
+func sectionOn(enabled *bool) bool { return enabled == nil || *enabled }
+
 // pick returns the environment value when it is set, else the file's value when the key is present (a
 // nil pointer is an absent key), else the built-in default. The environment always wins, so a
 // container or a per-environment deploy can override a file setting.
@@ -170,11 +174,11 @@ func LoadConfig(getenv func(string) string, file *FileConfig) (Config, error) {
 			bad("POCKET_ID_URL", "is set but the config file has no [machines] section; add one or unset POCKET_ID_URL")
 		}
 	default:
-		c.MachinesEnabled = machines.Enabled == nil || *machines.Enabled
+		c.MachinesEnabled = sectionOn(machines.Enabled)
 	}
 	// With no file at all, metrics keep today's behaviour: always mounted. A file turns the feature on
 	// only with a [metrics] section that is not enabled = false.
-	c.MetricsEnabled = file == nil || (file.Metrics != nil && (file.Metrics.Enabled == nil || *file.Metrics.Enabled))
+	c.MetricsEnabled = file == nil || (file.Metrics != nil && sectionOn(file.Metrics.Enabled))
 
 	// The SSH feature follows the same switch as machines. With no file it is on exactly when
 	// SSH_DOMAIN is set, the behaviour before the file existed; with a file it is on exactly when the
@@ -190,7 +194,7 @@ func LoadConfig(getenv func(string) string, file *FileConfig) (Config, error) {
 			bad("SSH_DOMAIN", "is set but the config file has no [ssh] section; add one or unset SSH_DOMAIN")
 		}
 	default:
-		sshOn = ssh.Enabled == nil || *ssh.Enabled
+		sshOn = sectionOn(ssh.Enabled)
 	}
 	if sshOn {
 		c.SSHDomain = host("SSH_DOMAIN", required("SSH_DOMAIN", pick(getenv, "SSH_DOMAIN", ssh.Domain, "")))
