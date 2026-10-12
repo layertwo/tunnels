@@ -48,7 +48,7 @@ const usage = `Usage:
   tunnel up PORT [--name NAME]                    publish http://127.0.0.1:PORT until you stop it
   tunnel up PORT --ssh [--target HOST] [--name NAME]  publish an ssh service on HOST at PORT
   tunnel ssh-config [--name NAME]                 print an ssh_config block for an ssh tunnel
-  tunnel dial HOST PORT                           pipe ssh through a published tunnel (an ssh ProxyCommand)
+  tunnel dial NAME                               pipe ssh through a published tunnel (an ssh ProxyCommand)
   tunnel share [--group] [--for DURATION] LABEL GRANTEE  let someone else reach a site (group shares need the gate to forward groups)
   tunnel unshare [--group] LABEL GRANTEE  stop sharing a site
   tunnel list                                     show what you share
@@ -63,7 +63,7 @@ const usageUp = "Usage: tunnel up PORT [--ssh] [--target HOST] [--name NAME]"
 
 const usageMachine = "Usage: tunnel machine create NAME | list | remove NAME"
 
-const usageDial = "Usage: tunnel dial HOST PORT"
+const usageDial = "Usage: tunnel dial NAME"
 
 const usageSSHConfig = "Usage: tunnel ssh-config [--name NAME]"
 
@@ -364,7 +364,7 @@ func refreshFailed(env Env, err error) {
 	fmt.Fprintf(env.Stderr, "could not refresh your session (%s); run: tunnel login\n", strings.TrimSuffix(err.Error(), "; run: tunnel login"))
 }
 
-// dial pipes this process's stdin and stdout to the published ssh tunnel at HOST, so ssh's
+// dial pipes this process's stdin and stdout to the published ssh tunnel NAME names, so ssh's
 // ProxyCommand sees a raw stream. ssh runs it once per connection, so it is short-lived.
 func dial(ctx context.Context, env Env, args []string) int {
 	fs := pflag.NewFlagSet("dial", pflag.ContinueOnError)
@@ -376,14 +376,10 @@ func dial(ctx context.Context, env Env, args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return bad("%v", err)
 	}
-	if fs.NArg() != 2 {
-		return bad("give the ssh host and port")
+	if fs.NArg() != 1 {
+		return bad("give the ssh name")
 	}
-	// PORT is what ssh passed (%p); the data route is ordinary https, so it is checked and then unused.
-	if port, err := strconv.Atoi(fs.Arg(1)); err != nil || port < 1 || port > 65535 {
-		return bad("%q is not a port: use 1 to 65535", fs.Arg(1))
-	}
-	host := fs.Arg(0)
+	name := fs.Arg(0)
 
 	s, err := store(env)
 	if err != nil {
@@ -419,11 +415,9 @@ func dial(ctx context.Context, env Env, args []string) int {
 		}
 		return oidcFor(b, env.HTTP), nil
 	}
-	// ssh passes %h from ~/.ssh/config, so a mistyped or tampered HostName would otherwise send
-	// the access token to a third party. A login stores the service's ssh domain; a login made
-	// before that field existed has none, so fall back to the live bootstrap, which like the check
-	// talks only to tok.Server. A host outside the domain, or one carrying a port, is refused here
-	// before TLS.
+	// A login stores the service's ssh domain; a login made before that field existed has none, so
+	// fall back to the live bootstrap, which like the check talks only to tok.Server. The domain is
+	// the endpoint's host, so a dial can never be sent elsewhere.
 	domain := tok.SSHDomain
 	if domain == "" {
 		b, err := discover(ctx)
@@ -436,8 +430,9 @@ func dial(ctx context.Context, env Env, args []string) int {
 			return 1
 		}
 	}
-	if _, ok := names.SSHLabel(host, domain); !ok {
-		return bad("%q is not an ssh host of this service", host)
+	endpoint, err := sshEndpoint(name, domain)
+	if err != nil {
+		return bad("%v", err)
 	}
 	caFile, err := tunnel.WriteCABundle(s.Dir)
 	if err != nil {
@@ -452,11 +447,23 @@ func dial(ctx context.Context, env Env, args []string) int {
 	d := &websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
 		TLSClientConfig: &tls.Config{
-			ServerName: host, NextProtos: []string{"http/1.1"}, RootCAs: pool,
+			ServerName: domain, NextProtos: []string{"http/1.1"}, RootCAs: pool,
 		},
 	}
-	// ssh's %p is the target's port, not the data route's: the tunnel is reached on 443 through Traefik.
-	return dialStream(ctx, env, d, "wss://"+host+":443/", s, resolve, tok)
+	// The tunnel is reached on 443 through Traefik, whatever port ssh asked for.
+	return dialStream(ctx, env, d, endpoint, s, resolve, tok)
+}
+
+// sshEndpoint is the data route of the tunnel an ssh name asks for. The name before the first dot
+// names the tunnel; the alias domain after it is the user's own convention, which the service never
+// learns, so only the label is checked. A name that is not a label the broker would authorize is
+// refused here, before the token is sent.
+func sshEndpoint(name, sshDomain string) (string, error) {
+	label, _, _ := strings.Cut(name, ".")
+	if _, _, ok := names.ParseLabel(label); !ok {
+		return "", fmt.Errorf("%q is not an ssh name of this service: the tunnel is the part before the first dot", name)
+	}
+	return "wss://" + sshDomain + ":443/" + label + "/", nil
 }
 
 // oidcSource resolves the identity provider a token refresh needs. dial's discovers the service

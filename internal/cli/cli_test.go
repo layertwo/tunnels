@@ -1029,7 +1029,7 @@ func TestCommandsWithoutAConfigDir(t *testing.T) {
 		{"login", []string{"login"}, 1, "no place for the login"},
 		{"up", []string{"up", "3000"}, 1, "no place for the login"},
 		{"ssh-config", []string{"ssh-config"}, 1, "no place for the login"},
-		{"dial", []string{"dial", "host", "22"}, 1, "no place for the login"},
+		{"dial", []string{"dial", "alice-box1"}, 1, "no place for the login"},
 		{"share", []string{"share", "alice", "bob"}, 1, "no place for the login"},
 		{"unshare", []string{"unshare", "alice", "bob"}, 1, "no place for the login"},
 		{"list", []string{"list"}, 1, "no place for the login"},
@@ -1741,23 +1741,50 @@ func TestDialStreamRefreshFails(t *testing.T) {
 	}
 }
 
+// The name ssh was asked for names the tunnel. The tunnel is the name before the first dot, because
+// the alias domain after it is the user's own convention: the service never learns it. The label
+// travels in the path, which the broker authorizes and frps routes on.
+func TestSSHEndpoint(t *testing.T) {
+	const domain = "ssh.tunnels.test"
+	tests := []struct {
+		name     string
+		endpoint string
+		ok       bool
+	}{
+		{"alice-box1.layertwo.lan", "wss://ssh.tunnels.test:443/alice-box1/", true},
+		{"alice-box1", "wss://ssh.tunnels.test:443/alice-box1/", true},
+		{"alice.layertwo.lan", "wss://ssh.tunnels.test:443/alice/", true},
+		{"Alice-Box1.layertwo.lan", "", false}, // paths, and frp locations, are case-sensitive
+		{"alice_box1.layertwo.lan", "", false},
+		{"x.layertwo.lan", "", false},
+		{".layertwo.lan", "", false},
+		{"", "", false},
+	}
+	for _, tt := range tests {
+		endpoint, err := sshEndpoint(tt.name, domain)
+		if endpoint != tt.endpoint || (err == nil) != tt.ok {
+			t.Errorf("sshEndpoint(%q) = %q, %v; want %q, ok=%v", tt.name, endpoint, err, tt.endpoint, tt.ok)
+		}
+	}
+}
+
 func TestDialArgumentErrors(t *testing.T) {
 	for _, args := range [][]string{
 		{"dial"},
-		{"dial", "host"},
-		{"dial", "host", "22", "extra"},
-		{"dial", "host", "abc"},
-		{"dial", "host", "0"},
-		{"dial", "host", "65536"},
-		{"dial", "--bogus", "host", "22"},
+		{"dial", "one", "two"},
+		{"dial", "--bogus", "alice-box1"},
+		{"dial", "alice_box1"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			w := newWorld(t)
+			// The name is checked after the store load, which needs the domain the endpoint is built
+			// from; that is the order the host check had.
+			w.sshDomain = "ssh.tunnels.test"
 			w.loggedIn()
 			if c := w.main(args...); c != 2 {
 				t.Errorf("exit %d, want 2", c)
 			}
-			if !strings.Contains(w.err.String(), "tunnel dial HOST PORT") {
+			if !strings.Contains(w.err.String(), "tunnel dial NAME") {
 				t.Errorf("no usage line on stderr:\n%s", w.err)
 			}
 		})
@@ -1766,15 +1793,15 @@ func TestDialArgumentErrors(t *testing.T) {
 
 func TestDialNotLoggedIn(t *testing.T) {
 	w := newWorld(t)
-	if c := w.main("dial", "host", "22"); c != 1 || !strings.Contains(w.err.String(), "run: tunnel login") {
+	if c := w.main("dial", "alice-box1"); c != 1 || !strings.Contains(w.err.String(), "run: tunnel login") {
 		t.Errorf("exit %d, stderr:\n%s", c, w.err)
 	}
 }
 
 // dial discovers the server only when it must refresh: a fresh token dials with no .well-known
 // request, so a broken one cannot fail a dial that does not refresh; a stale token still surfaces
-// the discovery failure. The ssh host is checked against the domain stored at login, so a valid
-// dial never needs the bootstrap.
+// the discovery failure. The name needs no bootstrap either: the label rules are local, and the
+// domain comes from the login.
 func TestDialDiscoveryFails(t *testing.T) {
 	w := newWorld(t)
 	w.sshDomain = "ssh.tunnels.test"
@@ -1784,7 +1811,7 @@ func TestDialDiscoveryFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Fresh: TLS to the (unresolvable) host is as far as it gets; no discovery is tried.
-	if c := w.main("dial", "alice.ssh.tunnels.test", "22"); c != 1 || strings.Contains(w.err.String(), "cannot reach") {
+	if c := w.main("dial", "alice"); c != 1 || strings.Contains(w.err.String(), "cannot reach") {
 		t.Errorf("fresh token: exit %d, stderr:\n%s", c, w.err)
 	}
 
@@ -1794,7 +1821,7 @@ func TestDialDiscoveryFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	w.err = &syncBuffer{}
-	if c := w.main("dial", "alice.ssh.tunnels.test", "22"); c != 1 || !strings.Contains(w.err.String(), "cannot reach http://127.0.0.1:1") {
+	if c := w.main("dial", "alice"); c != 1 || !strings.Contains(w.err.String(), "cannot reach http://127.0.0.1:1") {
 		t.Errorf("stale token: exit %d, stderr:\n%s", c, w.err)
 	}
 }
@@ -1808,7 +1835,7 @@ func TestDialRefreshesWhenStale(t *testing.T) {
 	if err := (auth.Store{Dir: w.dir}).Save(before); err != nil {
 		t.Fatal(err)
 	}
-	if c := w.main("dial", "alice.ssh.tunnels.test", "22"); c != 1 {
+	if c := w.main("dial", "alice"); c != 1 {
 		t.Errorf("exit %d, want 1", c)
 	}
 	after, err := (auth.Store{Dir: w.dir}).Load()
@@ -1817,19 +1844,23 @@ func TestDialRefreshesWhenStale(t *testing.T) {
 	}
 }
 
-// dial refuses to send the access token to a host that is not one of this service's ssh hosts; a
-// host carrying a port is refused the same way rather than reaching the URL parser.
-func TestDialRefusesForeignHost(t *testing.T) {
-	for _, host := range []string{"evil.example", "alice.other.test", "alice.ssh.tunnels.test:22", "ssh.tunnels.test"} {
-		t.Run(host, func(t *testing.T) {
+// dial sends the access token only to this service's own ssh host: the name picks the tunnel, never
+// the host. A name whose part before the first dot is not a label the broker would accept is refused
+// here, and the error says which part of the name is the tunnel.
+func TestDialRefusesABadName(t *testing.T) {
+	for _, name := range []string{"Alice", "a", "alice:22", ".layertwo.lan"} {
+		t.Run(name, func(t *testing.T) {
 			w := newWorld(t)
 			w.sshDomain = "ssh.tunnels.test"
 			w.loggedIn()
-			if c := w.main("dial", host, "22"); c != 2 {
+			if c := w.main("dial", name); c != 2 {
 				t.Errorf("exit %d, want 2", c)
 			}
-			if !strings.Contains(w.err.String(), host) {
-				t.Errorf("stderr does not name the host:\n%s", w.err)
+			if !strings.Contains(w.err.String(), name) {
+				t.Errorf("stderr does not name the name:\n%s", w.err)
+			}
+			if !strings.Contains(w.err.String(), "the tunnel is the part before the first dot") {
+				t.Errorf("stderr does not say which part of the name is the tunnel:\n%s", w.err)
 			}
 			if !strings.Contains(w.err.String(), "Usage: tunnel dial") {
 				t.Errorf("stderr has no dial usage line:\n%s", w.err)
@@ -1839,25 +1870,24 @@ func TestDialRefusesForeignHost(t *testing.T) {
 }
 
 // A login made before the ssh domain was stored has no stored domain: dial falls back to the live
-// bootstrap rather than rejecting every host. A bootstrap that names none, or that cannot be
-// reached, says what to do.
+// bootstrap for it. A bootstrap that names none, or that cannot be reached, says what to do.
 func TestDialWithoutAStoredSSHDomain(t *testing.T) {
 	t.Run("bootstrap advertises it", func(t *testing.T) {
 		w := newWorld(t)
 		w.loggedIn()                     // the stored login has no ssh domain
 		w.sshDomain = "ssh.tunnels.test" // but the live service now advertises one
-		if c := w.main("dial", "alice.ssh.tunnels.test", "22"); c != 1 {
+		if c := w.main("dial", "alice"); c != 1 {
 			t.Errorf("exit %d, want 1 (the connection, not the argument)", c)
 		}
-		if strings.Contains(w.err.String(), "is not an ssh host") || strings.Contains(w.err.String(), "Usage: tunnel dial") {
-			t.Errorf("dial rejected a host although the bootstrap named the domain:\n%s", w.err)
+		if strings.Contains(w.err.String(), "is not an ssh name") || strings.Contains(w.err.String(), "Usage: tunnel dial") {
+			t.Errorf("dial rejected a name although the bootstrap named the domain:\n%s", w.err)
 		}
 	})
 
 	t.Run("bootstrap has none", func(t *testing.T) {
 		w := newWorld(t)
 		w.loggedIn()
-		if c := w.main("dial", "alice.ssh.tunnels.test", "22"); c != 1 {
+		if c := w.main("dial", "alice"); c != 1 {
 			t.Errorf("exit %d, want 1", c)
 		}
 		if !strings.Contains(w.err.String(), "tunnel login") {
@@ -1872,7 +1902,7 @@ func TestDialWithoutAStoredSSHDomain(t *testing.T) {
 		if err := (auth.Store{Dir: w.dir}).Save(tok); err != nil {
 			t.Fatal(err)
 		}
-		if c := w.main("dial", "alice.ssh.tunnels.test", "22"); c != 1 || !strings.Contains(w.err.String(), "cannot reach http://127.0.0.1:1") {
+		if c := w.main("dial", "alice"); c != 1 || !strings.Contains(w.err.String(), "cannot reach http://127.0.0.1:1") {
 			t.Errorf("exit %d, stderr:\n%s", c, w.err)
 		}
 	})
@@ -1886,18 +1916,18 @@ func TestDialCannotWriteTheCABundle(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(w.dir, "cacert.pem"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if c := w.main("dial", "alice.ssh.tunnels.test", "22"); c != 1 || !strings.Contains(w.err.String(), "CA bundle") {
+	if c := w.main("dial", "alice"); c != 1 || !strings.Contains(w.err.String(), "CA bundle") {
 		t.Errorf("exit %d, stderr:\n%s", c, w.err)
 	}
 }
 
-// The command dials the data route on 443, whatever PORT ssh passed; a host that answers nothing is
-// a connection error, not a crash. The ssh domain is matched case-insensitively, as the broker does.
+// The command dials the data route on 443, whatever ssh asked for; a service that answers nothing is
+// a connection error, not a crash. Names are case-sensitive now, like the paths the broker routes.
 func TestDialUnreachableHost(t *testing.T) {
 	w := newWorld(t)
 	w.sshDomain = "ssh.tunnels.test"
 	w.loggedIn()
-	if c := w.main("dial", "Alice.SSH.Tunnels.Test", "22"); c != 1 {
+	if c := w.main("dial", "alice-box1"); c != 1 {
 		t.Errorf("exit %d, want 1", c)
 	}
 	if w.err.String() == "" {
