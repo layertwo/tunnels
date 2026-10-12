@@ -10,11 +10,22 @@
 
 **Spec:** `docs/plans/2026-10-10-tunnels-ssh-design.md`.
 
+> **Amended 2026-10-12.** The broker's settings now come from a TOML config file (v0.4.0), so SSH is
+> that file's `[ssh]` section rather than a required `SSH_DOMAIN`. Task 2 was rewritten and the Global
+> Constraints updated; see the [broker config design](2026-10-12-tunnels-broker-config-design.md).
+
 ## Global Constraints
 
 - Module `github.com/layertwo/tunnels`, `go 1.26.0`, default branch `mainline`, commits `feat(scope): ...`, one pull request per task.
 - `github.com/fatedier/frp v0.71.0` always equals the frps image `ghcr.io/fatedier/frps:v0.71.0@sha256:cd8b947ba61678b200baa4f71ccc33f3c52e4e2cc0059700ba3b8354e36af7c3`; bump together.
-- New broker env: `SSH_DOMAIN` (required), a DNS name without scheme, port or trailing dot; production value `ssh.tunnels.layertwo.dev`.
+- SSH is configured by the broker config file's **`[ssh]` section** (`enabled`, `domain`), a
+  switchable feature like `[machines]`; the env `SSH_DOMAIN` overrides `domain`, and with **no file at
+  all** `SSH_DOMAIN` alone turns SSH on, exactly as `POCKET_ID_URL` does for machines. `domain` is a
+  DNS name without scheme, port or trailing dot; production value `ssh.tunnels.layertwo.dev`.
+  **No `[ssh]` section means SSH is off** — an SSH custom domain is refused, an SSH host is denied on
+  `/authz`, and `ssh_domain` is omitted from the bootstrap. A release must start without it. Mirror the
+  `[machines]` rule in `internal/broker/config.go` exactly, in all three arms (no file / no section /
+  section).
 - The SSH host is `<label>.<SSH_DOMAIN>` where `<label> = names.Label(handle, tunnel)`; the frp proxy name is `<handle>.<name>` (shared namespace with HTTP tunnels).
 - Client config for the SSH proxy: `type = "http"`, `customDomains = ["<label>.<SSH_DOMAIN>"]`, `subDomain = ""`, `localIP = "127.0.0.1"`, `localPort = <bridge port>`, `requestHeaders.set.x-forwarded-proto = "https"`; the rest of the client config is unchanged from a site (`wss` to `tunnels.layertwo.dev:443`, `auth.method = oidc`, file token source, `transport.heartbeatInterval = 30`, `transport.tls.trustedCaFile`).
 - The SSH data route runs Traefik `forwardAuth` **only**; the OIDC plugin is never in that chain. Site routes keep the cookie/header path.
@@ -88,24 +99,24 @@ func SSHLabel(host, sshDomain string) (label string, ok bool) { return SiteLabel
 
 ---
 
-### Task 2: SSH domain plumbing
+### Task 2: The `[ssh]` section and the bootstrap domain
 
 **Files:**
+- Modify: `internal/broker/config_file.go`, `internal/broker/config_file_test.go`
 - Modify: `internal/broker/config.go`, `internal/broker/config_test.go`
 - Modify: `internal/auth/auth.go` (the `Bootstrap` struct)
 - Modify: `internal/broker/server.go`, `internal/broker/server_test.go`
-- Modify: `cmd/broker/main.go` only if it enumerates config fields
 
 **Interfaces:**
-- Produces: `broker.Config.SSHDomain string` (env `SSH_DOMAIN`, required, DNS-name validated); `auth.Bootstrap.SSHDomain string` (json `ssh_domain`); the `/.well-known/tunnels.json` body gains `ssh_domain`.
+- Produces: `sshFile` (`Enabled *bool` `toml:"enabled"`, `Domain *string` `toml:"domain"`) and `FileConfig.SSH *sshFile`; `broker.Config.SSHDomain string`; `auth.Bootstrap.SSHDomain string` (json `ssh_domain`, omitted when empty).
 
-- [ ] **Step 1: Write the failing tests.** In `config_test.go`, add to the existing table-driven `TestLoadConfig`: a case where every required variable including `SSH_DOMAIN` is set → `Config.SSHDomain` equals it; a case with `SSH_DOMAIN` unset → error naming `SSH_DOMAIN`; a case `SSH_DOMAIN="ssh.tunnels.test:443"` → error. In `server_test.go`, extend `TestWellKnown` so the decoded JSON has `"ssh_domain"` equal to the configured value.
+- [ ] **Step 1: Write the failing tests.** In `config_file_test.go`, extend the section table: `[ssh] domain = "ssh.tunnels.test"` decodes to a non-nil `SSH` with a `Domain`; `[ssh]` alone leaves `Domain` nil; a key `ssh_domain` under `[ssh]` is an unknown key (the file's key is `domain`). In `config_test.go`, mirror the existing `[machines]` cases: a file with `[ssh] domain = "ssh.tunnels.test"` → `Config.SSHDomain` equals it; the env `SSH_DOMAIN = "ssh.env.test"` alongside that file → the env wins; **no `[ssh]` section and no env → `SSHDomain == ""`**; `[ssh] enabled = false` with a domain → off, no error, and the domain is not validated (`[ssh] domain = "has:port"` with `enabled = false` loads); an **enabling `SSH_DOMAIN` with no `[ssh]` section is an error naming both**; with **no file**, `SSH_DOMAIN` set → on, unset → off; `SSH_DOMAIN="ssh.tunnels.test:443"` → error naming `SSH_DOMAIN`; `[ssh] domain` with a port, a trailing dot or uppercase → error (uppercase normalises to lower). In `server_test.go`, extend `TestWellKnown` so the JSON body carries `"ssh_domain"` when on and omits the key when off.
 
-- [ ] **Step 2: Run them to verify they fail.** `go test ./internal/broker/ -run 'LoadConfig|WellKnown' -v`. Expected: FAIL (missing field / key).
+- [ ] **Step 2: Run them to verify they fail.** `go test ./internal/broker/ -run 'ParseFile|LoadConfig|WellKnown' -v`. Expected: FAIL.
 
-- [ ] **Step 3: Implement.** Add `SSHDomain string` to `broker.Config`; set it in `LoadConfig` with `host("SSH_DOMAIN", required("SSH_DOMAIN"))`. Add `SSHDomain string \`json:"ssh_domain"\`` to `auth.Bootstrap` and set it in `server.wellKnown`. Wire `cfg.SSHDomain` into `Authz` and `Hooks` where Tasks 4 and 3 build them (a later task will need the fields; add the struct fields here and pass the config values so `NewHandler` compiles).
+- [ ] **Step 3: Implement.** Add the section type and its `FileConfig` field. In `LoadConfig`, add an SSH arm that **mirrors the `[machines]` switch exactly** — no file / no section (an enabling `SSH_DOMAIN` is then an error naming both) / section — and resolve `c.SSHDomain = host("SSH_DOMAIN", required("SSH_DOMAIN", pick(getenv, "SSH_DOMAIN", ssh.Domain, "")))` **only when SSH is on**, so a disabled section's keys are ignored. Add `SSHDomain string \`json:"ssh_domain,omitempty"\`` to `auth.Bootstrap` and set it in `server.wellKnown`. Pass `cfg.SSHDomain` to `Authz` and `Hooks` where Tasks 4 and 3 need it (add the struct fields here so `NewHandler` compiles).
 
-- [ ] **Step 4: Run them to verify they pass.** `go test -race ./internal/broker/ ./internal/auth/ -v`. Expected: PASS.
+- [ ] **Step 4: Run them to verify they pass.** `go test -race ./internal/broker/ ./internal/auth/ -v`. Expected: PASS, `internal/broker` at 100%.
 
 - [ ] **Step 5: Commit.** `git add -A && git commit -m "feat(broker): configure and advertise the ssh domain"`.
 
@@ -395,9 +406,9 @@ Host <label>
 - Modify: `e2e/e2e_test.go`
 
 **Interfaces:**
-- Consumes: `tunnel.Run` (Task 7), `tunnel.Options` SSH fields (Task 6), broker `SSH_DOMAIN` (Task 2).
+- Consumes: `tunnel.Run` (Task 7), `tunnel.Options` SSH fields (Task 6), broker `Config.SSHDomain` (Task 2).
 
-- [ ] **Step 1: Write the failing test.** Add `TestSSHEndToEnd`: start an echo TCP listener; run the agent with `SSH=true`, `SSHTarget="127.0.0.1"`, `SSHPort=echoPort`, `SSHDomain=sshDomain` against the real frps; then dial frps's `vhostHTTPPort` directly with `Host: <label>.<sshDomain>` (no Traefik in the harness), `ws.Pipe` to a buffer, write and read a line. Set `SSH_DOMAIN` in the broker config the harness builds. Expected before the change: the tunnel is refused by `NewProxy`.
+- [ ] **Step 1: Write the failing test.** Add `TestSSHEndToEnd`: start an echo TCP listener; run the agent with `SSH=true`, `SSHTarget="127.0.0.1"`, `SSHPort=echoPort`, `SSHDomain=sshDomain` against the real frps; then dial frps's `vhostHTTPPort` directly with `Host: <label>.<sshDomain>` (no Traefik in the harness), `ws.Pipe` to a buffer, write and read a line. Set `SSHDomain` on the broker `Config` the harness builds (the e2e constructs the struct, not a file). Expected before the change: the tunnel is refused by `NewProxy`.
 
 - [ ] **Step 2: Run it to verify it fails.** `TEST_DATABASE_URL=... go test -tags e2e ./e2e/ -run SSH -v`. Expected: FAIL.
 
@@ -417,7 +428,7 @@ Host <label>
 
 **Interfaces:** none.
 
-- [ ] **Step 1: Update `README.md`**: add `SSH_DOMAIN` to the broker env table, and a `tunnel up PORT --ssh`, `tunnel ssh-config`, `tunnel dial` line each to the Use section.
+- [ ] **Step 1: Update `README.md`**: document the `[ssh]` section (`domain`, `enabled`) and its `SSH_DOMAIN` override beside the other sections, and add a `tunnel up PORT --ssh`, `tunnel ssh-config`, `tunnel dial` line each to the Use section.
 - [ ] **Step 2: Update `docs/design.md`**: note SSH is implemented, and list the homelab work this repo cannot do — DNS `*.ssh.<...>` DNS-only, a wildcard certificate, a Traefik `Host(*.ssh.…)` route with `forwardAuth` only (no OIDC plugin) and `authRequestHeaders` including `Authorization`, and that frps and the NetworkPolicy are unchanged.
 - [ ] **Step 3: Commit.** `git add README.md docs && git commit -m "docs: record the ssh domain and deployment"`.
 
