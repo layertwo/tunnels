@@ -1494,10 +1494,12 @@ func wsServer(t *testing.T, mayUpgrade func(*http.Request) bool) *httptest.Serve
 // wsURL is srv's address as the dialer's ws:// URL.
 func wsURL(srv *httptest.Server) string { return "ws" + strings.TrimPrefix(srv.URL, "http") }
 
-// The token travels only in the Authorization header, and the handshake names the CLI.
+// The token travels only in the Authorization header, the handshake names the CLI, and the Host
+// carries no port — the broker compares that value exactly.
 func TestDialHeader(t *testing.T) {
-	h := dialHeader("tok", "1.2.3")
-	if h.Get("Authorization") != "Bearer tok" || h.Get("User-Agent") != "tunnels/1.2.3" {
+	h := dialHeader("alice-box1.ssh.tunnels.test", "tok", "1.2.3")
+	if h.Get("Authorization") != "Bearer tok" || h.Get("User-Agent") != "tunnels/1.2.3" ||
+		h.Get("Host") != "alice-box1.ssh.tunnels.test" {
 		t.Errorf("header = %v", h)
 	}
 }
@@ -1635,6 +1637,38 @@ func TestDialStreamPipes(t *testing.T) {
 	if got := w.out.String(); got != "hello\n" {
 		t.Errorf("stdout = %q, want %q", got, "hello\n")
 	}
+	_ = pw.Close()
+	if c := exitOf(t, code); c != 0 {
+		t.Errorf("exit %d; stderr:\n%s", c, w.err)
+	}
+}
+
+// The dial presents the tunnel's host without the port the data route is reached on: the broker
+// matches <label>.<ssh domain> exactly, and Traefik forwards this header as X-Forwarded-Host. A port
+// there is refused as an unknown host, which the client sees only as "bad handshake".
+func TestDialStreamSendsTheBareHost(t *testing.T) {
+	w := newWorld(t)
+	tok := w.loggedIn()
+	seen := make(chan string, 1)
+	srv := wsServer(t, func(r *http.Request) bool {
+		seen <- r.Host
+		return strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") == tok.AccessToken
+	})
+	pr, pw := io.Pipe()
+	env := w.env()
+	env.Stdin = pr
+	code := make(chan int, 1)
+	go func() {
+		code <- dialStream(context.Background(), env, websocket.DefaultDialer, wsURL(srv), auth.Store{Dir: w.dir}, oidcSourceOf(oidcFor(auth.Bootstrap{}, env.HTTP)), tok)
+	}()
+
+	if got := <-seen; got == "" || strings.Contains(got, ":") {
+		t.Errorf("Host = %q; the port makes the broker refuse the host as unknown", got)
+	}
+	if _, err := pw.Write([]byte("hi\n")); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, w.out, regexp.MustCompile("hi"))
 	_ = pw.Close()
 	if c := exitOf(t, code); c != 0 {
 		t.Errorf("exit %d; stderr:\n%s", c, w.err)

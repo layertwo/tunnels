@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -462,15 +463,21 @@ func dial(ctx context.Context, env Env, args []string) int {
 // on first use, so a dial that does not refresh makes no discovery request.
 type oidcSource func(context.Context) (auth.OIDC, error)
 
-// dialStream opens the WebSocket to url presenting the login, then pumps it to this process's stdin
-// and stdout. On a 401 handshake it refreshes the login once and retries.
-func dialStream(ctx context.Context, env Env, d *websocket.Dialer, url string, s auth.Store, src oidcSource, tok auth.Tokens) int {
+// dialStream opens the WebSocket to the tunnel's data route presenting the login, then pumps it to
+// this process's stdin and stdout. On a 401 handshake it refreshes the login once and retries.
+func dialStream(ctx context.Context, env Env, d *websocket.Dialer, endpoint string, s auth.Store, src oidcSource, tok auth.Tokens) int {
+	// The broker matches the host name exactly, and Traefik forwards this request's Host as
+	// X-Forwarded-Host, so the Host header must carry no port — while the endpoint does (443).
+	bare := endpoint
+	if u, err := url.Parse(endpoint); err == nil {
+		bare = u.Hostname()
+	}
 	token, err := dialToken(ctx, s, src, tok)
 	if err != nil {
 		refreshFailed(env, err)
 		return 1
 	}
-	conn, resp, err := d.DialContext(ctx, url, dialHeader(token, env.Version))
+	conn, resp, err := d.DialContext(ctx, endpoint, dialHeader(bare, token, env.Version))
 	if refused(err, resp) {
 		// The token aged between the check and the dial: refresh once and try again.
 		token, err = refreshLogin(ctx, s, src)
@@ -478,7 +485,7 @@ func dialStream(ctx context.Context, env Env, d *websocket.Dialer, url string, s
 			refreshFailed(env, err)
 			return 1
 		}
-		conn, resp, err = d.DialContext(ctx, url, dialHeader(token, env.Version))
+		conn, resp, err = d.DialContext(ctx, endpoint, dialHeader(bare, token, env.Version))
 		if refused(err, resp) {
 			fmt.Fprintln(env.Stderr, "your login was refused; run: tunnel login")
 			return 1
@@ -541,9 +548,14 @@ func jwtExpiry(token string) time.Time {
 }
 
 // dialHeader is the handshake's headers: the token's only place, plus the CLI's own name. The token
-// never goes in the URL.
-func dialHeader(token, version string) http.Header {
-	return http.Header{"Authorization": {"Bearer " + token}, "User-Agent": {"tunnels/" + version}}
+// never goes in the URL. The Host carries no port: the broker compares it exactly, and Traefik
+// forwards it as X-Forwarded-Host.
+func dialHeader(host, token, version string) http.Header {
+	return http.Header{
+		"Authorization": {"Bearer " + token},
+		"User-Agent":    {"tunnels/" + version},
+		"Host":          {host},
+	}
 }
 
 // refused reports whether a handshake answered 401, the sign of an aged token.
