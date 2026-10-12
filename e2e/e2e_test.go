@@ -257,14 +257,20 @@ type run struct {
 	err     error // set once stopped is closed
 }
 
-// up publishes the backend as handle's tunnel name with token in the token file.
-func (s *stack) up(t *testing.T, token, handle, name string) *run {
+// tokenFile writes token to a fresh access-token file in the test's temp dir.
+func tokenFile(t *testing.T, token string) string {
 	t.Helper()
 	file := filepath.Join(t.TempDir(), "access-token")
 	if err := os.WriteFile(file, []byte(token), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return s.upWithFile(t, file, handle, name)
+	return file
+}
+
+// up publishes the backend as handle's tunnel name with token in the token file.
+func (s *stack) up(t *testing.T, token, handle, name string) *run {
+	t.Helper()
+	return s.upWithFile(t, tokenFile(t, token), handle, name)
 }
 
 func (s *stack) upWithFile(t *testing.T, tokenFile, handle, name string) *run {
@@ -279,13 +285,9 @@ func (s *stack) upWithFile(t *testing.T, tokenFile, handle, name string) *run {
 // replaces LocalPort with the loopback bridge's port, so it is left unset.
 func (s *stack) upSSH(t *testing.T, token, handle, name string, sshPort int) *run {
 	t.Helper()
-	file := filepath.Join(t.TempDir(), "access-token")
-	if err := os.WriteFile(file, []byte(token), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	return s.start(t, tunnel.Options{
 		ServerHost: "127.0.0.1", ServerPort: s.bind, Protocol: "tcp",
-		Handle: handle, Name: name, TokenFile: file, HeartbeatInterval: 1, Version: "0.0.0-e2e",
+		Handle: handle, Name: name, TokenFile: tokenFile(t, token), HeartbeatInterval: 1, Version: "0.0.0-e2e",
 		SSH: true, SSHTarget: "127.0.0.1", SSHPort: sshPort, SSHDomain: sshDomain,
 	})
 }
