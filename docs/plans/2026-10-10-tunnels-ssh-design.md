@@ -11,7 +11,7 @@ one thing that gets out of restrictive networks: HTTPS on 443. The machine may b
 VPS, or a cloud box — location does not matter, because the agent always dials out and the headend
 never dials in.
 
-v1 is a **native `ssh` experience**: an `ssh_config` `ProxyCommand` makes `ssh box1` work in any
+v1 is a **native `ssh` experience**: an `ssh_config` `ProxyCommand` makes `ssh alice-box1` work in any
 terminal, authenticated with Pocket ID. No host is exposed directly; no anonymous access.
 
 ## Goals
@@ -231,7 +231,7 @@ certain is done in Pocket ID (see `docs/design.md`).
   domain; `/authz` bearer matrix (owner, bad token, wrong host, default deny).
 - Integration/e2e: a real frps, an agent bridge, and a client that opens the WebSocket and checks an
   echo through to a local listener; the refusal matrix is unit-tested only.
-- Manual smoke: `ssh box1` through `tunnel dial`.
+- Manual smoke: `ssh alice-box1` through `tunnel dial`.
 
 ## Deferred: web terminal
 
