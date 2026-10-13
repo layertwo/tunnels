@@ -557,6 +557,43 @@ func TestSSHConfigPrintsBlock(t *testing.T) {
 	}
 }
 
+// A value that is not a domain is refused before it can be pasted into ~/.ssh/config: a newline in
+// it would end the Host line and let the rest of the value inject config.
+func TestSSHConfigRefusesInjectedAliasDomain(t *testing.T) {
+	w := newWorld(t)
+	w.loggedIn()
+	w.sshDomain = "ssh.tunnels.test"
+	if c := w.main("ssh-config", "--alias-domain", "evil.lan\nHost *"); c != 2 {
+		t.Fatalf("exit %d, want 2", c)
+	}
+	if w.out.String() != "" {
+		t.Errorf("printed a block for a bad alias domain:\n%s", w.out)
+	}
+	if !strings.Contains(w.err.String(), "alias domain") {
+		t.Errorf("stderr does not name the flag and say what a domain is:\n%s", w.err)
+	}
+}
+
+func TestValidAliasDomain(t *testing.T) {
+	for _, tc := range []struct {
+		domain string
+		ok     bool
+	}{
+		{"layertwo.lan", true},
+		{"x.layertwo.lan", true},
+		{"A-1.lan", true},
+		{"", false},
+		{".layertwo.lan", false},
+		{"layertwo.lan.", false},
+		{"evil.lan\nHost *", false},
+		{"layertwo lan", false},
+	} {
+		if got := validAliasDomain(tc.domain); got != tc.ok {
+			t.Errorf("validAliasDomain(%q) = %v, want %v", tc.domain, got, tc.ok)
+		}
+	}
+}
+
 func TestSSHConfigNotLoggedIn(t *testing.T) {
 	w := newWorld(t)
 	if c := w.main("ssh-config", "--alias-domain", "layertwo.lan"); c != 1 || !strings.Contains(w.err.String(), "tunnel login") {
