@@ -38,7 +38,7 @@ type Options struct {
 	SSH       bool   // publish an SSH service instead of a site
 	SSHTarget string // the SSH host to dial; a bare host, no port and no scheme
 	SSHPort   int    // the SSH host's port
-	SSHDomain string // the domain SSH tunnels live under; empty means the feature is off
+	SSHDomain string // the one host every SSH tunnel is published at; empty means the feature is off
 
 	HeartbeatInterval int // seconds; 0 means 30
 
@@ -72,8 +72,9 @@ func Build(o Options) (*v1.ClientCommonConfig, []v1.ProxyConfigurer, error) {
 		"requestHeaders": map[string]any{"set": map[string]string{"x-forwarded-proto": "https"}},
 	}
 	if o.SSH {
-		// frps has one subDomainHost, so the SSH subtree is reached by a custom domain, not a subdomain.
-		proxy["customDomains"] = []any{names.Label(o.Handle, o.Name) + "." + o.SSHDomain}
+		// frps has one subDomainHost, so the SSH subtree is one custom domain told apart by location.
+		proxy["customDomains"] = []any{o.SSHDomain}
+		proxy["locations"] = []any{"/" + names.Label(o.Handle, o.Name) + "/"}
 	} else {
 		proxy["subdomain"] = names.Label(o.Handle, o.Name)
 	}

@@ -35,8 +35,9 @@ Decisions taken during design:
   From phase 1, frps is the pinned official binary repackaged onto distroless. See Container
   Hardening for what that does and does not buy.
 - **Names.** The service is `tunnels.layertwo.dev`; sites are
-  `<handle>[-<name>].w.tunnels.layertwo.dev`, and SSH tunnels are
-  `<handle>[-<name>].ssh.tunnels.layertwo.dev` (see SSH).
+  `<handle>[-<name>].w.tunnels.layertwo.dev`. Every SSH tunnel is published at the one ssh host
+  `ssh.tunnels.layertwo.dev`, with the tunnel named by the first segment of the request path
+  (see SSH).
 
 Facts this design depends on were verified on 2026-10-07 against the frp v0.71.0 source, the
 Pocket ID v2.18.0 source and docs, Traefik's `forwardAuth` docs and the traefik-oidc-auth docs. A
@@ -205,10 +206,11 @@ and cannot see the host.
   in their own subtree, `w.tunnels.layertwo.dev`, so users can only ever name things under it
   and the service can add hosts (`status.tunnels...`) without a reserved-name list.
 - One subtree per protocol. frps has a single `subDomainHost` (here `w.tunnels.layertwo.dev`),
-  and frp's README says custom domains should not be subdomains of it, so
-  `*.ssh.tunnels.layertwo.dev` stays clear of it. SSH is implemented as a WebSocket bridge
-  published as an `http` proxy with a custom domain, so it reuses the sites' port and auth path
-  (see SSH), not tcpmux or SNI.
+  and frp's README says custom domains should not be subdomains of it, so the SSH host
+  `ssh.tunnels.layertwo.dev` stays clear of it. SSH is implemented as a WebSocket bridge published
+  as an `http` proxy at that one custom domain, with each tunnel told apart by an frp location, so
+  it reuses the sites' port and auth path (see SSH), not tcpmux or SNI. One host is one DNS record
+  and one certificate — no SSH wildcard.
 - Cloudflare's free certificate covers one level below `layertwo.dev`, so `*.w.tunnels.layertwo.dev`
   is a DNS-only record with its own cert-manager wildcard certificate. The apex is one level
   and can stay proxied. The home IP is already public (`send.layertwo.dev` resolves to it), but
@@ -358,17 +360,19 @@ verifies that same token right after, which is what makes any claim the broker r
 safe. (A machine token is recognised by its `client-` subject, skips userinfo, and resolves through the
 `machines` table to its own handle: implemented — see the [machines design](plans/2026-10-11-tunnels-machines-design.md).)
 
-**NewProxy hook.** The type must be http with no custom domains or locations. `proxy_name` must
-be `<handle>.<n>` and `subdomain` must be `<handle>` (n = `default`) or `<handle>-<n>` (n a valid
-name). Count the user's proxies on frps and refuse above `MAX_TUNNELS_PER_USER`. Set the
-bandwidth limit to `DEFAULT_BANDWIDTH_LIMIT` with mode `server`. **CloseProxy** only logs.
+**NewProxy hook.** A site proxy's type must be http with no custom domains or locations; its
+`proxy_name` must be `<handle>.<n>` and its `subdomain` must be `<handle>` (n = `default`) or
+`<handle>-<n>` (n a valid name). (An SSH proxy is the other accepted shape — one custom domain,
+one location, no `subdomain`; see SSH.) Count the user's proxies on frps and refuse above
+`MAX_TUNNELS_PER_USER`. Set the bandwidth limit to `DEFAULT_BANDWIDTH_LIMIT` with mode `server`.
+**CloseProxy** only logs.
 
-**`/authz`.** Compute the label from `X-Forwarded-Host` (outside the sites domain or malformed:
-deny). Find the owner row by handle. Allow if the visitor's `sub` equals the owner's `sub`, or a
-`shares(owner, tunnel, kind='user')` row matches the visitor's username (case-insensitive), or a
-`kind='group'` row matches one of the visitor's groups. Everything else, including an unknown
-owner, is the same 403. On allow, answer 200 with `X-Tunnel-User: <username>`, which the app
-sees. A group name containing a comma is unsupported (groups travel comma-separated).
+**`/authz`.** For a site, compute the label from `X-Forwarded-Host` (outside the sites domain or
+malformed: deny). Find the owner row by handle. Allow if the visitor's `sub` equals the owner's
+`sub`, or a `shares(owner, tunnel, kind='user')` row matches the visitor's username
+(case-insensitive), or a `kind='group'` row matches one of the visitor's groups. Everything else,
+including an unknown owner, is the same 403. On allow, answer 200 with `X-Tunnel-User: <username>`,
+which the app sees. A group name containing a comma is unsupported (groups travel comma-separated).
 
 **API.** Bearer access token verified locally against Pocket ID's JWKS (issuer, audience,
 expiry). `GET /api/me` repeats the Login hook's userinfo and handle logic, so the CLI learns its
@@ -418,7 +422,7 @@ secrets and overrides a file value. The settings are `SERVICE_HOST`, `SITES_DOMA
 `DEFAULT_BANDWIDTH_LIMIT` (10MB per second, frp's format), `RESERVED_HANDLES`,
 `POCKET_ID_URL`, `POCKET_ID_API_KEY` (the Pocket ID admin API the broker mints a machine's client
 with), `POCKET_ID_API_ID` (the Tunnels API id the minted client is granted access to),
-`SSH_DOMAIN` (the domain SSH tunnels live under; the file's `[ssh]` `domain` names it), `LOG_LEVEL`
+`SSH_DOMAIN` (the ssh host every tunnel is published at; the file's `[ssh]` `domain` names it), `LOG_LEVEL`
 (these are the environment-variable names, the override). Logs are structured JSON for
 logins, proxy registrations, denials and share changes, and never contain tokens. Outbound
 requests carry an explicit User-Agent. `DATABASE_URL` comes from the CNPG-generated secret
@@ -469,13 +473,25 @@ tunnel version
 
 Implemented; the homelab still needs the route (below). A creator runs `tunnel up PORT --ssh
 [--target HOST]` — PORT is the **target's** SSH port and HOST is a bare host, default
-`127.0.0.1` — and the agent publishes an ordinary `http` proxy for a loopback WebSocket bridge with
-the custom domain `<label>.<ssh domain>`. The terminal runs `tunnel dial HOST PORT`, the
-`ProxyCommand` in the block `tunnel ssh-config [--name NAME]` prints, presenting a Pocket ID bearer
-token. The route runs Traefik `forwardAuth` **only** — never the OIDC plugin, which would answer a
-bearer client with an HTML login page. frps is unchanged: the stream rides the existing
-`vhostHTTPPort` (8080) and frps routes by `Host` to the agent's bridge, which dials the target. It is
-owner-only for now, with no share support.
+`127.0.0.1` — and the agent publishes an ordinary `http` proxy for a loopback WebSocket bridge at
+the one ssh host, `SSH_DOMAIN`, carrying the tunnel's label as its single frp location,
+`/<label>/`. The terminal runs `tunnel dial NAME`, the `ProxyCommand` in the one block `tunnel
+ssh-config --alias-domain DOMAIN` prints, presenting a Pocket ID bearer token. `dial` takes the
+first dotted component of NAME as the label and sends it as the request path; the alias domain
+after the dot is the connecting machine's own convention, which the server never learns. The route
+runs Traefik `forwardAuth` **only** — never the OIDC plugin, which would answer a bearer client with
+an HTML login page. frps is unchanged: the stream rides the existing `vhostHTTPPort` (8080) and
+frps routes by `Host` and location to the agent's bridge, which dials the target. It is owner-only
+for now, with no share support.
+
+The broker and frps agree on the same bytes: `NewProxy` accepts an SSH proxy only when its one
+custom domain is exactly `SSH_DOMAIN` and its one location is exactly the publisher's own
+`/<label>/` (the trailing boundary keeps `/alice/` from swallowing `/alicex/`), and `/authz` reads
+the label from the first segment of `X-Forwarded-Uri` for exactly that host. `SSH_DOMAIN` must not
+be, or lie under, `SITES_DOMAIN`: `decide` checks the SSH host before the sites, so the two would
+overlap and a site of that name would be unreachable. The broker refuses the configuration at
+startup, naming the variable. The host is a constant now, so the old equality check no longer
+covers the suffix case.
 
 Whether SSH is on is the broker's `[ssh]` section (`enabled`, `domain`), overridden by the
 environment's `SSH_DOMAIN`; with no file at all, `SSH_DOMAIN` alone turns it on. With no `[ssh]`
@@ -484,11 +500,14 @@ section an SSH custom domain is refused in `NewProxy`, an SSH host is denied on 
 
 The homelab repo needs, and this repo cannot do:
 
-- a `*.ssh.tunnels.layertwo.dev` DNS record, **DNS-only** (no Cloudflare proxy), like the sites
-  wildcard — Cloudflare's free certificate does not cover the extra level;
-- a wildcard certificate for `*.ssh.tunnels.layertwo.dev` from the existing DNS-01 issuer;
-- a Traefik `Host(*.ssh.tunnels.layertwo.dev)` route with `forwardAuth` only (no OIDC plugin), whose
-  `authRequestHeaders` include `Authorization` so the bearer token reaches the broker.
+- one `ssh.tunnels.layertwo.dev` DNS record, **DNS-only** (no Cloudflare proxy), like the sites
+  record — Cloudflare's free certificate does not cover the extra level;
+- one certificate for that single host from the existing DNS-01 issuer, not a wildcard;
+- a Traefik `Host(ssh.tunnels.layertwo.dev)` route with `forwardAuth` only (no OIDC plugin), whose
+  `authRequestHeaders` include `Authorization` so the bearer token reaches the broker and
+  `X-Forwarded-Uri` so the broker sees the path. Confirm on the first dial that Traefik sets that
+  header itself: if it does not, `/authz` sees no label and denies every SSH request — dark, but
+  not broken open.
 
 frps and the NetworkPolicy are unchanged: no new port, Traefik to frps :8080, frps to the broker,
 the broker to Postgres and Pocket ID.
@@ -581,10 +600,10 @@ tunnels.layertwo.dev                      proxied; covered by the existing *.lay
 
 | Threat | Control |
 |--------|---------|
-| Creator claims or squats another user's name | plugin binds `user` to the verified handle; NewProxy enforces the `<handle>.` proxy name and `<handle>[-<name>]` subdomain; duplicates fail in frps |
+| Creator claims or squats another user's name | plugin binds `user` to the verified handle; NewProxy enforces the `<handle>.` proxy name and, for a site, the `<handle>[-<name>]` subdomain; duplicates fail in frps |
 | Somebody takes a handle before its owner logs in | a handle is the username of whoever logs in with it first, then belongs to that `sub` for good; keep self-service username changes off in Pocket ID, so nobody can rename themselves into a name that is not theirs |
 | Creator takes over a live control connection | Login with a run ID is refused if frps shows it online under another user |
-| Non-http exposure, custom domains | plugin allows only http proxies with no custom domains or locations |
+| Non-http exposure, custom domains | the plugin accepts only http: a site with no custom domains or locations, or an SSH proxy with one custom domain and one location (see SSH) |
 | Forged or stolen-for-another-audience token | frps verifies signature, issuer, expiry and audience (API resource); userinfo must also succeed |
 | Man-in-the-middle on the control channel captures a token | frp skips certificate verification unless `trustedCaFile` is set; every client config sets it and the CLI embeds a CA bundle |
 | Revoked creator keeps a tunnel | 1 h tokens, refresh stops, heartbeats (30 s / 90 s) end the tunnel; the Ping hook (implemented, `"Ping"` in the plugin `ops` since v0.2.0) closes the window to one heartbeat by rejecting a disabled or non-creator account |
@@ -655,9 +674,9 @@ All of them fail closed.
   metrics and machines (both implemented; machines are broker-owned principals with their own key
   and row, see the [machines design](plans/2026-10-11-tunnels-machines-design.md), and metrics a
   scrape plus NetworkPolicy).
-- **SSH (implemented):** `tunnel up PORT --ssh [--target HOST]`, `tunnel ssh-config [--name NAME]`
-  and `tunnel dial HOST PORT`; the broker's `[ssh]` section; the agent's loopback WebSocket bridge.
-  The homelab manifests for the `*.ssh.` route are a separate change (see SSH).
+- **SSH (implemented):** `tunnel up PORT --ssh [--target HOST]`, `tunnel ssh-config
+  --alias-domain DOMAIN` and `tunnel dial NAME`; the broker's `[ssh]` section; the agent's loopback
+  WebSocket bridge. The homelab manifests for the one ssh host are a separate change (see SSH).
 - **Later:** a web UI, live tunnel status, frps HA by client fan-out. **v0.4.0** also moves the
   broker's settings into a configuration file — one section per feature, and a feature with no section
   is **off** when a file is present (with no file, behaviour is unchanged) (see the [broker config
@@ -806,7 +825,7 @@ Also checked without a cluster: the production frps ConfigMap under the producti
 - Plan 2b (deploying the broker), from the Tasks 4-8 review:
   - frps `auth.additionalScopes` gets `NewWorkConns` (see "Revocation needs explicit settings"); the Phase 0 clients and frps used `["HeartBeats"]` only.
   - The plugin URL carries the secret and frps writes it to its own log whenever the broker is unreachable (`send Login request to plugin [broker] error: Post "http://...:8080/plugin/<secret>?..."`). The control that matters is a NetworkPolicy that lets only the frps pod reach `/plugin/`; treat frps logs as secret-bearing and rotate the secret if they leak.
-  - `/authz` trusts `X-Forwarded-Host`, `X-Tunnels-Sub` and `X-Tunnels-User` completely. The forwardAuth middleware must list `X-Tunnels-Sub` and `X-Tunnels-User` in `authResponseHeaders` (Traefik then deletes any copy the visitor sent before it copies the gate's), must leave `trustForwardHeader` at `false` (with `true` a creator could send `Host: alice.<sites>` with `X-Forwarded-Host: bob.<sites>`, be authorised against their own label and be served alice's site), and `/authz` must be reachable by Traefik only. Leaving `authRequestHeaders` unset is fine; listing only the two identity headers also works, because Traefik sets `X-Forwarded-Host` afterwards.
+  - `/authz` trusts `X-Forwarded-Host`, `X-Forwarded-Uri`, `X-Tunnels-Sub` and `X-Tunnels-User` completely. The forwardAuth middleware must list `X-Tunnels-Sub` and `X-Tunnels-User` in `authResponseHeaders` (Traefik then deletes any copy the visitor sent before it copies the gate's), must leave `trustForwardHeader` at `false` (with `true` a creator could send `Host: alice.<sites>` with `X-Forwarded-Host: bob.<sites>`, be authorised against their own label and be served alice's site), and `/authz` must be reachable by Traefik only. Leaving `authRequestHeaders` unset is fine; listing only the two identity headers also works, because Traefik sets `X-Forwarded-Host` afterwards.
   - Rate limit `/api/` and the frps route in Traefik. Every Login reaches the broker before frps checks anything, and a token with a key id nobody has seen makes the broker fetch the provider's key set (go-oidc has no limit on that).
   - Cap the proxy count in frps as well if the broker's limit must hold: the dashboard lags the plugin's answer, so many clients started at once can overshoot it.
 - Revocation: a machine's access token lasts one hour; the CLI re-signs an assertion with the machine's key and exchanges it for a fresh token while the machine's row is enabled, so disabling or removing the row ends its tunnel within one heartbeat (the Ping hook rejects) and the token expires within the hour regardless.

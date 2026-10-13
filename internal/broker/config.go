@@ -37,8 +37,8 @@ type Config struct {
 	MachinesEnabled bool
 	MetricsEnabled  bool
 
-	// SSHDomain is the domain SSH tunnels live under, without a scheme, a port or a trailing dot. It is
-	// empty when the feature is off, and the bootstrap document then omits it.
+	// SSHDomain is the one host every SSH tunnel is published at, without a scheme, a port or a
+	// trailing dot. It is empty when the feature is off, and the bootstrap document then omits it.
 	SSHDomain string
 
 	FrpsDashboardURL      string
@@ -199,10 +199,10 @@ func LoadConfig(getenv func(string) string, file *FileConfig) (Config, error) {
 	if sshOn {
 		c.SSHDomain = host("SSH_DOMAIN", required("SSH_DOMAIN", pick(getenv, "SSH_DOMAIN", ssh.Domain, "")))
 	}
-	// With the two domains equal decide's site-first dispatch claims every SSH host, so the feature
-	// would be silently dead: refuse the pair rather than start a broker whose SSH routes never fire.
-	if c.SSHDomain != "" && c.SSHDomain == c.SitesDomain {
-		bad("SSH_DOMAIN", "must differ from SITES_DOMAIN")
+	// decide checks the SSH host before the sites, so an SSH host equal to, or under, SITES_DOMAIN
+	// would shadow a site of that name: a site so named could never be reached. Refuse the pair.
+	if c.SSHDomain != "" && (c.SSHDomain == c.SitesDomain || strings.HasSuffix(c.SSHDomain, "."+c.SitesDomain)) {
+		bad("SSH_DOMAIN", "must not be SITES_DOMAIN or under it")
 	}
 
 	// The credentials are separate variables; none in the URL, which would also end up in errors and logs.

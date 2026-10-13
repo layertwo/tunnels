@@ -40,10 +40,10 @@ type LookupObserver interface {
 // request (X-Tunnels-Sub, X-Tunnels-User, X-Tunnels-Groups). The owner gets in, and so does a
 // visitor the owner has shared the tunnel with.
 //
-// A host under SSHDomain is decided from the bearer token instead: the terminal has no browser and
-// no cookie, so it presents a Pocket ID access token and only the owner is let in. The two modes do
-// not cross-talk — an identity header never authorizes an SSH host and a bearer token never
-// authorizes a site host.
+// The SSH host is decided from the bearer token instead: the terminal has no browser and no
+// cookie, so it presents a Pocket ID access token; the tunnel it asks for is named by the request
+// path, and only its owner is let in. The two modes do not cross-talk — an identity header never
+// authorizes an SSH host and a bearer token never authorizes a site host.
 //
 // Everything that is not a clear allow is the same empty 403, so nothing tells a name that exists
 // from one that does not. A missing or invalid bearer token is a 401, and a store that cannot
@@ -54,7 +54,7 @@ type Authz struct {
 	Shares      ShareMatcher
 	Verifier    TokenVerifier // checks an SSH visitor's bearer token locally; nil when SSH is off
 	SitesDomain string        // the domain sites live under, without a port or a trailing dot
-	SSHDomain   string        // the domain SSH tunnels live under; empty when the feature is off
+	SSHDomain   string        // the one host every SSH tunnel is served at; empty when the feature is off
 	Timeout     time.Duration // for the store lookup; zero means 5 s
 	Log         *slog.Logger
 	Metrics     LookupObserver // optional; times the store lookups
@@ -110,7 +110,7 @@ func (a Authz) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // decide picks the mode from the host and refuses a host under neither domain. The subtrees are
-// checked in a fixed order, so a host that somehow matches both is a site.
+// checked in a fixed order, so a host that somehow matches both is an SSH host.
 func (a Authz) decide(r *http.Request) outcome {
 	// A header that is missing, empty or repeated is refused: with more than one value there is no
 	// telling which one the gate set. The headers are indexed by their canonical names (how net/http
@@ -120,14 +120,22 @@ func (a Authz) decide(r *http.Request) outcome {
 	if len(hosts) != 1 {
 		return outcome{reason: "host", status: http.StatusForbidden}
 	}
+	if a.SSHDomain != "" && strings.EqualFold(hosts[0], a.SSHDomain) {
+		// The one SSH host names no tunnel: frps routes each tunnel on /<label>/, so the label
+		// comes from the request path, under the single-value rule the comment above explains.
+		uris := r.Header["X-Forwarded-Uri"]
+		if len(uris) != 1 {
+			return outcome{reason: "host", status: http.StatusForbidden}
+		}
+		label, ok := names.SSHLabel(uris[0])
+		if !ok {
+			return outcome{reason: "host", status: http.StatusForbidden}
+		}
+		return a.decideSSH(r, label)
+	}
 	if a.SitesDomain != "" {
 		if label, ok := names.SiteLabel(hosts[0], a.SitesDomain); ok {
 			return a.decideSite(r, label)
-		}
-	}
-	if a.SSHDomain != "" {
-		if label, ok := names.SSHLabel(hosts[0], a.SSHDomain); ok {
-			return a.decideSSH(r, label)
 		}
 	}
 	return outcome{reason: "host", status: http.StatusForbidden}

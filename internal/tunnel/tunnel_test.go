@@ -100,8 +100,9 @@ func TestBuildSSHFields(t *testing.T) {
 	if p.Name != "blog" || p.Type != "http" {
 		t.Errorf("proxy %q type %q, want blog and http", p.Name, p.Type)
 	}
-	if !reflect.DeepEqual(p.CustomDomains, []string{"alice-blog.ssh.tunnels.test"}) {
-		t.Errorf("custom domains = %v, want the one ssh host", p.CustomDomains)
+	if !reflect.DeepEqual(p.CustomDomains, []string{"ssh.tunnels.test"}) ||
+		!reflect.DeepEqual(p.Locations, []string{"/alice-blog/"}) {
+		t.Errorf("custom domains %v, locations %v; want the shared ssh host and the one location", p.CustomDomains, p.Locations)
 	}
 	if p.SubDomain != "" {
 		t.Errorf("subdomain = %q, want empty: an ssh tunnel has a custom domain, not a site subdomain", p.SubDomain)
@@ -118,8 +119,9 @@ func TestBuildSSHDefaultTunnel(t *testing.T) {
 	o := opts()
 	o.SSH, o.Name, o.SSHTarget, o.SSHPort, o.SSHDomain = true, "", "127.0.0.1", 22, "ssh.tunnels.test"
 	_, p := build(t, o)
-	if p.Name != "default" || !reflect.DeepEqual(p.CustomDomains, []string{"alice.ssh.tunnels.test"}) {
-		t.Errorf("proxy %q custom domains %v, want default and alice.ssh.tunnels.test", p.Name, p.CustomDomains)
+	if p.Name != "default" || !reflect.DeepEqual(p.CustomDomains, []string{"ssh.tunnels.test"}) ||
+		!reflect.DeepEqual(p.Locations, []string{"/alice/"}) {
+		t.Errorf("proxy %q custom domains %v locations %v, want default, the shared ssh host and the one location", p.Name, p.CustomDomains, p.Locations)
 	}
 }
 

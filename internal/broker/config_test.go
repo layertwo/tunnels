@@ -518,6 +518,15 @@ func TestLoadConfigSSH(t *testing.T) {
 	delete(different, "SITES_DOMAIN")
 	different["SSH_DOMAIN"] = "ssh.env.test"
 	differentFile := &FileConfig{Tunnels: &tunnelsFile{SitesDomain: ptr("w.file.test")}, SSH: &sshFile{Domain: ptr("ssh.tunnels.test")}}
+	// decide's site-first dispatch claims every host the sites domain owns, so an SSH host under it is
+	// as dead as an equal one. The dot boundary in the suffix check must still allow a domain that
+	// merely ends with the sites domain's characters.
+	underSites := sshVars()
+	underSites["SSH_DOMAIN"] = "ssh.w.tunnels.layertwo.dev"
+	sibling := sshVars()
+	sibling["SSH_DOMAIN"] = "ssh.tunnels.layertwo.dev"
+	endsWithSites := sshVars()
+	endsWithSites["SSH_DOMAIN"] = "xw.tunnels.layertwo.dev"
 	tests := []struct {
 		name, want, wantErr string
 		vars                map[string]string
@@ -534,6 +543,9 @@ func TestLoadConfigSSH(t *testing.T) {
 		{"a section with a trailing dot is refused", "", "SSH_DOMAIN", sshVars(), &FileConfig{SSH: &sshFile{Domain: ptr("ssh.tunnels.test.")}}},
 		{"an enabled section needs a domain", "", "SSH_DOMAIN", sshVars(), &FileConfig{SSH: &sshFile{Enabled: ptr(true)}}},
 		{"equal to the sites domain is refused", "", "SSH_DOMAIN", sameAsSites, &FileConfig{SSH: &sshFile{Domain: ptr("w.tunnels.layertwo.dev")}}},
+		{"under the sites domain is refused", "", "SSH_DOMAIN", underSites, &FileConfig{SSH: &sshFile{Domain: ptr("ssh.w.tunnels.layertwo.dev")}}},
+		{"a sibling of the sites domain still loads", "ssh.tunnels.layertwo.dev", "", sibling, &FileConfig{SSH: &sshFile{Domain: ptr("ssh.tunnels.layertwo.dev")}}},
+		{"a domain that merely ends with the sites domain loads", "xw.tunnels.layertwo.dev", "", endsWithSites, &FileConfig{SSH: &sshFile{Domain: ptr("xw.tunnels.layertwo.dev")}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
