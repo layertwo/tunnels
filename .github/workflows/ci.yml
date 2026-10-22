@@ -32,8 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        # no plain postgres image exists on ghcr; this is the ECR Public mirror of the official image
-        image: public.ecr.aws/docker/library/postgres:18
+        image: postgres:18
         env:
           POSTGRES_PASSWORD: postgres
         ports:
@@ -82,7 +81,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: public.ecr.aws/docker/library/postgres:18
+        image: postgres:18
         env:
           POSTGRES_PASSWORD: postgres
         ports:
