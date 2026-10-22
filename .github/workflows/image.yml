@@ -59,7 +59,7 @@ jobs:
           out=$(docker run --rm smoke:${{ matrix.component }} --version)
           echo "$out"
           case "${{ matrix.component }}" in
-            frps) test "$out" = "0.71.0" ;;
+            frps) grep -Fq "frps:v$out@" Dockerfile.frps ;; # the image is the one it reports
             broker) test "$out" = "${GITHUB_SHA::7}" ;;
           esac
 
