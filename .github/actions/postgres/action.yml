@@ -1,0 +1,42 @@
+name: Postgres
+description: Run the CI Postgres from a cached image, pulling only on a cold cache.
+
+# Anonymous pulls from ECR Public have a 500 GB a month allowance per IP, and some GitHub
+# runner IPs have spent it: the service container used to fail at "Initialize containers"
+# before any test ran. The image is cached, and a cold cache tries registries with separate
+# allowances (they served this tag with the same index digest when this was written).
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/postgres.tar
+        key: postgres-18 # change with the tag below
+    - shell: bash
+      env:
+        IMAGE: public.ecr.aws/docker/library/postgres:18
+      run: |
+        tar="$RUNNER_TEMP/postgres.tar"
+        if [ ! -f "$tar" ]; then
+          for source in \
+            mirror.gcr.io/library/postgres:18 \
+            public.ecr.aws/docker/library/postgres:18 \
+            docker.io/library/postgres:18; do
+            timeout 120 docker pull "$source" && docker tag "$source" "$IMAGE" && break
+          done
+          if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+            echo "could not pull $IMAGE from any registry" >&2
+            exit 1
+          fi
+          docker save -o "$tar" "$IMAGE"
+        fi
+        docker load -i "$tar"
+        docker run -d --name postgres -p 5432:5432 -e POSTGRES_PASSWORD=postgres --pull=never "$IMAGE"
+        # host and port: the entrypoint's init server listens on a socket only, so a plain
+        # pg_isready could pass before the real server is up.
+        for _ in $(seq 60); do
+          docker exec postgres pg_isready -h 127.0.0.1 -U postgres && exit 0
+          sleep 2
+        done
+        docker logs postgres
+        exit 1
