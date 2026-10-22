@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/coreos/go-oidc/v3 v3.21.0
-	github.com/fatedier/frp v0.71.0
+	github.com/fatedier/frp v0.71.1
 	github.com/go-jose/go-jose/v4 v4.1.6
 	github.com/gorilla/websocket v1.5.3
 	github.com/hashicorp/yamux v0.1.2
@@ -23,6 +23,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/fatedier/golib v0.8.2 // indirect
+	github.com/fatedier/yamux v0.2.0 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
