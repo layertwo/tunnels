@@ -2,6 +2,6 @@
 # github.com/fatedier/frp version in go.mod (Renovate groups them).
 FROM ghcr.io/fatedier/frps:v0.71.1@sha256:48720c81f048e842f7f0b8053753c1a8514053d59d2dee8a953f67995de73a18 AS frps
 
-FROM gcr.io/distroless/static:nonroot@sha256:d62067879de890a1def9da0e7766b7d20810a5e5555cef8506b752437d7a3e88
+FROM gcr.io/distroless/static:nonroot@sha256:18f4cc26c9ffa7f20a359298be7deadac5c607c8e03a02b8119f1a5fc2f82c99
 COPY --from=frps /usr/bin/frps /usr/bin/frps
 ENTRYPOINT ["/usr/bin/frps"]
