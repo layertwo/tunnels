@@ -1,6 +1,6 @@
 # frps on distroless: upstream's binary, without a shell. The tag and digest move together with the
 # github.com/fatedier/frp version in go.mod (Renovate groups them).
-FROM ghcr.io/fatedier/frps:v0.71.1@sha256:48720c81f048e842f7f0b8053753c1a8514053d59d2dee8a953f67995de73a18 AS frps
+FROM ghcr.io/fatedier/frps:v0.72.0@sha256:17abb20dd392557a44070d9726954630c0eb1f7a9bd6ead5ae9150d165179ea4 AS frps
 
 FROM gcr.io/distroless/static:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329
 COPY --from=frps /usr/bin/frps /usr/bin/frps
