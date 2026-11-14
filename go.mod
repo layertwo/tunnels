@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/fatedier/frp v0.72.0
-	github.com/go-jose/go-jose/v4 v4.1.7
+	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/hashicorp/yamux v0.1.2
 	github.com/jackc/pgx/v5 v5.12.0
